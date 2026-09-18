@@ -5,7 +5,6 @@ import android.content.ClipboardManager
 import android.content.ComponentName
 import android.content.Context
 import android.content.SharedPreferences
-import android.graphics.Bitmap
 import android.graphics.drawable.BitmapDrawable
 import android.media.AudioManager
 import android.net.Uri
@@ -23,6 +22,7 @@ import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -130,6 +130,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
@@ -226,7 +227,6 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-// Extract dominant and secondary colors from album artwork
 suspend fun extractArtworkPaletteColors(context: Context, imageUrl: String): Pair<Color, Color> = withContext(Dispatchers.IO) {
     if (imageUrl.isBlank()) {
         return@withContext Pair(Color(0xFF1E2836), Color(0xFF0D1520))
@@ -948,7 +948,7 @@ private const val KEY_LAST_AUDIO_URL = "last_audio_url"
 private const val KEY_LAST_ARTWORK_URL = "last_artwork_url"
 private const val KEY_LAST_DURATION_TXT = "last_duration_txt"
 private const val KEY_LAST_POSITION_MS = "last_position_ms"
-private const val KEY_LAST_DURATION_MS = "last_duration_MS"
+private const val KEY_LAST_DURATION_MS = "last_duration_ms"
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
@@ -1020,7 +1020,7 @@ fun SonoraPlayerScreen() {
     var activeAudioUrl by remember { mutableStateOf("") }
     var activeDurationFormatted by remember { mutableStateOf("0:00") }
 
-    // Dynamic Artwork Ambient Background Palette Colors
+    // Dynamic Artwork Ambient Palette Colors
     var rawDominantColor by remember { mutableStateOf(Color(0xFF1E2836)) }
     var rawSecondaryColor by remember { mutableStateOf(Color(0xFF0D1520)) }
 
@@ -1123,7 +1123,6 @@ fun SonoraPlayerScreen() {
         currentTrackIndex = player.currentMediaItemIndex
     }
 
-    // Auto-updating Infinite Play Next Queue (Adds 10-15 completely new songs when 4-5 songs remain)
     var isAutoQueueFilling by remember { mutableStateOf(false) }
 
     fun ensureInfiniteQueueFilled(player: Player) {
@@ -1728,9 +1727,8 @@ fun SonoraPlayerScreen() {
                             },
                             colors = CardDefaults.cardColors(containerColor = Color(0xFF1E2631)),
                             shape = RoundedCornerShape(8.dp)
-                        ) {
-                            Text("End of Current Track", color = Color.White, fontSize = 15.sp, modifier = Modifier.padding(14.dp))
-                        }
+                    ) {
+                        Text("End of Current Track", color = Color.White, fontSize = 15.sp, modifier = Modifier.padding(14.dp))
                     }
                     if (sleepTimerRemainingSeconds > 0L || stopAfterCurrentTrack) {
                         Spacer(modifier = Modifier.height(6.dp))
@@ -1748,7 +1746,7 @@ fun SonoraPlayerScreen() {
                             Text("Turn Off Timer", color = Color(0xFFFF5252), fontSize = 15.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(14.dp))
                         }
                     }
-                
+                }
             },
             confirmButton = {},
             dismissButton = {
@@ -1980,7 +1978,6 @@ fun SonoraPlayerScreen() {
             ) {
                 when (selectedNavTab) {
                     0 -> {
-                        // Home Screen with 3x3 Swipeable Speed Dial (4 pages = 3 swipes right)
                         val allSpeedDialSongs = remember(mostPlayedTracks, moodTracks) {
                             val combined = mutableListOf<FullTrackItem>()
                             combined.addAll(mostPlayedTracks)
@@ -2073,7 +2070,6 @@ fun SonoraPlayerScreen() {
                                     )
                                 }
 
-                                // 3x3 Horizontal Pager (Swipes 3 times to the right)
                                 item {
                                     if (isMoodLoading && allSpeedDialSongs.isEmpty()) {
                                         Box(
@@ -2133,7 +2129,6 @@ fun SonoraPlayerScreen() {
                                     }
                                 }
 
-                                // 4 Pagination dots corresponding to the 4 pages
                                 item {
                                     Row(
                                         modifier = Modifier
@@ -2155,7 +2150,6 @@ fun SonoraPlayerScreen() {
                                     }
                                 }
 
-                                // Keep Listening Section Title
                                 item {
                                     Text(
                                         text = "Keep listening",
@@ -2166,7 +2160,6 @@ fun SonoraPlayerScreen() {
                                     )
                                 }
 
-                                // Keep Listening Carousel
                                 item {
                                     LazyRow(
                                         modifier = Modifier.fillMaxWidth().padding(bottom = 84.dp),
@@ -2213,7 +2206,6 @@ fun SonoraPlayerScreen() {
                     1 -> {
                         Box(modifier = Modifier.fillMaxSize().statusBarsPadding()) {
                             Column(modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
-                                // Search Header with keyboard Enter & Search Icon
                                 Row(
                                     modifier = Modifier.fillMaxWidth().padding(vertical = 10.dp),
                                     verticalAlignment = Alignment.CenterVertically
@@ -2630,7 +2622,7 @@ fun SonoraPlayerScreen() {
                 }
             }
 
-            // Fixed Bottom Navigation Bar (No cutoff: windowInsets set cleanly, no duplicate navigationBarsPadding)
+            // Bottom Navigation Bar
             NavigationBar(
                 containerColor = Color(0xFF0A0F14),
                 contentColor = Color.White,
@@ -2682,7 +2674,7 @@ fun SonoraPlayerScreen() {
             }
         }
 
-        // Full Screen Now Playing View with Artwork-Adaptive Ambient Background
+        // Gesture-Driven Drag Sheet: Full Screen Now Playing View
         AnimatedVisibility(
             visible = isPlayerExpanded,
             enter = slideInVertically(initialOffsetY = { it }),
@@ -2702,6 +2694,14 @@ fun SonoraPlayerScreen() {
                     )
                     .statusBarsPadding()
                     .navigationBarsPadding()
+                    .pointerInput(Unit) {
+                        detectVerticalDragGestures { _, dragAmount ->
+                            // Swipe down to dismiss / collapse player
+                            if (dragAmount > 60f) {
+                                isPlayerExpanded = false
+                            }
+                        }
+                    }
             ) {
                 Column(
                     modifier = Modifier
@@ -2875,8 +2875,7 @@ fun SonoraPlayerScreen() {
 
                     Row(
                         modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically
-                        ,
+                        verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.SpaceEvenly
                     ) {
                         Box(
