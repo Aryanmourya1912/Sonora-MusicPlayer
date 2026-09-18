@@ -483,4 +483,28 @@ fun SonoraPlayerScreen() {
                     onValueChangeFinished = {
                         controller?.seekTo(sliderDragValue.toLong())
                         currentPosition = sliderDragValue.toLong()
-                        isDraggingSlider = f
+                        isDraggingSlider = false
+                    },
+                    valueRange = 0f..maxDurationFloat,
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(
+                        text = formatTime(if (isDraggingSlider) sliderDragValue.toLong() else currentPosition),
+                        fontSize = 11.sp,
+                        color = Color(0xFF94A3B8)
+                    )
+                    Text(
+                        text = formatTime(totalDuration),
+                        fontSize = 11.sp,
+                        color = Color(0xFF94A3B8)
+                    )
+                }
+            }
+        }
+    }
+}
