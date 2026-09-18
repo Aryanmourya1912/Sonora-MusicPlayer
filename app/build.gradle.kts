@@ -2,6 +2,7 @@ plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
+    id("kotlin-kapt")
 }
 
 android {
@@ -53,6 +54,12 @@ dependencies {
     implementation("androidx.media3:media3-session:$media3Version")
     implementation("androidx.media3:media3-common:$media3Version")
 
-    // Coil library to load album covers from URLs
+    // Coil Image Loading
     implementation("io.coil-kt:coil-compose:2.7.0")
+
+    // Room Database
+    val roomVersion = "2.6.1"
+    implementation("androidx.room:room-runtime:$roomVersion")
+    implementation("androidx.room:room-ktx:$roomVersion")
+    kapt("androidx.room:room-compiler:$roomVersion")
 }
