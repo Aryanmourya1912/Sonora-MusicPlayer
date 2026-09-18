@@ -5,10 +5,7 @@ plugins {
     id("kotlin-kapt")
 }
 
-// Read GitHub Actions run number, defaulting to 1 for local compilation
 val gitHubRunNumber = System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull() ?: 1
-
-// Offset ensures the new automated code is strictly greater than any build already on your device
 val autoVersionCode = gitHubRunNumber + 10
 val autoVersionName = "1.1.$gitHubRunNumber"
 
@@ -20,8 +17,6 @@ android {
         applicationId = "com.example.music"
         minSdk = 26
         targetSdk = 35
-
-        // Automatically increments on every commit pushed to GitHub
         versionCode = autoVersionCode
         versionName = autoVersionName
     }
@@ -56,6 +51,8 @@ dependencies {
 
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.material3:material3")
+    // Official Google Material Vector Icons library for high-resolution graphics
+    implementation("androidx.compose.material:material-icons-extended")
 
     // Media3 Audio Engine
     val media3Version = "1.5.1"
