@@ -5,6 +5,13 @@ plugins {
     id("kotlin-kapt")
 }
 
+// Read GitHub Actions run number, defaulting to 1 for local compilation
+val gitHubRunNumber = System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull() ?: 1
+
+// Offset ensures the new automated code is strictly greater than any build already on your device
+val autoVersionCode = gitHubRunNumber + 10
+val autoVersionName = "1.1.$gitHubRunNumber"
+
 android {
     namespace = "com.example.music"
     compileSdk = 35
@@ -13,9 +20,10 @@ android {
         applicationId = "com.example.music"
         minSdk = 26
         targetSdk = 35
-        // Increment versionCode so Android treats new APKs as true updates
-        versionCode = 2
-        versionName = "1.1.0"
+
+        // Automatically increments on every commit pushed to GitHub
+        versionCode = autoVersionCode
+        versionName = autoVersionName
     }
 
     buildTypes {
