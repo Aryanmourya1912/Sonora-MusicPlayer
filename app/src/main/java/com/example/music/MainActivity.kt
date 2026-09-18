@@ -9,6 +9,7 @@ import android.util.Base64
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -22,6 +23,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
@@ -105,6 +107,21 @@ data class FullTrackItem(
     val durationFormatted: String
 )
 
+data class DiscoveryCategory(
+    val label: String,
+    val icon: String,
+    val searchQuery: String
+)
+
+val DiscoveryCategoryList = listOf(
+    DiscoveryCategory("Trending", "🔥", "Top Trending Hits"),
+    DiscoveryCategory("Workout", "⚡", "Gym Workout Motivation"),
+    DiscoveryCategory("Chill", "☕", "Lofi Chill Beats"),
+    DiscoveryCategory("Party", "🎉", "Party Dance Hits"),
+    DiscoveryCategory("Focus", "🎧", "Deep Focus Beats"),
+    DiscoveryCategory("Romance", "💖", "Romantic Love Songs")
+)
+
 private val SonoraThemeColors = darkColorScheme(
     primary = Color(0xFF7C4DFF),
     background = Color(0xFF0C0C11),
@@ -173,7 +190,6 @@ fun decryptMediaUrl(encryptedUrl: String): String {
     }
 }
 
-// Builds an AndroidX MediaItem supporting both local file URIs and remote HTTP streams
 fun buildMediaItem(track: FullTrackItem): MediaItem {
     val metadata = MediaMetadata.Builder()
         .setTitle(track.title)
@@ -213,7 +229,6 @@ fun mediaItemToTrack(item: MediaItem): FullTrackItem {
     )
 }
 
-// Background file downloader: streams audio bytes directly into app storage
 suspend fun downloadTrackToStorage(context: Context, track: FullTrackItem): String? = withContext(Dispatchers.IO) {
     try {
         val downloadFolder = File(context.filesDir, "sonora_offline").apply { if (!exists()) mkdirs() }
@@ -460,7 +475,6 @@ fun SonoraPlayerScreen() {
     val allPlaylists by dao.getAllPlaylists().collectAsState(initial = emptyList())
     val downloadedSongs by dao.getAllDownloadedSongs().collectAsState(initial = emptyList())
 
-    // 0: Explore, 1: Liked Songs, 2: Playlists, 3: Downloads
     var selectedTab by remember { mutableIntStateOf(0) }
     var viewingPlaylist by remember { mutableStateOf<PlaylistEntity?>(null) }
 
@@ -471,7 +485,7 @@ fun SonoraPlayerScreen() {
     var controller by remember { mutableStateOf<MediaController?>(null) }
     var isPlaying by remember { mutableStateOf(false) }
 
-    // Queue state
+    // Up Next Queue state
     var queueList by remember { mutableStateOf<List<FullTrackItem>>(emptyList()) }
     var currentTrackIndex by remember { mutableIntStateOf(0) }
     var endlessRadioEnabled by remember { mutableStateOf(true) }
@@ -480,14 +494,21 @@ fun SonoraPlayerScreen() {
     // Download in-progress tracker
     var downloadingSongIds by remember { mutableStateOf<Set<String>>(emptySet()) }
 
+    // Search and Discovery States
     var searchQuery by remember { mutableStateOf("") }
     var searchResults by remember { mutableStateOf<List<FullTrackItem>>(emptyList()) }
     var isSearching by remember { mutableStateOf(false) }
     var searchStatusMessage by remember { mutableStateOf<String?>(null) }
 
+    // Home Speed Dial Discovery States
+    var selectedCategory by remember { mutableStateOf(DiscoveryCategoryList[0]) }
+    var speedDialSongs by remember { mutableStateOf<List<FullTrackItem>>(emptyList()) }
+    var isSpeedDialLoading by remember { mutableStateOf(false) }
+
+    // Active track state
     var activeSongId by remember { mutableStateOf("") }
     var activeTitle by remember { mutableStateOf("No Track Playing") }
-    var activeArtist by remember { mutableStateOf("Search and tap any song above") }
+    var activeArtist by remember { mutableStateOf("Search or pick a song below") }
     var activeArtworkUrl by remember { mutableStateOf("") }
     var activeAudioUrl by remember { mutableStateOf("") }
     var activeDurationFormatted by remember { mutableStateOf("00:00") }
@@ -508,6 +529,16 @@ fun SonoraPlayerScreen() {
     var songToAddToPlaylist by remember { mutableStateOf<FullTrackItem?>(null) }
     var showCreatePlaylistDialog by remember { mutableStateOf(false) }
     var newPlaylistName by remember { mutableStateOf("") }
+
+    // Loads Speed Dial songs whenever the selected category changes
+    LaunchedEffect(selectedCategory) {
+        if (searchQuery.isBlank()) {
+            isSpeedDialLoading = true
+            val (tracks, _) = searchOfficialSongs(selectedCategory.searchQuery)
+            speedDialSongs = tracks
+            isSpeedDialLoading = false
+        }
+    }
 
     fun cancelSleepTimer() {
         sleepTimerJob?.cancel()
@@ -539,7 +570,6 @@ fun SonoraPlayerScreen() {
         currentTrackIndex = player.currentMediaItemIndex
     }
 
-    // Handles downloading a track and saving to Room
     fun triggerDownload(track: FullTrackItem) {
         if (track.id in downloadingSongIds) return
         downloadingSongIds = downloadingSongIds + track.id
@@ -708,14 +738,12 @@ fun SonoraPlayerScreen() {
         }
     }
 
-    // Smart Queue Starter: checks offline storage first to bypass network if downloaded
     fun playQueue(tracks: List<FullTrackItem>, startIndex: Int) {
         if (tracks.isEmpty()) return
         val safeIndex = startIndex.coerceIn(0, tracks.size - 1)
         val targetTrack = tracks[safeIndex]
 
         coroutineScope.launch {
-            // Check if track is already downloaded locally
             val downloadedLocal = dao.getDownloadedSongById(targetTrack.id)
             val effectiveUrl = if (downloadedLocal != null && File(downloadedLocal.localFilePath).exists()) {
                 downloadedLocal.localFilePath
@@ -1210,7 +1238,7 @@ fun SonoraPlayerScreen() {
             }
         }
 
-        // Four Main Navigation Tabs (Explore, Liked, Playlists, Downloads)
+        // Navigation Tabs (Explore, Liked, Playlists, Downloads)
         TabRow(
             selectedTabIndex = selectedTab,
             containerColor = Color.Transparent,
@@ -1239,8 +1267,9 @@ fun SonoraPlayerScreen() {
             )
         }
 
-        // --- Tab 0: Explore & Search ---
+        // --- Tab 0: Explore, Discovery Chips & Speed Dial ---
         if (selectedTab == 0) {
+            // Search Bar Row
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically
@@ -1263,7 +1292,45 @@ fun SonoraPlayerScreen() {
                 }
             }
 
-            Spacer(modifier = Modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(10.dp))
+
+            // Dynamic Category Chips Row (Speed Dial Selector)
+            LazyRow(
+                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                items(DiscoveryCategoryList) { category ->
+                    val isSelected = selectedCategory == category
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(20.dp))
+                            .background(if (isSelected) MaterialTheme.colorScheme.primary else Color(0xFF161622))
+                            .border(
+                                width = 1.dp,
+                                color = if (isSelected) MaterialTheme.colorScheme.primary else Color(0xFF2E2E42),
+                                shape = RoundedCornerShape(20.dp)
+                            )
+                            .clickable {
+                                selectedCategory = category
+                                searchQuery = "" // Clear search to reveal speed dial
+                            }
+                            .padding(horizontal = 14.dp, vertical = 7.dp)
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(text = category.icon, fontSize = 13.sp)
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = category.label,
+                                color = Color.White,
+                                fontSize = 13.sp,
+                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
+                            )
+                        }
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
 
             Box(
                 modifier = Modifier
@@ -1274,86 +1341,8 @@ fun SonoraPlayerScreen() {
                     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
                     }
-                } else if (searchResults.isEmpty()) {
-                    if (recentSearches.isNotEmpty()) {
-                        Column(modifier = Modifier.fillMaxSize()) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Text(
-                                    text = "Recent Searches",
-                                    fontSize = 14.sp,
-                                    fontWeight = FontWeight.SemiBold,
-                                    color = Color(0xFF94A3B8)
-                                )
-                                Text(
-                                    text = "Clear All",
-                                    fontSize = 12.sp,
-                                    color = MaterialTheme.colorScheme.primary,
-                                    modifier = Modifier.clickable {
-                                        coroutineScope.launch { dao.clearSearchHistory() }
-                                    }
-                                )
-                            }
-
-                            LazyColumn(modifier = Modifier.fillMaxSize()) {
-                                items(recentSearches) { historyItem ->
-                                    Row(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .padding(vertical = 4.dp)
-                                            .clip(RoundedCornerShape(8.dp))
-                                            .background(Color(0xFF161622))
-                                            .clickable { executeSearch(historyItem.query) }
-                                            .padding(horizontal = 12.dp, vertical = 10.dp),
-                                        verticalAlignment = Alignment.CenterVertically
-                                    ) {
-                                        Text("🕒", fontSize = 13.sp)
-                                        Spacer(modifier = Modifier.width(10.dp))
-                                        Text(
-                                            text = historyItem.query,
-                                            color = Color.White,
-                                            fontSize = 14.sp,
-                                            modifier = Modifier.weight(1f),
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis
-                                        )
-                                        Text(
-                                            text = "↖",
-                                            color = Color(0xFF94A3B8),
-                                            fontSize = 16.sp,
-                                            modifier = Modifier
-                                                .padding(horizontal = 8.dp)
-                                                .clickable { searchQuery = historyItem.query }
-                                        )
-                                        Text(
-                                            text = "✕",
-                                            color = Color(0xFF94A3B8),
-                                            fontSize = 14.sp,
-                                            modifier = Modifier
-                                                .padding(start = 6.dp)
-                                                .clickable {
-                                                    coroutineScope.launch {
-                                                        dao.deleteSearchQuery(historyItem.query)
-                                                    }
-                                                }
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                    } else {
-                        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                            Text(
-                                text = searchStatusMessage ?: "Type a song name and tap Search",
-                                color = Color.Gray,
-                                fontSize = 14.sp
-                            )
-                        }
-                    }
-                } else {
+                } else if (searchQuery.isNotBlank() && searchResults.isNotEmpty()) {
+                    // Search Results List
                     LazyColumn(modifier = Modifier.fillMaxSize()) {
                         itemsIndexed(searchResults) { index, song ->
                             val isDownloaded = downloadedSongs.any { it.id == song.id }
@@ -1401,7 +1390,6 @@ fun SonoraPlayerScreen() {
                                         )
                                     }
 
-                                    // Download Button
                                     IconButton(
                                         onClick = { triggerDownload(song) },
                                         enabled = !isDownloaded && !isDownloading
@@ -1413,9 +1401,185 @@ fun SonoraPlayerScreen() {
                                         }
                                     }
 
-                                    // Add to Playlist Button
                                     IconButton(onClick = { songToAddToPlaylist = song }) {
                                         Text("+", color = MaterialTheme.colorScheme.primary, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    // Home Discovery & Speed Dial View
+                    LazyColumn(modifier = Modifier.fillMaxSize()) {
+                        // Section 1: Recent Searches (if any)
+                        if (recentSearches.isNotEmpty()) {
+                            item {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = "Recent Searches",
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = Color(0xFF94A3B8)
+                                    )
+                                    Text(
+                                        text = "Clear All",
+                                        fontSize = 11.sp,
+                                        color = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.clickable {
+                                            coroutineScope.launch { dao.clearSearchHistory() }
+                                        }
+                                    )
+                                }
+                            }
+
+                            // Show top 3 recent searches horizontally
+                            item {
+                                LazyRow(
+                                    modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    items(recentSearches.take(4)) { historyItem ->
+                                        Box(
+                                            modifier = Modifier
+                                                .clip(RoundedCornerShape(12.dp))
+                                                .background(Color(0xFF161622))
+                                                .clickable { executeSearch(historyItem.query) }
+                                                .padding(horizontal = 12.dp, vertical = 8.dp)
+                                        ) {
+                                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                                Text("🕒", fontSize = 11.sp)
+                                                Spacer(modifier = Modifier.width(6.dp))
+                                                Text(
+                                                    text = historyItem.query,
+                                                    color = Color.White,
+                                                    fontSize = 13.sp,
+                                                    maxLines = 1
+                                                )
+                                                Spacer(modifier = Modifier.width(6.dp))
+                                                Text(
+                                                    text = "✕",
+                                                    color = Color(0xFF94A3B8),
+                                                    fontSize = 11.sp,
+                                                    modifier = Modifier.clickable {
+                                                        coroutineScope.launch {
+                                                            dao.deleteSearchQuery(historyItem.query)
+                                                        }
+                                                    }
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Section 2: Quick Picks / Speed Dial Feed
+                        item {
+                            Row(
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column {
+                                    Text(
+                                        text = "Quick Picks",
+                                        fontSize = 18.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = Color.White
+                                    )
+                                    Text(
+                                        text = "${selectedCategory.icon} ${selectedCategory.label} playlist",
+                                        fontSize = 12.sp,
+                                        color = Color(0xFF94A3B8)
+                                    )
+                                }
+
+                                if (speedDialSongs.isNotEmpty()) {
+                                    Text(
+                                        text = "Play All ▶",
+                                        fontSize = 13.sp,
+                                        color = MaterialTheme.colorScheme.primary,
+                                        fontWeight = FontWeight.Bold,
+                                        modifier = Modifier.clickable { playQueue(speedDialSongs, 0) }
+                                    )
+                                }
+                            }
+                        }
+
+                        if (isSpeedDialLoading) {
+                            item {
+                                Box(
+                                    modifier = Modifier.fillMaxWidth().height(200.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
+                                }
+                            }
+                        } else {
+                            itemsIndexed(speedDialSongs) { index, song ->
+                                val isDownloaded = downloadedSongs.any { it.id == song.id }
+                                val isDownloading = song.id in downloadingSongIds
+
+                                Card(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(vertical = 4.dp)
+                                        .clickable { playQueue(speedDialSongs, index) },
+                                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                                    shape = RoundedCornerShape(10.dp)
+                                ) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth().padding(8.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        AsyncImage(
+                                            model = song.artworkUrl,
+                                            contentDescription = song.title,
+                                            modifier = Modifier
+                                                .size(52.dp)
+                                                .clip(RoundedCornerShape(8.dp)),
+                                            contentScale = ContentScale.Crop
+                                        )
+
+                                        Spacer(modifier = Modifier.width(12.dp))
+
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text(
+                                                text = song.title,
+                                                fontWeight = FontWeight.Bold,
+                                                fontSize = 15.sp,
+                                                color = Color.White,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                            Spacer(modifier = Modifier.height(2.dp))
+                                            Text(
+                                                text = song.artist,
+                                                color = Color(0xFF94A3B8),
+                                                fontSize = 13.sp,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                        }
+
+                                        IconButton(
+                                            onClick = { triggerDownload(song) },
+                                            enabled = !isDownloaded && !isDownloading
+                                        ) {
+                                            when {
+                                                isDownloading -> CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp, color = MaterialTheme.colorScheme.primary)
+                                                isDownloaded -> Text("✓", color = Color(0xFF4CAF50), fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                                                else -> Text("⬇", color = Color(0xFF94A3B8), fontSize = 16.sp)
+                                            }
+                                        }
+
+                                        IconButton(onClick = { songToAddToPlaylist = song }) {
+                                            Text("+", color = MaterialTheme.colorScheme.primary, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+                                        }
                                     }
                                 }
                             }
@@ -1780,12 +1944,10 @@ fun SonoraPlayerScreen() {
                                         )
                                     }
 
-                                    // Add to Playlist Button
                                     IconButton(onClick = { songToAddToPlaylist = downloadedSong }) {
                                         Text("+", color = MaterialTheme.colorScheme.primary, fontSize = 20.sp, fontWeight = FontWeight.Bold)
                                     }
 
-                                    // Delete download from device
                                     IconButton(
                                         onClick = {
                                             coroutineScope.launch {
@@ -1850,7 +2012,6 @@ fun SonoraPlayerScreen() {
                         )
                     }
 
-                    // Download active song button
                     val isCurrentDownloading = activeSongId in downloadingSongIds
                     IconButton(
                         onClick = {
@@ -1876,7 +2037,6 @@ fun SonoraPlayerScreen() {
                         }
                     }
 
-                    // Add to Playlist Button
                     IconButton(
                         onClick = {
                             if (activeSongId.isNotBlank()) {
@@ -1895,7 +2055,6 @@ fun SonoraPlayerScreen() {
                         Text("+", fontSize = 22.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
                     }
 
-                    // Like Button
                     IconButton(
                         onClick = {
                             if (activeSongId.isNotBlank()) {
@@ -1926,7 +2085,6 @@ fun SonoraPlayerScreen() {
                         )
                     }
 
-                    // Queue Button
                     IconButton(onClick = { showQueueDialog = true }) {
                         Text("≡", fontSize = 22.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
                     }
@@ -1934,7 +2092,6 @@ fun SonoraPlayerScreen() {
 
                 Spacer(modifier = Modifier.height(2.dp))
 
-                // Progress Slider
                 val maxDurationFloat = max(1L, totalDuration).toFloat()
                 val currentProgressFloat = if (isDraggingSlider) sliderDragValue else currentPosition.toFloat()
 
@@ -1955,7 +2112,6 @@ fun SonoraPlayerScreen() {
                     modifier = Modifier.fillMaxWidth().height(26.dp)
                 )
 
-                // Timestamps and Playback Controls
                 Row(
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp),
                     horizontalArrangement = Arrangement.SpaceBetween,
