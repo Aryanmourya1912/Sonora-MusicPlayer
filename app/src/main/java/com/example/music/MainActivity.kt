@@ -5,7 +5,6 @@ import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -23,16 +22,15 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Slider
-import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -69,7 +67,6 @@ import java.net.URLEncoder
 import java.util.Locale
 import kotlin.math.max
 
-// Data model holding full song audio stream and artwork
 data class FullTrackItem(
     val id: String,
     val title: String,
@@ -79,21 +76,33 @@ data class FullTrackItem(
     val durationFormatted: String
 )
 
+private val SonoraThemeColors = darkColorScheme(
+    primary = Color(0xFF7C4DFF),
+    background = Color(0xFF0C0C11),
+    surface = Color(0xFF161622),
+    surfaceVariant = Color(0xFF1E1E2D),
+    onPrimary = Color.White,
+    onBackground = Color.White,
+    onSurface = Color.White,
+    onSurfaceVariant = Color(0xFF94A3B8)
+)
+
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
-            Surface(
-                modifier = Modifier.fillMaxSize(),
-                color = Color(0xFF0C0C11) // AMOLED deep charcoal background
-            ) {
-                SonoraPlayerScreen()
+            MaterialTheme(colorScheme = SonoraThemeColors) {
+                Surface(
+                    modifier = Modifier.fillMaxSize(),
+                    color = MaterialTheme.colorScheme.background
+                ) {
+                    SonoraPlayerScreen()
+                }
             }
         }
     }
 }
 
-// Converts millisecond timestamps into mm:ss format
 fun formatTime(millis: Long): String {
     if (millis <= 0) return "00:00"
     val totalSeconds = millis / 1000
@@ -102,7 +111,6 @@ fun formatTime(millis: Long): String {
     return String.format(Locale.ROOT, "%02d:%02d", minutes, seconds)
 }
 
-// Cleans up escaped HTML characters in track/artist metadata
 fun sanitizeText(input: String): String {
     return input.replace("&quot;", "\"")
         .replace("&amp;", "&")
@@ -111,7 +119,6 @@ fun sanitizeText(input: String): String {
         .replace("&gt;", ">")
 }
 
-// Queries the full-length music stream API (supports Hindi, English, Punjabi, International)
 suspend fun searchFullSongs(query: String): List<FullTrackItem> = withContext(Dispatchers.IO) {
     val resultsList = mutableListOf<FullTrackItem>()
     try {
@@ -125,66 +132,68 @@ suspend fun searchFullSongs(query: String): List<FullTrackItem> = withContext(Di
         val responseText = connection.inputStream.bufferedReader().use { it.readText() }
         val root = JSONObject(responseText)
 
-        // Resiliently grab the results array
         val dataObj = root.optJSONObject("data")
-        val resultsArray = dataObj?.optJSONArray("results")
-            ?: root.optJSONArray("data")
-            ?: root.optJSONArray("results")
-            ?: return@withContext emptyList()
+        val resultsArray = if (dataObj != null && dataObj.has("results")) {
+            dataObj.optJSONArray("results")
+        } else if (root.has("data") && root.optJSONArray("data") != null) {
+            root.optJSONArray("data")
+        } else {
+            root.optJSONArray("results")
+        }
 
-        for (i in 0 until resultsArray.length()) {
-            val item = resultsArray.getJSONObject(i)
-            val trackId = item.optString("id", "$i")
-            val trackName = sanitizeText(item.optString("name", item.optString("title", "Unknown Track")))
+        if (resultsArray != null) {
+            for (i in 0 until resultsArray.length()) {
+                val item = resultsArray.getJSONObject(i)
+                val trackId = item.optString("id", "$i")
+                val rawName = if (item.has("name")) item.optString("name") else item.optString("title", "Unknown Track")
+                val trackName = sanitizeText(rawName)
 
-            // Extract artist details
-            var artistName = item.optString("primaryArtists", "")
-            if (artistName.isBlank()) {
-                val artistsObj = item.optJSONObject("artists")
-                val primaryArray = artistsObj?.optJSONArray("primary")
-                if (primaryArray != null && primaryArray.length() > 0) {
-                    artistName = primaryArray.getJSONObject(0).optString("name", "")
+                var artistName = item.optString("primaryArtists", "")
+                if (artistName.isBlank()) {
+                    val artistsObj = item.optJSONObject("artists")
+                    val primaryArray = artistsObj?.optJSONArray("primary")
+                    if (primaryArray != null && primaryArray.length() > 0) {
+                        artistName = primaryArray.getJSONObject(0).optString("name", "")
+                    }
                 }
-            }
-            if (artistName.isBlank()) artistName = "Unknown Artist"
-            artistName = sanitizeText(artistName)
+                if (artistName.isBlank()) artistName = "Unknown Artist"
+                artistName = sanitizeText(artistName)
 
-            // Extract high-resolution artwork (last entry gives 500x500 quality)
-            var artUrl = ""
-            val imageArray = item.optJSONArray("image")
-            if (imageArray != null && imageArray.length() > 0) {
-                artUrl = imageArray.getJSONObject(imageArray.length() - 1).optString("url", "")
-            }
-            if (artUrl.isBlank()) artUrl = item.optString("image", "")
+                var artUrl = ""
+                val imageArray = item.optJSONArray("image")
+                if (imageArray != null && imageArray.length() > 0) {
+                    artUrl = imageArray.getJSONObject(imageArray.length() - 1).optString("url", "")
+                }
+                if (artUrl.isBlank()) artUrl = item.optString("image", "")
 
-            // Extract highest bitrate audio link (160kbps or 320kbps full track)
-            var playableStream = ""
-            val downloadArray = item.optJSONArray("downloadUrl")
-            if (downloadArray != null && downloadArray.length() > 0) {
-                playableStream = downloadArray.getJSONObject(downloadArray.length() - 1).optString("url", "")
-            }
-            if (playableStream.isBlank()) playableStream = item.optString("media_url", "")
+                var playableStream = ""
+                val downloadArray = item.optJSONArray("downloadUrl")
+                if (downloadArray != null && downloadArray.length() > 0) {
+                    playableStream = downloadArray.getJSONObject(downloadArray.length() - 1).optString("url", "")
+                }
+                if (playableStream.isBlank()) playableStream = item.optString("media_url", "")
 
-            val durationSeconds = item.optLong("duration", 0L)
-            val durationLabel = formatTime(durationSeconds * 1000)
+                val durationSeconds = item.optLong("duration", 0L)
+                val durationLabel = formatTime(durationSeconds * 1000)
 
-            if (trackName.isNotBlank() && playableStream.isNotBlank()) {
-                resultsList.add(
-                    FullTrackItem(
-                        id = trackId,
-                        title = trackName,
-                        artist = artistName,
-                        audioUrl = playableStream,
-                        artworkUrl = artUrl,
-                        durationFormatted = durationLabel
+                if (trackName.isNotBlank() && playableStream.isNotBlank()) {
+                    resultsList.add(
+                        FullTrackItem(
+                            id = trackId,
+                            title = trackName,
+                            artist = artistName,
+                            audioUrl = playableStream,
+                            artworkUrl = artUrl,
+                            durationFormatted = durationLabel
+                        )
                     )
-                )
+                }
             }
         }
     } catch (e: Exception) {
         e.printStackTrace()
     }
-    return@withContext resultsList
+    resultsList
 }
 
 @Composable
@@ -199,7 +208,6 @@ fun SonoraPlayerScreen() {
     var searchResults by remember { mutableStateOf<List<FullTrackItem>>(emptyList()) }
     var isSearching by remember { mutableStateOf(false) }
 
-    // Active playing item
     var activeTitle by remember { mutableStateOf("No Track Playing") }
     var activeArtist by remember { mutableStateOf("Search and tap any song above") }
     var activeArtworkUrl by remember { mutableStateOf("") }
@@ -209,7 +217,6 @@ fun SonoraPlayerScreen() {
     var isDraggingSlider by remember { mutableStateOf(false) }
     var sliderDragValue by remember { mutableStateOf(0f) }
 
-    // Connect to background PlaybackService
     DisposableEffect(context) {
         val sessionToken = SessionToken(context, ComponentName(context, PlaybackService::class.java))
         val controllerFuture = MediaController.Builder(context, sessionToken).buildAsync()
@@ -245,7 +252,6 @@ fun SonoraPlayerScreen() {
         }
     }
 
-    // Refresh scrubber timestamp every 500ms
     LaunchedEffect(isPlaying, isDraggingSlider) {
         while (isPlaying && !isDraggingSlider) {
             controller?.let { player ->
@@ -260,36 +266,16 @@ fun SonoraPlayerScreen() {
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(top = 18.dp, start = 16.dp, end = 16.dp, bottom = 12.dp)
+            .padding(16.dp)
     ) {
-        // --- App Header ---
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.padding(bottom = 14.dp)
-        ) {
-            Text(
-                text = "Sonora",
-                fontSize = 26.sp,
-                fontWeight = FontWeight.ExtraBold,
-                color = Color.White
-            )
-            Spacer(modifier = Modifier.width(8.dp))
-            Box(
-                modifier = Modifier
-                    .clip(RoundedCornerShape(6.dp))
-                    .background(Color(0xFF7C4DFF))
-                    .padding(horizontal = 6.dp, vertical = 2.dp)
-            ) {
-                Text(
-                    text = "PRO",
-                    fontSize = 10.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = Color.White
-                )
-            }
-        }
+        Text(
+            text = "Sonora",
+            fontSize = 24.sp,
+            fontWeight = FontWeight.Bold,
+            color = Color.White,
+            modifier = Modifier.padding(bottom = 12.dp)
+        )
 
-        // --- Search Input Box ---
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically
@@ -297,21 +283,12 @@ fun SonoraPlayerScreen() {
             OutlinedTextField(
                 value = searchQuery,
                 onValueChange = { searchQuery = it },
-                placeholder = { Text("Search songs, artists, albums...", color = Color(0xFF6B7280)) },
+                label = { Text("Search songs or artists...") },
                 singleLine = true,
-                shape = RoundedCornerShape(14.dp),
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedContainerColor = Color(0xFF16161F),
-                    unfocusedContainerColor = Color(0xFF16161F),
-                    focusedTextColor = Color.White,
-                    unfocusedTextColor = Color.White,
-                    focusedBorderColor = Color(0xFF7C4DFF),
-                    unfocusedBorderColor = Color(0xFF262635)
-                ),
                 modifier = Modifier.weight(1f)
             )
 
-            Spacer(modifier = Modifier.width(10.dp))
+            Spacer(modifier = Modifier.width(8.dp))
 
             Button(
                 onClick = {
@@ -323,18 +300,14 @@ fun SonoraPlayerScreen() {
                         }
                     }
                 },
-                shape = RoundedCornerShape(14.dp),
-                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF7C4DFF)),
-                enabled = !isSearching && searchQuery.isNotBlank(),
-                modifier = Modifier.height(56.dp)
+                enabled = !isSearching && searchQuery.isNotBlank()
             ) {
-                Text(text = "Search", fontWeight = FontWeight.Bold)
+                Text("Search")
             }
         }
 
-        Spacer(modifier = Modifier.height(14.dp))
+        Spacer(modifier = Modifier.height(12.dp))
 
-        // --- Search Results List ---
         Box(
             modifier = Modifier
                 .weight(1f)
@@ -342,14 +315,14 @@ fun SonoraPlayerScreen() {
         ) {
             if (isSearching) {
                 Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    CircularProgressIndicator(color = Color(0xFF7C4DFF))
+                    CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
                 }
             } else if (searchResults.isEmpty()) {
                 Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     Text(
                         text = "Search for any track (plays full songs)",
-                        color = Color(0xFF6B7280),
-                        fontSize = 15.sp
+                        color = Color.Gray,
+                        fontSize = 14.sp
                     )
                 }
             } else {
@@ -358,7 +331,7 @@ fun SonoraPlayerScreen() {
                         Card(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .padding(vertical = 5.dp)
+                                .padding(vertical = 4.dp)
                                 .clickable {
                                     controller?.let { player ->
                                         val metadata = MediaMetadata.Builder()
@@ -377,22 +350,23 @@ fun SonoraPlayerScreen() {
                                         player.play()
                                     }
                                 },
-                            colors = CardDefaults.cardColors(containerColor = Color(0xFF161622)),
-                            shape = RoundedCornerShape(14.dp)
+                            colors = CardDefaults.cardColors(
+                                containerColor = MaterialTheme.colorScheme.surface
+                            ),
+                            shape = RoundedCornerShape(10.dp)
                         ) {
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .padding(10.dp),
+                                    .padding(8.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                // Cover thumbnail
                                 AsyncImage(
                                     model = song.artworkUrl,
                                     contentDescription = song.title,
                                     modifier = Modifier
                                         .size(54.dp)
-                                        .clip(RoundedCornerShape(10.dp)),
+                                        .clip(RoundedCornerShape(8.dp)),
                                     contentScale = ContentScale.Crop
                                 )
 
@@ -401,13 +375,13 @@ fun SonoraPlayerScreen() {
                                 Column(modifier = Modifier.weight(1f)) {
                                     Text(
                                         text = song.title,
-                                        fontWeight = FontWeight.SemiBold,
+                                        fontWeight = FontWeight.Bold,
                                         fontSize = 15.sp,
                                         color = Color.White,
                                         maxLines = 1,
                                         overflow = TextOverflow.Ellipsis
                                     )
-                                    Spacer(modifier = Modifier.height(3.dp))
+                                    Spacer(modifier = Modifier.height(2.dp))
                                     Text(
                                         text = song.artist,
                                         color = Color(0xFF94A3B8),
@@ -420,9 +394,9 @@ fun SonoraPlayerScreen() {
                                 if (song.durationFormatted.isNotBlank() && song.durationFormatted != "00:00") {
                                     Text(
                                         text = song.durationFormatted,
-                                        color = Color(0xFF64748B),
+                                        color = Color.Gray,
                                         fontSize = 12.sp,
-                                        modifier = Modifier.padding(start = 8.dp)
+                                        modifier = Modifier.padding(start = 6.dp)
                                     )
                                 }
                             }
@@ -434,11 +408,12 @@ fun SonoraPlayerScreen() {
 
         Spacer(modifier = Modifier.height(12.dp))
 
-        // --- Metrolist-Style Floating Player Bar ---
         Card(
             modifier = Modifier.fillMaxWidth(),
-            colors = CardDefaults.cardColors(containerColor = Color(0xFF1E1E2D)),
-            shape = RoundedCornerShape(18.dp)
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.surfaceVariant
+            ),
+            shape = RoundedCornerShape(14.dp)
         ) {
             Column(
                 modifier = Modifier.padding(14.dp),
@@ -453,8 +428,8 @@ fun SonoraPlayerScreen() {
                             model = activeArtworkUrl,
                             contentDescription = activeTitle,
                             modifier = Modifier
-                                .size(50.dp)
-                                .clip(RoundedCornerShape(10.dp)),
+                                .size(48.dp)
+                                .clip(RoundedCornerShape(8.dp)),
                             contentScale = ContentScale.Crop
                         )
                         Spacer(modifier = Modifier.width(12.dp))
@@ -469,9 +444,43 @@ fun SonoraPlayerScreen() {
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
                         )
-                        Spacer(modifier = Modifier.height(2.dp))
                         Text(
                             text = activeArtist,
                             fontSize = 12.sp,
                             color = Color(0xFF94A3B8),
-      
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.width(8.dp))
+
+                    Button(
+                        onClick = {
+                            controller?.let { player ->
+                                if (player.isPlaying) player.pause() else player.play()
+                            }
+                        },
+                        enabled = controller != null && controller?.mediaItemCount != 0,
+                        shape = CircleShape,
+                        modifier = Modifier.size(46.dp)
+                    ) {
+                        Text(if (isPlaying) "⏸" else "▶", fontSize = 16.sp)
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(6.dp))
+
+                val maxDurationFloat = max(1L, totalDuration).toFloat()
+                val currentProgressFloat = if (isDraggingSlider) sliderDragValue else currentPosition.toFloat()
+
+                Slider(
+                    value = currentProgressFloat.coerceIn(0f, maxDurationFloat),
+                    onValueChange = { newPos ->
+                        isDraggingSlider = true
+                        sliderDragValue = newPos
+                    },
+                    onValueChangeFinished = {
+                        controller?.seekTo(sliderDragValue.toLong())
+                        currentPosition = sliderDragValue.toLong()
+                        isDraggingSlider = f
