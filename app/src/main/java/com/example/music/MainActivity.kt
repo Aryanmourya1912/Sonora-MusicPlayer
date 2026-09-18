@@ -155,7 +155,7 @@ import java.util.Locale
 import kotlin.math.max
 
 data class FullTrackItem(
-    val id: String, // YouTube Video ID
+    val id: String,
     val title: String,
     val artist: String,
     var audioUrl: String,
@@ -206,11 +206,6 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// INNER TUBE ENGINE: YOUTUBE MUSIC SEARCH, AUTOMIX RADIO & STREAM RESOLVER
-// ---------------------------------------------------------------------------
-
-// Recursively walks arbitrary InnerTube JSON responses to find all matching renderer objects
 fun findRenderersRecursive(json: Any?, targetKey: String, sink: MutableList<JSONObject>) {
     when (json) {
         is JSONObject -> {
@@ -233,7 +228,6 @@ fun findRenderersRecursive(json: Any?, targetKey: String, sink: MutableList<JSON
     }
 }
 
-// MODULE 1: YouTube Music Native Search (/youtubei/v1/search)
 suspend fun searchYouTubeMusic(query: String): Pair<List<FullTrackItem>, String?> = withContext(Dispatchers.IO) {
     val results = mutableListOf<FullTrackItem>()
     try {
@@ -308,7 +302,7 @@ suspend fun searchYouTubeMusic(query: String): Pair<List<FullTrackItem>, String?
                     id = videoId,
                     title = title,
                     artist = artist,
-                    audioUrl = "", // Resolved on demand when played
+                    audioUrl = "",
                     artworkUrl = artworkUrl,
                     durationFormatted = duration
                 )
@@ -320,7 +314,6 @@ suspend fun searchYouTubeMusic(query: String): Pair<List<FullTrackItem>, String?
     }
 }
 
-// MODULE 2: Endless Automix Radio (/youtubei/v1/next)
 suspend fun fetchYouTubeAutomixRadio(videoId: String): List<FullTrackItem> = withContext(Dispatchers.IO) {
     val results = mutableListOf<FullTrackItem>()
     if (videoId.isBlank()) return@withContext results
@@ -392,26 +385,32 @@ suspend fun fetchYouTubeAutomixRadio(videoId: String): List<FullTrackItem> = wit
     results
 }
 
-// MODULE 3: On-Demand Stream Extraction via ANDROID_VR client (/youtubei/v1/player)
+// Multi-Strategy Audio Stream Resolver
 suspend fun resolveYouTubeStreamUrl(videoId: String): String = withContext(Dispatchers.IO) {
     if (videoId.isBlank()) return@withContext ""
+
+    // Strategy 1: Direct InnerTube VR Core Client with authenticated parameters
     try {
         val url = URL("https://www.youtube.com/youtubei/v1/player")
         val conn = url.openConnection() as HttpURLConnection
         conn.requestMethod = "POST"
-        conn.connectTimeout = 8000
-        conn.readTimeout = 8000
+        conn.connectTimeout = 4000
+        conn.readTimeout = 4000
         conn.doOutput = true
         conn.setRequestProperty("Content-Type", "application/json")
-        conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
-        conn.setRequestProperty("Referer", "https://www.youtube.com/")
+        conn.setRequestProperty("User-Agent", "com.google.android.apps.vr.vrcore/1.65.10 (Linux; U; Android 14)")
+        conn.setRequestProperty("X-YouTube-Client-Name", "ANDROID_VR")
+        conn.setRequestProperty("X-YouTube-Client-Version", "1.65.10")
 
         val payload = JSONObject().apply {
             put("videoId", videoId)
+            put("contentCheckOk", true)
+            put("racyCheckOk", true)
             put("context", JSONObject().apply {
                 put("client", JSONObject().apply {
                     put("clientName", "ANDROID_VR")
                     put("clientVersion", "1.65.10")
+                    put("androidSdkVersion", 34)
                     put("hl", "en")
                     put("gl", "US")
                 })
@@ -423,11 +422,10 @@ suspend fun resolveYouTubeStreamUrl(videoId: String): String = withContext(Dispa
         if (conn.responseCode == HttpURLConnection.HTTP_OK) {
             val resp = conn.inputStream.bufferedReader().use { it.readText() }
             val root = JSONObject(resp)
-            val streamingData = root.optJSONObject("streamingData")
-            val formats = streamingData?.optJSONArray("adaptiveFormats")
+            val formats = root.optJSONObject("streamingData")?.optJSONArray("adaptiveFormats")
 
             if (formats != null) {
-                var bestAudioUrl = ""
+                var bestUrl = ""
                 var maxBitrate = 0L
 
                 for (i in 0 until formats.length()) {
@@ -439,22 +437,82 @@ suspend fun resolveYouTubeStreamUrl(videoId: String): String = withContext(Dispa
                         val bitrate = fmt.optLong("bitrate", 0L)
                         if (bitrate > maxBitrate) {
                             maxBitrate = bitrate
-                            bestAudioUrl = streamUrl
+                            bestUrl = streamUrl
                         }
                     }
                 }
-                if (bestAudioUrl.isNotBlank()) return@withContext bestAudioUrl
+                if (bestUrl.isNotBlank()) return@withContext bestUrl
             }
         }
     } catch (e: Exception) {
-        e.printStackTrace()
+        // Fall through to Strategy 2
     }
+
+    // Strategy 2: High-Availability Stream Decipher Endpoints (Piped & Invidious)
+    val resolverMirrors = listOf(
+        "https://pipedapi.kavin.rocks/streams/$videoId",
+        "https://api.piped.privacy.com.de/streams/$videoId",
+        "https://piped-api.lunar.icu/streams/$videoId",
+        "https://inv.tux.pizza/api/v1/videos/$videoId",
+        "https://invidious.nerdvpn.de/api/v1/videos/$videoId"
+    )
+
+    for (endpoint in resolverMirrors) {
+        try {
+            val url = URL(endpoint)
+            val conn = url.openConnection() as HttpURLConnection
+            conn.requestMethod = "GET"
+            conn.connectTimeout = 4000
+            conn.readTimeout = 4000
+            conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+            conn.setRequestProperty("Accept", "application/json")
+
+            if (conn.responseCode == HttpURLConnection.HTTP_OK) {
+                val resp = conn.inputStream.bufferedReader().use { it.readText() }
+                val root = JSONObject(resp)
+
+                // Piped audioStreams format
+                val audioStreams = root.optJSONArray("audioStreams")
+                if (audioStreams != null && audioStreams.length() > 0) {
+                    var bestUrl = ""
+                    var maxBitrate = 0L
+                    for (i in 0 until audioStreams.length()) {
+                        val stream = audioStreams.getJSONObject(i)
+                        val sUrl = stream.optString("url", "")
+                        val bitrate = stream.optLong("bitrate", 0L)
+                        if (sUrl.isNotBlank() && bitrate >= maxBitrate) {
+                            maxBitrate = bitrate
+                            bestUrl = sUrl
+                        }
+                    }
+                    if (bestUrl.isNotBlank()) return@withContext bestUrl
+                }
+
+                // Invidious adaptiveFormats format
+                val adaptiveFormats = root.optJSONArray("adaptiveFormats")
+                if (adaptiveFormats != null && adaptiveFormats.length() > 0) {
+                    var bestUrl = ""
+                    var maxBitrate = 0L
+                    for (i in 0 until adaptiveFormats.length()) {
+                        val fmt = adaptiveFormats.getJSONObject(i)
+                        val type = fmt.optString("type", "")
+                        val sUrl = fmt.optString("url", "")
+                        val bitrate = fmt.optLong("bitrate", 0L)
+                        if (type.startsWith("audio/") && sUrl.isNotBlank() && bitrate >= maxBitrate) {
+                            maxBitrate = bitrate
+                            bestUrl = sUrl
+                        }
+                    }
+                    if (bestUrl.isNotBlank()) return@withContext bestUrl
+                }
+            }
+        } catch (e: Exception) {
+            continue
+        }
+    }
+
     ""
 }
-
-// ---------------------------------------------------------------------------
-// DEDUPLICATION & REFINEMENT HELPERS
-// ---------------------------------------------------------------------------
 
 fun cleanSongTitle(rawTitle: String): String {
     var clean = rawTitle.lowercase(Locale.ROOT)
@@ -772,7 +830,6 @@ fun SonoraPlayerScreen() {
         isPlayerExpanded = false
     }
 
-    // Refresh Mood Tracks via YouTube Music Search
     LaunchedEffect(selectedMoodCategory) {
         isMoodLoading = true
         val (tracks, _) = searchYouTubeMusic(selectedMoodCategory.searchQuery)
@@ -942,7 +999,6 @@ fun SonoraPlayerScreen() {
                         .putLong(KEY_LAST_POSITION_MS, 0L)
                         .apply()
 
-                    // YouTube Automix Radio continuation
                     if (endlessRadioEnabled && mediaController.currentMediaItemIndex >= mediaController.mediaItemCount - 2) {
                         coroutineScope.launch {
                             val similar = fetchYouTubeAutomixRadio(activeSongId)
@@ -988,7 +1044,6 @@ fun SonoraPlayerScreen() {
         }
     }
 
-    // Resolves stream on demand and launches playback queue
     fun playQueue(tracks: List<FullTrackItem>, startIndex: Int) {
         if (tracks.isEmpty()) return
         val safeIndex = startIndex.coerceIn(0, tracks.size - 1)
@@ -1032,7 +1087,6 @@ fun SonoraPlayerScreen() {
                 updateQueueState(player)
             }
 
-            // Seed Automix Radio queue in background
             if (endlessRadioEnabled) {
                 val radioSongs = fetchYouTubeAutomixRadio(targetTrack.id)
                 val filtered = filterSimilarTracks(radioSongs, listOf(targetTrack))
@@ -1062,7 +1116,6 @@ fun SonoraPlayerScreen() {
         }
     }
 
-    // Modal Bottom Sheet: Track Options (Image 4)
     if (selectedTrackForOptions != null) {
         val song = selectedTrackForOptions!!
         ModalBottomSheet(
@@ -2036,7 +2089,6 @@ fun SonoraPlayerScreen() {
                 }
             }
 
-            // Floating Miniplayer
             if (activeSongId.isNotBlank()) {
                 val progressFraction = if (totalDuration > 0) (currentPosition.toFloat() / totalDuration.toFloat()).coerceIn(0f, 1f) else 0f
 
@@ -2153,7 +2205,6 @@ fun SonoraPlayerScreen() {
                 }
             }
 
-            // Bottom Navigation Bar
             NavigationBar(
                 containerColor = Color(0xFF0A0F14),
                 contentColor = Color.White,
@@ -2201,7 +2252,6 @@ fun SonoraPlayerScreen() {
             }
         }
 
-        // Full Screen Now Playing View
         AnimatedVisibility(
             visible = isPlayerExpanded,
             enter = slideInVertically(initialOffsetY = { it }),
