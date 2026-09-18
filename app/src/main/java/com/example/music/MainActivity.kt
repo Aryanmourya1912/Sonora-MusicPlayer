@@ -60,6 +60,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.json.JSONArray
 import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
@@ -119,81 +120,114 @@ fun sanitizeText(input: String): String {
         .replace("&gt;", ">")
 }
 
-suspend fun searchFullSongs(query: String): List<FullTrackItem> = withContext(Dispatchers.IO) {
+// Safely extracts URL from either {"url": "..."} or {"link": "..."}
+fun extractMediaUrl(jsonArray: JSONArray?): String {
+    if (jsonArray == null || jsonArray.length() == 0) return ""
+    val bestQuality = jsonArray.getJSONObject(jsonArray.length() - 1)
+    val url = bestQuality.optString("url", "")
+    return if (url.isNotBlank()) url else bestQuality.optString("link", "")
+}
+
+// Queries the music API with browser headers and mirror failover
+suspend fun searchFullSongs(query: String): Pair<List<FullTrackItem>, String?> = withContext(Dispatchers.IO) {
     val resultsList = mutableListOf<FullTrackItem>()
-    try {
-        val encodedQuery = URLEncoder.encode(query.trim(), "UTF-8")
-        val endpoint = "https://saavn.dev/api/search/songs?query=$encodedQuery&limit=25"
-        val connection = URL(endpoint).openConnection() as HttpURLConnection
-        connection.requestMethod = "GET"
-        connection.connectTimeout = 8000
-        connection.readTimeout = 8000
+    val encodedQuery = URLEncoder.encode(query.trim(), "UTF-8")
 
-        val responseText = connection.inputStream.bufferedReader().use { it.readText() }
-        val root = JSONObject(responseText)
+    // Endpoints tried sequentially if one is blocked or unavailable
+    val candidateEndpoints = listOf(
+        "https://saavn.dev/api/search/songs?query=$encodedQuery&limit=25",
+        "https://saavn.me/search/songs?query=$encodedQuery",
+        "https://jiosaavn-api-privatecvc2.vercel.app/search/songs?query=$encodedQuery"
+    )
 
-        val dataObj = root.optJSONObject("data")
-        val resultsArray = if (dataObj != null && dataObj.has("results")) {
-            dataObj.optJSONArray("results")
-        } else if (root.has("data") && root.optJSONArray("data") != null) {
-            root.optJSONArray("data")
-        } else {
-            root.optJSONArray("results")
-        }
+    var lastErrorMessage: String? = null
 
-        if (resultsArray != null) {
-            for (i in 0 until resultsArray.length()) {
-                val item = resultsArray.getJSONObject(i)
-                val trackId = item.optString("id", "$i")
-                val rawName = if (item.has("name")) item.optString("name") else item.optString("title", "Unknown Track")
-                val trackName = sanitizeText(rawName)
+    for (endpoint in candidateEndpoints) {
+        try {
+            val url = URL(endpoint)
+            val connection = url.openConnection() as HttpURLConnection
+            connection.requestMethod = "GET"
+            connection.connectTimeout = 7000
+            connection.readTimeout = 7000
+            // Set User-Agent so reverse proxies don't reject the connection
+            connection.setRequestProperty(
+                "User-Agent",
+                "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
+            )
+            connection.setRequestProperty("Accept", "application/json")
 
-                var artistName = item.optString("primaryArtists", "")
-                if (artistName.isBlank()) {
-                    val artistsObj = item.optJSONObject("artists")
-                    val primaryArray = artistsObj?.optJSONArray("primary")
-                    if (primaryArray != null && primaryArray.length() > 0) {
-                        artistName = primaryArray.getJSONObject(0).optString("name", "")
+            val responseCode = connection.responseCode
+            if (responseCode != HttpURLConnection.HTTP_OK) {
+                lastErrorMessage = "Server returned status $responseCode"
+                continue
+            }
+
+            val responseText = connection.inputStream.bufferedReader().use { it.readText() }
+            val root = JSONObject(responseText)
+
+            val dataObj = root.optJSONObject("data")
+            val resultsArray = when {
+                dataObj != null && dataObj.has("results") -> dataObj.optJSONArray("results")
+                root.has("data") && root.optJSONArray("data") != null -> root.optJSONArray("data")
+                root.has("results") -> root.optJSONArray("results")
+                else -> null
+            }
+
+            if (resultsArray != null && resultsArray.length() > 0) {
+                for (i in 0 until resultsArray.length()) {
+                    val item = resultsArray.getJSONObject(i)
+                    val trackId = item.optString("id", "$i")
+                    val rawName = if (item.has("name")) item.optString("name") else item.optString("title", "Unknown Track")
+                    val trackName = sanitizeText(rawName)
+
+                    var artistName = item.optString("primaryArtists", "")
+                    if (artistName.isBlank()) {
+                        val artistsObj = item.optJSONObject("artists")
+                        val primaryArray = artistsObj?.optJSONArray("primary")
+                        if (primaryArray != null && primaryArray.length() > 0) {
+                            artistName = primaryArray.getJSONObject(0).optString("name", "")
+                        }
+                    }
+                    if (artistName.isBlank()) artistName = "Unknown Artist"
+                    artistName = sanitizeText(artistName)
+
+                    // Extract image link
+                    var artUrl = extractMediaUrl(item.optJSONArray("image"))
+                    if (artUrl.isBlank()) artUrl = item.optString("image", "")
+
+                    // Extract playable stream URL
+                    var playableStream = extractMediaUrl(item.optJSONArray("downloadUrl"))
+                    if (playableStream.isBlank()) {
+                        playableStream = item.optString("media_url", item.optString("url", ""))
+                    }
+
+                    val durationSeconds = item.optLong("duration", 0L)
+                    val durationLabel = formatTime(durationSeconds * 1000)
+
+                    if (trackName.isNotBlank() && playableStream.isNotBlank()) {
+                        resultsList.add(
+                            FullTrackItem(
+                                id = trackId,
+                                title = trackName,
+                                artist = artistName,
+                                audioUrl = playableStream,
+                                artworkUrl = artUrl,
+                                durationFormatted = durationLabel
+                            )
+                        )
                     }
                 }
-                if (artistName.isBlank()) artistName = "Unknown Artist"
-                artistName = sanitizeText(artistName)
 
-                var artUrl = ""
-                val imageArray = item.optJSONArray("image")
-                if (imageArray != null && imageArray.length() > 0) {
-                    artUrl = imageArray.getJSONObject(imageArray.length() - 1).optString("url", "")
-                }
-                if (artUrl.isBlank()) artUrl = item.optString("image", "")
-
-                var playableStream = ""
-                val downloadArray = item.optJSONArray("downloadUrl")
-                if (downloadArray != null && downloadArray.length() > 0) {
-                    playableStream = downloadArray.getJSONObject(downloadArray.length() - 1).optString("url", "")
-                }
-                if (playableStream.isBlank()) playableStream = item.optString("media_url", "")
-
-                val durationSeconds = item.optLong("duration", 0L)
-                val durationLabel = formatTime(durationSeconds * 1000)
-
-                if (trackName.isNotBlank() && playableStream.isNotBlank()) {
-                    resultsList.add(
-                        FullTrackItem(
-                            id = trackId,
-                            title = trackName,
-                            artist = artistName,
-                            audioUrl = playableStream,
-                            artworkUrl = artUrl,
-                            durationFormatted = durationLabel
-                        )
-                    )
+                if (resultsList.isNotEmpty()) {
+                    return@withContext Pair(resultsList, null)
                 }
             }
+        } catch (e: Exception) {
+            lastErrorMessage = e.localizedMessage ?: e.message ?: "Network error"
         }
-    } catch (e: Exception) {
-        e.printStackTrace()
     }
-    resultsList
+
+    Pair(resultsList, lastErrorMessage ?: "No tracks found for \"$query\"")
 }
 
 @Composable
@@ -207,6 +241,7 @@ fun SonoraPlayerScreen() {
     var searchQuery by remember { mutableStateOf("") }
     var searchResults by remember { mutableStateOf<List<FullTrackItem>>(emptyList()) }
     var isSearching by remember { mutableStateOf(false) }
+    var searchStatusMessage by remember { mutableStateOf<String?>(null) }
 
     var activeTitle by remember { mutableStateOf("No Track Playing") }
     var activeArtist by remember { mutableStateOf("Search and tap any song above") }
@@ -294,8 +329,11 @@ fun SonoraPlayerScreen() {
                 onClick = {
                     if (searchQuery.isNotBlank()) {
                         isSearching = true
+                        searchStatusMessage = null
                         coroutineScope.launch {
-                            searchResults = searchFullSongs(searchQuery)
+                            val (results, errorMsg) = searchFullSongs(searchQuery)
+                            searchResults = results
+                            searchStatusMessage = errorMsg
                             isSearching = false
                         }
                     }
@@ -320,7 +358,7 @@ fun SonoraPlayerScreen() {
             } else if (searchResults.isEmpty()) {
                 Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     Text(
-                        text = "Search for any track (plays full songs)",
+                        text = searchStatusMessage ?: "Type a song name and tap Search",
                         color = Color.Gray,
                         fontSize = 14.sp
                     )
