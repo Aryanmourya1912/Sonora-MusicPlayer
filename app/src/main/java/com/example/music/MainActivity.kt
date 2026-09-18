@@ -176,14 +176,15 @@ data class DiscoveryCategory(
 )
 
 val DiscoveryCategoryList = listOf(
-    DiscoveryCategory("Podcasts", "Popular Podcasts Music"),
-    DiscoveryCategory("Workout", "Gym Workout Motivation"),
-    DiscoveryCategory("Relax", "Relaxing Acoustic Music"),
-    DiscoveryCategory("Commute", "Road Trip Driving Hits"),
-    DiscoveryCategory("Energize", "High Energy EDM Phonk"),
-    DiscoveryCategory("Party", "Club Dance Party Hits"),
-    DiscoveryCategory("Focus", "Deep Focus Study Music"),
-    DiscoveryCategory("Romance", "Romantic Love Songs")
+    DiscoveryCategory("Trending Hindi", "Trending Hindi Bollywood Songs"),
+    DiscoveryCategory("Trending English", "Global Top English Hits"),
+    DiscoveryCategory("Bollywood Hits", "Top Bollywood Songs"),
+    DiscoveryCategory("Punjabi Pop", "Trending Punjabi Hits"),
+    DiscoveryCategory("Desi Hip Hop", "Desi Hip Hop Rap India"),
+    DiscoveryCategory("Romantic", "Romantic Hindi Love Songs"),
+    DiscoveryCategory("Indie India", "Indian Indie Pop Melodies"),
+    DiscoveryCategory("90s Classics", "90s Evergreen Bollywood Hits"),
+    DiscoveryCategory("Devotional", "Top Bhakti Hindi Songs")
 )
 
 private val SonoraThemeColors = darkColorScheme(
@@ -1044,6 +1045,60 @@ fun SonoraPlayerScreen() {
         currentTrackIndex = player.currentMediaItemIndex
     }
 
+    // Auto-updating Play Next infinite queue system
+    var isAutoQueueFilling by remember { mutableStateOf(false) }
+
+    fun ensureInfiniteQueueFilled(player: Player) {
+        if (!endlessRadioEnabled || isAutoQueueFilling) return
+        val total = player.mediaItemCount
+        val curr = player.currentMediaItemIndex
+        val remaining = total - (curr + 1)
+
+        // Refill whenever 3 or fewer songs remain ahead in the queue
+        if (remaining <= 3 && total > 0) {
+            isAutoQueueFilling = true
+            coroutineScope.launch {
+                try {
+                    val lastIdx = total - 1
+                    val seedItem = if (lastIdx >= 0) player.getMediaItemAt(lastIdx) else player.currentMediaItem
+                    val seedId = seedItem?.mediaId ?: activeSongId
+                    val seedArtist = seedItem?.mediaMetadata?.artist?.toString() ?: activeArtist
+
+                    var candidateSongs = fetchYouTubeAutomixRadio(seedId)
+                    if (candidateSongs.isEmpty() && seedArtist.isNotBlank()) {
+                        val (artistTracks, _) = searchYouTubeMusic("$seedArtist hits")
+                        candidateSongs = artistTracks
+                    }
+                    if (candidateSongs.isEmpty()) {
+                        val (trendingTracks, _) = searchYouTubeMusic("Trending Hindi Bollywood Songs")
+                        candidateSongs = trendingTracks
+                    }
+
+                    val currentQueueTracks = (0 until player.mediaItemCount).map { idx ->
+                        mediaItemToTrack(player.getMediaItemAt(idx))
+                    }
+                    val filtered = filterSimilarTracks(candidateSongs, currentQueueTracks)
+
+                    var added = 0
+                    for (song in filtered) {
+                        if (added >= 5) break
+                        val streamUrl = resolveTrackAudioStream(song)
+                        if (streamUrl.isNotBlank()) {
+                            song.audioUrl = streamUrl
+                            player.addMediaItem(buildMediaItem(song))
+                            added++
+                        }
+                    }
+                    updateQueueState(player)
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                } finally {
+                    isAutoQueueFilling = false
+                }
+            }
+        }
+    }
+
     fun triggerDownload(track: FullTrackItem) {
         if (track.id in downloadingSongIds) return
         downloadingSongIds = downloadingSongIds + track.id
@@ -1136,9 +1191,14 @@ fun SonoraPlayerScreen() {
                             prefs.edit().putLong(KEY_LAST_DURATION_MS, dur).apply()
                         }
                     }
-                    if (playbackState == Player.STATE_ENDED && stopAfterCurrentTrack) {
-                        mediaController.pause()
-                        cancelSleepTimer()
+                    if (playbackState == Player.STATE_ENDED) {
+                        if (stopAfterCurrentTrack) {
+                            mediaController.pause()
+                            cancelSleepTimer()
+                        } else if (endlessRadioEnabled) {
+                            ensureInfiniteQueueFilled(mediaController)
+                            mediaController.play()
+                        }
                     }
                 }
 
@@ -1178,24 +1238,7 @@ fun SonoraPlayerScreen() {
                         .putLong(KEY_LAST_POSITION_MS, 0L)
                         .apply()
 
-                    if (endlessRadioEnabled && mediaController.currentMediaItemIndex >= mediaController.mediaItemCount - 2) {
-                        coroutineScope.launch {
-                            val similar = fetchYouTubeAutomixRadio(activeSongId)
-                            val currentQueueTracks = (0 until mediaController.mediaItemCount).map { idx ->
-                                mediaItemToTrack(mediaController.getMediaItemAt(idx))
-                            }
-                            val filteredSongs = filterSimilarTracks(similar, currentQueueTracks)
-
-                            for (song in filteredSongs.take(4)) {
-                                val sUrl = resolveTrackAudioStream(song)
-                                if (sUrl.isNotBlank()) {
-                                    song.audioUrl = sUrl
-                                    mediaController.addMediaItem(buildMediaItem(song))
-                                }
-                            }
-                            updateQueueState(mediaController)
-                        }
-                    }
+                    ensureInfiniteQueueFilled(mediaController)
                 }
             })
         }, ContextCompat.getMainExecutor(context))
@@ -1270,17 +1313,7 @@ fun SonoraPlayerScreen() {
             }
 
             if (endlessRadioEnabled) {
-                val radioSongs = fetchYouTubeAutomixRadio(targetTrack.id)
-                val filtered = filterSimilarTracks(radioSongs, listOf(targetTrack))
-
-                for (song in filtered.take(5)) {
-                    val sUrl = resolveTrackAudioStream(song)
-                    if (sUrl.isNotBlank()) {
-                        song.audioUrl = sUrl
-                        controller?.addMediaItem(buildMediaItem(song))
-                    }
-                }
-                controller?.let { updateQueueState(it) }
+                controller?.let { ensureInfiniteQueueFilled(it) }
             }
         }
     }
@@ -1402,7 +1435,7 @@ fun SonoraPlayerScreen() {
                                 val clip = ClipData.newPlainText("Song Link", "https://music.youtube.com/watch?v=${song.id}")
                                 clipboard.setPrimaryClip(clip)
                                 selectedTrackForOptions = null
-                                Toast.makeText(context, "Copied YouTube Music link", Toast.LENGTH_SHORT).show()
+                                Toast.makeText(context, "Copied link to clipboard", Toast.LENGTH_SHORT).show()
                             },
                         colors = CardDefaults.cardColors(containerColor = Color(0xFF1A222B)),
                         shape = RoundedCornerShape(16.dp)
@@ -1839,7 +1872,7 @@ fun SonoraPlayerScreen() {
             ) {
                 when (selectedNavTab) {
                     0 -> {
-                        // Home Screen with Most Listened Speed Dial & Keep Listening
+                        // Home Screen with Indian-style Most Listened Speed Dial & Keep Listening
                         val speedDialSongs = remember(mostPlayedTracks, moodTracks) {
                             val combined = mutableListOf<FullTrackItem>()
                             combined.addAll(mostPlayedTracks)
@@ -1895,7 +1928,7 @@ fun SonoraPlayerScreen() {
                                 }
                             }
 
-                            // Category Mood Filter Chips
+                            // Indian Style Category Filter Chips
                             LazyRow(
                                 modifier = Modifier.fillMaxWidth().padding(bottom = 14.dp),
                                 horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -2090,7 +2123,7 @@ fun SonoraPlayerScreen() {
                                     OutlinedTextField(
                                         value = searchQuery,
                                         onValueChange = { searchQuery = it },
-                                        placeholder = { Text("Search YouTube Music...", color = Color(0xFF6B7280)) },
+                                        placeholder = { Text("Search Hindi, English, Artists...", color = Color(0xFF6B7280)) },
                                         singleLine = true,
                                         shape = RoundedCornerShape(24.dp),
                                         keyboardOptions = KeyboardOptions(
@@ -2477,17 +2510,19 @@ fun SonoraPlayerScreen() {
                 }
             }
 
-            // Bottom Navigation Bar
+            // Refined Bottom Navigation Bar with Full Navigation Bars Insets (no cutoff)
             NavigationBar(
                 containerColor = Color(0xFF0A0F14),
                 contentColor = Color.White,
-                modifier = Modifier.height(64.dp)
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .navigationBarsPadding()
             ) {
                 NavigationBarItem(
                     selected = selectedNavTab == 0,
                     onClick = { selectedNavTab = 0 },
                     icon = { Icon(imageVector = Icons.Rounded.Home, contentDescription = "Home", modifier = Modifier.size(22.dp)) },
-                    label = { Text("Home", fontSize = 11.sp) },
+                    label = { Text("Home", fontSize = 11.sp, fontWeight = FontWeight.Medium) },
                     colors = NavigationBarItemDefaults.colors(
                         selectedIconColor = Color.White,
                         unselectedIconColor = Color(0xFF94A3B8),
@@ -2500,7 +2535,7 @@ fun SonoraPlayerScreen() {
                     selected = selectedNavTab == 1,
                     onClick = { selectedNavTab = 1 },
                     icon = { Icon(imageVector = Icons.Rounded.Search, contentDescription = "Search", modifier = Modifier.size(22.dp)) },
-                    label = { Text("Search", fontSize = 11.sp) },
+                    label = { Text("Search", fontSize = 11.sp, fontWeight = FontWeight.Medium) },
                     colors = NavigationBarItemDefaults.colors(
                         selectedIconColor = Color.White,
                         unselectedIconColor = Color(0xFF94A3B8),
@@ -2513,7 +2548,7 @@ fun SonoraPlayerScreen() {
                     selected = selectedNavTab == 2,
                     onClick = { selectedNavTab = 2 },
                     icon = { Icon(imageVector = Icons.Rounded.LibraryMusic, contentDescription = "Library", modifier = Modifier.size(22.dp)) },
-                    label = { Text("Library", fontSize = 11.sp) },
+                    label = { Text("Library", fontSize = 11.sp, fontWeight = FontWeight.Medium) },
                     colors = NavigationBarItemDefaults.colors(
                         selectedIconColor = Color.White,
                         unselectedIconColor = Color(0xFF94A3B8),
