@@ -822,7 +822,7 @@ fun filterSimilarTracks(incoming: List<FullTrackItem>, existingQueue: List<FullT
     val pool = existingQueue.toMutableList()
 
     for (candidate in incoming) {
-        val isDuplicate = pool.any { existing -> areTracksSimilar(candidate, existing) }
+        val isDuplicate = pool.any { existing -> areTracksSimilar(candidate, existing) || candidate.id == existing.id }
         if (!isDuplicate) {
             result.add(candidate)
             pool.add(candidate)
@@ -1205,6 +1205,7 @@ fun SonoraPlayerScreen(
         val curr = player.currentMediaItemIndex
         val remaining = total - (curr + 1)
 
+        // Refill when 4-5 songs remain in queue
         if ((remaining <= 5 || curr >= total - 1) && total > 0) {
             isAutoQueueFilling = true
             coroutineScope.launch {
@@ -1463,6 +1464,7 @@ fun SonoraPlayerScreen(
                 updateQueueState(player)
             }
 
+            // Seed initial queue with minimum 30 related tracks strictly without duplicates
             if (endlessRadioEnabled) {
                 coroutineScope.launch {
                     val candidates = mutableListOf<FullTrackItem>()
@@ -1953,7 +1955,7 @@ fun SonoraPlayerScreen(
         )
     }
 
-    // Interactive & Draggable Queue Dialog
+    // Up Next Queue Dialog with dedicated drag handle (≡) for reordering and smooth scrolling
     if (showQueueDialog) {
         AlertDialog(
             onDismissRequest = { showQueueDialog = false },
@@ -1985,22 +1987,7 @@ fun SonoraPlayerScreen(
                         Card(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .padding(vertical = 3.dp)
-                                .pointerInput(Unit) {
-                                    detectVerticalDragGestures { _, dragAmount ->
-                                        if (dragAmount > 50f && index < localQueue.size - 1) {
-                                            val mutable = localQueue.toMutableList()
-                                            val item = mutable.removeAt(index)
-                                            mutable.add(index + 1, item)
-                                            localQueue = mutable
-                                        } else if (dragAmount < -50f && index > 0) {
-                                            val mutable = localQueue.toMutableList()
-                                            val item = mutable.removeAt(index)
-                                            mutable.add(index - 1, item)
-                                            localQueue = mutable
-                                        }
-                                    }
-                                },
+                                .padding(vertical = 3.dp),
                             colors = CardDefaults.cardColors(
                                 containerColor = if (isCurrent) Color(0xFF263242) else Color(0xFF141C24)
                             ),
@@ -2013,11 +2000,29 @@ fun SonoraPlayerScreen(
                                     .clickable { controller?.seekToDefaultPosition(index) },
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
+                                // Dedicated Drag-and-drop Handle (≡)
                                 Icon(
                                     imageVector = Icons.Rounded.DragHandle,
                                     contentDescription = "Reorder",
                                     tint = Color(0xFF64748B),
-                                    modifier = Modifier.size(20.dp).padding(end = 4.dp)
+                                    modifier = Modifier
+                                        .size(24.dp)
+                                        .padding(end = 4.dp)
+                                        .pointerInput(Unit) {
+                                            detectVerticalDragGestures { _, dragAmount ->
+                                                if (dragAmount > 30f && index < localQueue.size - 1) {
+                                                    val mutable = localQueue.toMutableList()
+                                                    val item = mutable.removeAt(index)
+                                                    mutable.add(index + 1, item)
+                                                    localQueue = mutable
+                                                } else if (dragAmount < -30f && index > 0) {
+                                                    val mutable = localQueue.toMutableList()
+                                                    val item = mutable.removeAt(index)
+                                                    mutable.add(index - 1, item)
+                                                    localQueue = mutable
+                                                }
+                                            }
+                                        }
                                 )
 
                                 if (isCurrent) {
@@ -2144,7 +2149,6 @@ fun SonoraPlayerScreen(
                                     IconButton(onClick = {}) {
                                         Icon(imageVector = Icons.Rounded.Person, contentDescription = "Profile", tint = MaterialTheme.colorScheme.onBackground, modifier = Modifier.size(22.dp))
                                     }
-                                    // Theme Switching Bulb Icon
                                     IconButton(onClick = onToggleTheme) {
                                         Icon(
                                             imageVector = Icons.Rounded.Lightbulb,
@@ -2877,7 +2881,6 @@ fun SonoraPlayerScreen(
                                 }
                             } else {
                                 val listState = rememberLazyListState()
-                                // Auto-scroll active lyric line in sync with playback progress
                                 val activeLyricIndex = remember(currentPosition, totalDuration, liveLyricsList) {
                                     if (totalDuration > 0 && liveLyricsList.isNotEmpty()) {
                                         ((currentPosition.toFloat() / totalDuration.toFloat()) * liveLyricsList.size).toInt().coerceIn(0, liveLyricsList.size - 1)
@@ -2910,7 +2913,6 @@ fun SonoraPlayerScreen(
                                 }
                             }
 
-                            // Bottom Track Mini Card inside Lyrics View (Matching Image 1 & Image 2)
                             Spacer(modifier = Modifier.height(14.dp))
                             Card(
                                 modifier = Modifier
