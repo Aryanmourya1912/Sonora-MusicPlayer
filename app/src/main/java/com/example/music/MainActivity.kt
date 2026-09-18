@@ -5,6 +5,8 @@ import android.content.ClipboardManager
 import android.content.ComponentName
 import android.content.Context
 import android.content.SharedPreferences
+import android.graphics.Bitmap
+import android.graphics.drawable.BitmapDrawable
 import android.media.AudioManager
 import android.net.Uri
 import android.os.Bundle
@@ -143,7 +145,11 @@ import androidx.media3.common.Player
 import androidx.media3.common.Timeline
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
+import androidx.palette.graphics.Palette
+import coil.ImageLoader
 import coil.compose.AsyncImage
+import coil.request.ImageRequest
+import coil.request.SuccessResult
 import com.example.music.data.DownloadedSongEntity
 import com.example.music.data.LikedSongEntity
 import com.example.music.data.PlaylistEntity
@@ -218,6 +224,31 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
+}
+
+// Extract dominant and secondary colors from album artwork
+suspend fun extractArtworkPaletteColors(context: Context, imageUrl: String): Pair<Color, Color> = withContext(Dispatchers.IO) {
+    if (imageUrl.isBlank()) {
+        return@withContext Pair(Color(0xFF1E2836), Color(0xFF0D1520))
+    }
+    try {
+        val loader = ImageLoader(context)
+        val request = ImageRequest.Builder(context)
+            .data(imageUrl)
+            .allowHardware(false)
+            .build()
+        val result = (loader.execute(request) as? SuccessResult)?.drawable
+        val bitmap = (result as? BitmapDrawable)?.bitmap
+        if (bitmap != null) {
+            val palette = Palette.from(bitmap).generate()
+            val dominant = palette.getDominantColor(0xFF1E2836.toInt())
+            val secondary = palette.getDarkMutedColor(palette.getDarkVibrantColor(0xFF0D1520.toInt()))
+            return@withContext Pair(Color(dominant), Color(secondary))
+        }
+    } catch (e: Exception) {
+        e.printStackTrace()
+    }
+    Pair(Color(0xFF1E2836), Color(0xFF0D1520))
 }
 
 fun recordTrackPlay(context: Context, track: FullTrackItem) {
@@ -917,7 +948,7 @@ private const val KEY_LAST_AUDIO_URL = "last_audio_url"
 private const val KEY_LAST_ARTWORK_URL = "last_artwork_url"
 private const val KEY_LAST_DURATION_TXT = "last_duration_txt"
 private const val KEY_LAST_POSITION_MS = "last_position_ms"
-private const val KEY_LAST_DURATION_MS = "last_duration_ms"
+private const val KEY_LAST_DURATION_MS = "last_duration_MS"
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
@@ -989,6 +1020,32 @@ fun SonoraPlayerScreen() {
     var activeAudioUrl by remember { mutableStateOf("") }
     var activeDurationFormatted by remember { mutableStateOf("0:00") }
 
+    // Dynamic Artwork Ambient Background Palette Colors
+    var rawDominantColor by remember { mutableStateOf(Color(0xFF1E2836)) }
+    var rawSecondaryColor by remember { mutableStateOf(Color(0xFF0D1520)) }
+
+    LaunchedEffect(activeArtworkUrl) {
+        if (activeArtworkUrl.isNotBlank()) {
+            val (dom, sec) = extractArtworkPaletteColors(context, activeArtworkUrl)
+            rawDominantColor = dom
+            rawSecondaryColor = sec
+        } else {
+            rawDominantColor = Color(0xFF1E2836)
+            rawSecondaryColor = Color(0xFF0D1520)
+        }
+    }
+
+    val animatedDominantColor by animateColorAsState(
+        targetValue = rawDominantColor,
+        animationSpec = tween(650),
+        label = "domColorAnim"
+    )
+    val animatedSecondaryColor by animateColorAsState(
+        targetValue = rawSecondaryColor,
+        animationSpec = tween(650),
+        label = "secColorAnim"
+    )
+
     val isCurrentSongLiked by dao.isSongLiked(activeSongId).collectAsState(initial = false)
     val isCurrentSongDownloaded by dao.isSongDownloaded(activeSongId).collectAsState(initial = false)
 
@@ -1011,8 +1068,22 @@ fun SonoraPlayerScreen() {
         mutableFloatStateOf(audioManager.getStreamVolume(AudioManager.STREAM_MUSIC).toFloat())
     }
 
-    BackHandler(enabled = isPlayerExpanded) {
-        isPlayerExpanded = false
+    // Android System Back Navigation: Hierarchical back press routing
+    BackHandler(enabled = true) {
+        when {
+            isPlayerExpanded -> {
+                isPlayerExpanded = false
+            }
+            viewingPlaylist != null -> {
+                viewingPlaylist = null
+            }
+            selectedNavTab != 0 -> {
+                selectedNavTab = 0
+            }
+            else -> {
+                (context as? ComponentActivity)?.finish()
+            }
+        }
     }
 
     LaunchedEffect(selectedMoodCategory) {
@@ -2429,7 +2500,7 @@ fun SonoraPlayerScreen() {
                 }
             }
 
-            // Floating Miniplayer
+            // Floating Miniplayer with Artwork-Adaptive Ambient Background
             if (activeSongId.isNotBlank()) {
                 val progressFraction = if (totalDuration > 0) (currentPosition.toFloat() / totalDuration.toFloat()).coerceIn(0f, 1f) else 0f
 
@@ -2439,109 +2510,122 @@ fun SonoraPlayerScreen() {
                         .padding(horizontal = 12.dp, vertical = 4.dp)
                         .clickable { isPlayerExpanded = true },
                     shape = RoundedCornerShape(28.dp),
-                    colors = CardDefaults.cardColors(containerColor = Color(0xFF131F2A))
+                    colors = CardDefaults.cardColors(containerColor = Color.Transparent)
                 ) {
-                    Row(
+                    Box(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(horizontal = 8.dp, vertical = 6.dp),
-                        verticalAlignment = Alignment.CenterVertically
+                            .background(
+                                Brush.horizontalGradient(
+                                    colors = listOf(
+                                        animatedDominantColor.copy(alpha = 0.85f),
+                                        animatedSecondaryColor.copy(alpha = 0.92f)
+                                    )
+                                )
+                            )
                     ) {
-                        Box(
+                        Row(
                             modifier = Modifier
-                                .size(46.dp)
-                                .clickable {
-                                    controller?.let { player ->
-                                        if (player.isPlaying) player.pause() else player.play()
-                                    }
-                                },
-                            contentAlignment = Alignment.Center
+                                .fillMaxWidth()
+                                .padding(horizontal = 8.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            CircularProgressIndicator(
-                                progress = { progressFraction },
-                                modifier = Modifier.fillMaxSize(),
-                                strokeWidth = 2.5.dp,
-                                color = Color(0xFFD3E2F8),
-                                trackColor = Color(0x33FFFFFF)
-                            )
-                            AsyncImage(
-                                model = activeArtworkUrl,
-                                contentDescription = activeTitle,
-                                modifier = Modifier.size(36.dp).clip(CircleShape),
-                                contentScale = ContentScale.Crop
-                            )
                             Box(
                                 modifier = Modifier
-                                    .size(36.dp)
-                                    .clip(CircleShape)
-                                    .background(Color(0x55000000)),
+                                    .size(46.dp)
+                                    .clickable {
+                                        controller?.let { player ->
+                                            if (player.isPlaying) player.pause() else player.play()
+                                        }
+                                    },
                                 contentAlignment = Alignment.Center
                             ) {
-                                Icon(
-                                    imageVector = if (isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
-                                    contentDescription = if (isPlaying) "Pause" else "Play",
-                                    tint = Color.White,
-                                    modifier = Modifier.size(16.dp)
+                                CircularProgressIndicator(
+                                    progress = { progressFraction },
+                                    modifier = Modifier.fillMaxSize(),
+                                    strokeWidth = 2.5.dp,
+                                    color = Color.White,
+                                    trackColor = Color(0x33FFFFFF)
                                 )
-                            }
-                        }
-
-                        Spacer(modifier = Modifier.width(10.dp))
-
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = activeTitle,
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 14.sp,
-                                color = Color.White,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                            Text(
-                                text = activeArtist,
-                                fontSize = 12.sp,
-                                color = Color(0xFF94A3B8),
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                        }
-
-                        IconButton(
-                            onClick = {
-                                selectedTrackForOptions = FullTrackItem(
-                                    id = activeSongId,
-                                    title = activeTitle,
-                                    artist = activeArtist,
-                                    audioUrl = activeAudioUrl,
-                                    artworkUrl = activeArtworkUrl,
-                                    durationFormatted = activeDurationFormatted
+                                AsyncImage(
+                                    model = activeArtworkUrl,
+                                    contentDescription = activeTitle,
+                                    modifier = Modifier.size(36.dp).clip(CircleShape),
+                                    contentScale = ContentScale.Crop
                                 )
-                            }
-                        ) {
-                            Icon(imageVector = Icons.Rounded.Person, contentDescription = "Profile", tint = Color.White, modifier = Modifier.size(20.dp))
-                        }
-
-                        RefinedLikeMark(
-                            isLiked = isCurrentSongLiked,
-                            onClick = {
-                                coroutineScope.launch {
-                                    if (isCurrentSongLiked) {
-                                        dao.deleteLikedSongById(activeSongId)
-                                    } else {
-                                        dao.insertLikedSong(
-                                            LikedSongEntity(
-                                                id = activeSongId,
-                                                title = activeTitle,
-                                                artist = activeArtist,
-                                                audioUrl = activeAudioUrl,
-                                                artworkUrl = activeArtworkUrl,
-                                                duration = activeDurationFormatted
-                                            )
-                                        )
-                                    }
+                                Box(
+                                    modifier = Modifier
+                                        .size(36.dp)
+                                        .clip(CircleShape)
+                                        .background(Color(0x55000000)),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(
+                                        imageVector = if (isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
+                                        contentDescription = if (isPlaying) "Pause" else "Play",
+                                        tint = Color.White,
+                                        modifier = Modifier.size(16.dp)
+                                    )
                                 }
                             }
-                        )
+
+                            Spacer(modifier = Modifier.width(10.dp))
+
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = activeTitle,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 14.sp,
+                                    color = Color.White,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                Text(
+                                    text = activeArtist,
+                                    fontSize = 12.sp,
+                                    color = Color(0xFFD1D5DB),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+
+                            IconButton(
+                                onClick = {
+                                    selectedTrackForOptions = FullTrackItem(
+                                        id = activeSongId,
+                                        title = activeTitle,
+                                        artist = activeArtist,
+                                        audioUrl = activeAudioUrl,
+                                        artworkUrl = activeArtworkUrl,
+                                        durationFormatted = activeDurationFormatted
+                                    )
+                                }
+                            ) {
+                                Icon(imageVector = Icons.Rounded.Person, contentDescription = "Profile", tint = Color.White, modifier = Modifier.size(20.dp))
+                            }
+
+                            RefinedLikeMark(
+                                isLiked = isCurrentSongLiked,
+                                onClick = {
+                                    coroutineScope.launch {
+                                        if (isCurrentSongLiked) {
+                                            dao.deleteLikedSongById(activeSongId)
+                                        } else {
+                                            dao.insertLikedSong(
+                                                LikedSongEntity(
+                                                    id = activeSongId,
+                                                    title = activeTitle,
+                                                    artist = activeArtist,
+                                                    audioUrl = activeAudioUrl,
+                                                    artworkUrl = activeArtworkUrl,
+                                                    duration = activeDurationFormatted
+                                                )
+                                            )
+                                        }
+                                    }
+                                }
+                            )
+                        }
                     }
                 }
             }
@@ -2598,7 +2682,7 @@ fun SonoraPlayerScreen() {
             }
         }
 
-        // Full Screen Now Playing View
+        // Full Screen Now Playing View with Artwork-Adaptive Ambient Background
         AnimatedVisibility(
             visible = isPlayerExpanded,
             enter = slideInVertically(initialOffsetY = { it }),
@@ -2609,7 +2693,11 @@ fun SonoraPlayerScreen() {
                     .fillMaxSize()
                     .background(
                         Brush.verticalGradient(
-                            colors = listOf(Color(0xFF0F2231), Color(0xFF070B10))
+                            colors = listOf(
+                                animatedDominantColor.copy(alpha = 0.95f),
+                                animatedSecondaryColor.copy(alpha = 0.90f),
+                                Color(0xFF070B10)
+                            )
                         )
                     )
                     .statusBarsPadding()
@@ -2636,7 +2724,7 @@ fun SonoraPlayerScreen() {
                             Text(
                                 text = "Now Playing",
                                 fontSize = 13.sp,
-                                color = Color(0xFF94A3B8),
+                                color = Color(0xFFD1D5DB),
                                 fontWeight = FontWeight.Medium
                             )
                             Text(
@@ -2686,7 +2774,7 @@ fun SonoraPlayerScreen() {
                                 Text(
                                     text = activeArtist,
                                     fontSize = 14.sp,
-                                    color = Color(0xFF94A3B8),
+                                    color = Color(0xFFCBD5E1),
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis
                                 )
@@ -2696,7 +2784,7 @@ fun SonoraPlayerScreen() {
                                 Box(
                                     modifier = Modifier
                                         .clip(RoundedCornerShape(18.dp))
-                                        .background(Color(0xFF283444))
+                                        .background(Color(0x40FFFFFF))
                                         .clickable {
                                             val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                                             clipboard.setPrimaryClip(ClipData.newPlainText("Track", "https://music.youtube.com/watch?v=$activeSongId"))
@@ -2710,7 +2798,7 @@ fun SonoraPlayerScreen() {
                                 Box(
                                     modifier = Modifier
                                         .clip(RoundedCornerShape(18.dp))
-                                        .background(Color(0xFF283444))
+                                        .background(Color(0x40FFFFFF))
                                         .clickable {
                                             coroutineScope.launch {
                                                 if (isCurrentSongLiked) {
@@ -2763,7 +2851,7 @@ fun SonoraPlayerScreen() {
                             colors = SliderDefaults.colors(
                                 thumbColor = Color.White,
                                 activeTrackColor = Color.White,
-                                inactiveTrackColor = Color(0xFF2A3644)
+                                inactiveTrackColor = Color(0x40FFFFFF)
                             ),
                             modifier = Modifier.fillMaxWidth().height(20.dp)
                         )
@@ -2775,26 +2863,27 @@ fun SonoraPlayerScreen() {
                             Text(
                                 text = formatTime(if (isDraggingSlider) sliderDragValue.toLong() else currentPosition),
                                 fontSize = 12.sp,
-                                color = Color(0xFF94A3B8)
+                                color = Color(0xFFD1D5DB)
                             )
                             Text(
                                 text = formatTime(totalDuration),
                                 fontSize = 12.sp,
-                                color = Color(0xFF94A3B8)
+                                color = Color(0xFFD1D5DB)
                             )
                         }
                     }
 
                     Row(
                         modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
+                        verticalAlignment = Alignment.CenterVertically
+                        ,
                         horizontalArrangement = Arrangement.SpaceEvenly
                     ) {
                         Box(
                             modifier = Modifier
                                 .size(64.dp)
                                 .clip(CircleShape)
-                                .background(Color(0xFF8FA2B5))
+                                .background(Color(0x50FFFFFF))
                                 .clickable {
                                     controller?.let { player ->
                                         if (player.currentPosition > 3000L) {
@@ -2806,14 +2895,14 @@ fun SonoraPlayerScreen() {
                                 },
                             contentAlignment = Alignment.Center
                         ) {
-                            Icon(imageVector = Icons.Rounded.SkipPrevious, contentDescription = "Prev", tint = Color(0xFF0F1B26), modifier = Modifier.size(28.dp))
+                            Icon(imageVector = Icons.Rounded.SkipPrevious, contentDescription = "Prev", tint = Color.White, modifier = Modifier.size(28.dp))
                         }
 
                         Box(
                             modifier = Modifier
                                 .height(64.dp)
                                 .clip(RoundedCornerShape(32.dp))
-                                .background(Color(0xFFD3E2F8))
+                                .background(Color.White)
                                 .clickable {
                                     controller?.let { player ->
                                         if (player.isPlaying) player.pause() else player.play()
@@ -2843,7 +2932,7 @@ fun SonoraPlayerScreen() {
                             modifier = Modifier
                                 .size(64.dp)
                                 .clip(CircleShape)
-                                .background(Color(0xFF8FA2B5))
+                                .background(Color(0x50FFFFFF))
                                 .clickable {
                                     controller?.let { player ->
                                         if (player.hasNextMediaItem()) {
@@ -2853,7 +2942,7 @@ fun SonoraPlayerScreen() {
                                 },
                             contentAlignment = Alignment.Center
                         ) {
-                            Icon(imageVector = Icons.Rounded.SkipNext, contentDescription = "Next", tint = Color(0xFF0F1B26), modifier = Modifier.size(28.dp))
+                            Icon(imageVector = Icons.Rounded.SkipNext, contentDescription = "Next", tint = Color.White, modifier = Modifier.size(28.dp))
                         }
                     }
 
@@ -2866,7 +2955,7 @@ fun SonoraPlayerScreen() {
                             modifier = Modifier
                                 .size(46.dp)
                                 .clip(RoundedCornerShape(12.dp))
-                                .background(Color(0xFF141C24))
+                                .background(Color(0x30FFFFFF))
                                 .clickable { showQueueDialog = true },
                             contentAlignment = Alignment.Center
                         ) {
@@ -2877,7 +2966,7 @@ fun SonoraPlayerScreen() {
                             modifier = Modifier
                                 .size(46.dp)
                                 .clip(RoundedCornerShape(12.dp))
-                                .background(Color(0xFF141C24))
+                                .background(Color(0x30FFFFFF))
                                 .clickable { showSleepTimerDialog = true },
                             contentAlignment = Alignment.Center
                         ) {
@@ -2888,7 +2977,7 @@ fun SonoraPlayerScreen() {
                             modifier = Modifier
                                 .size(46.dp)
                                 .clip(RoundedCornerShape(12.dp))
-                                .background(if (isShuffleEnabled) Color(0xFF2E3D4F) else Color(0xFF141C24))
+                                .background(if (isShuffleEnabled) Color(0x60FFFFFF) else Color(0x30FFFFFF))
                                 .clickable {
                                     isShuffleEnabled = !isShuffleEnabled
                                     controller?.shuffleModeEnabled = isShuffleEnabled
@@ -2902,7 +2991,7 @@ fun SonoraPlayerScreen() {
                             modifier = Modifier
                                 .size(46.dp)
                                 .clip(RoundedCornerShape(12.dp))
-                                .background(Color(0xFF141C24))
+                                .background(Color(0x30FFFFFF))
                                 .clickable { Toast.makeText(context, "Equalizer coming soon", Toast.LENGTH_SHORT).show() },
                             contentAlignment = Alignment.Center
                         ) {
@@ -2913,7 +3002,7 @@ fun SonoraPlayerScreen() {
                             modifier = Modifier
                                 .size(46.dp)
                                 .clip(RoundedCornerShape(12.dp))
-                                .background(if (repeatModeState != Player.REPEAT_MODE_OFF) Color(0xFF2E3D4F) else Color(0xFF141C24))
+                                .background(if (repeatModeState != Player.REPEAT_MODE_OFF) Color(0x60FFFFFF) else Color(0x30FFFFFF))
                                 .clickable {
                                     repeatModeState = when (repeatModeState) {
                                         Player.REPEAT_MODE_OFF -> Player.REPEAT_MODE_ALL
@@ -2936,7 +3025,7 @@ fun SonoraPlayerScreen() {
                             modifier = Modifier
                                 .size(46.dp)
                                 .clip(CircleShape)
-                                .background(Color(0xFFD3E2F8))
+                                .background(Color.White)
                                 .clickable {
                                     selectedTrackForOptions = FullTrackItem(
                                         id = activeSongId,

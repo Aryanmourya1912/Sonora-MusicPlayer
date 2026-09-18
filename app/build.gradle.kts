@@ -51,8 +51,10 @@ dependencies {
 
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.material3:material3")
-    // Official Google Material Vector Icons library for high-resolution graphics
     implementation("androidx.compose.material:material-icons-extended")
+
+    // AndroidX Palette API for artwork color extraction
+    implementation("androidx.palette:palette-ktx:1.0.0")
 
     // Media3 Audio Engine
     val media3Version = "1.5.1"
