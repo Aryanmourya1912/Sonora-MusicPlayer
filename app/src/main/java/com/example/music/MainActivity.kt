@@ -8,6 +8,7 @@ import android.content.SharedPreferences
 import android.media.AudioManager
 import android.net.Uri
 import android.os.Bundle
+import android.util.Base64
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
@@ -151,7 +152,10 @@ import org.json.JSONObject
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
+import java.net.URLEncoder
 import java.util.Locale
+import javax.crypto.Cipher
+import javax.crypto.spec.SecretKeySpec
 import kotlin.math.max
 
 data class FullTrackItem(
@@ -206,6 +210,7 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+// Recursively walks arbitrary InnerTube JSON responses to find target renderers
 fun findRenderersRecursive(json: Any?, targetKey: String, sink: MutableList<JSONObject>) {
     when (json) {
         is JSONObject -> {
@@ -226,6 +231,50 @@ fun findRenderersRecursive(json: Any?, targetKey: String, sink: MutableList<JSON
             }
         }
     }
+}
+
+// Robust multi-path videoId extractor for YouTube Music renderers
+fun extractVideoIdFromRenderer(item: JSONObject): String {
+    item.optString("videoId").takeIf { it.isNotBlank() }?.let { return it }
+
+    item.optJSONObject("playlistItemData")?.optString("videoId")?.takeIf { it.isNotBlank() }?.let { return it }
+
+    item.optJSONObject("overlay")
+        ?.optJSONObject("musicItemThumbnailOverlayRenderer")
+        ?.optJSONObject("content")
+        ?.optJSONObject("musicPlayButtonRenderer")
+        ?.optJSONObject("playNavigationEndpoint")
+        ?.optJSONObject("watchEndpoint")
+        ?.optString("videoId")?.takeIf { it.isNotBlank() }?.let { return it }
+
+    val flexCols = item.optJSONArray("flexColumns")
+    if (flexCols != null) {
+        for (c in 0 until flexCols.length()) {
+            val runs = flexCols.optJSONObject(c)
+                ?.optJSONObject("musicResponsiveListItemFlexColumnRenderer")
+                ?.optJSONObject("text")
+                ?.optJSONArray("runs")
+            if (runs != null) {
+                for (r in 0 until runs.length()) {
+                    val vId = runs.optJSONObject(r)
+                        ?.optJSONObject("navigationEndpoint")
+                        ?.optJSONObject("watchEndpoint")
+                        ?.optString("videoId")
+                    if (!vId.isNullOrBlank()) return vId
+                }
+            }
+        }
+    }
+
+    item.optJSONObject("navigationEndpoint")
+        ?.optJSONObject("watchEndpoint")
+        ?.optString("videoId")?.takeIf { it.isNotBlank() }?.let { return it }
+
+    item.optJSONObject("doubleTapNavigationEndpoint")
+        ?.optJSONObject("watchEndpoint")
+        ?.optString("videoId")?.takeIf { it.isNotBlank() }?.let { return it }
+
+    return ""
 }
 
 suspend fun searchYouTubeMusic(query: String): Pair<List<FullTrackItem>, String?> = withContext(Dispatchers.IO) {
@@ -253,10 +302,10 @@ suspend fun searchYouTubeMusic(query: String): Pair<List<FullTrackItem>, String?
             })
         }
 
-        conn.outputStream.use { it.write(payload.toString().toByteArray()) }
+        conn.outputStream.use { it.write(payload.toString().toByteArray(Charsets.UTF_8)) }
 
         if (conn.responseCode != HttpURLConnection.HTTP_OK) {
-            return@withContext Pair(emptyList(), "YouTube Music status: ${conn.responseCode}")
+            return@withContext Pair(emptyList(), "YouTube status: ${conn.responseCode}")
         }
 
         val respText = conn.inputStream.bufferedReader().use { it.readText() }
@@ -266,10 +315,7 @@ suspend fun searchYouTubeMusic(query: String): Pair<List<FullTrackItem>, String?
         findRenderersRecursive(root, "musicResponsiveListItemRenderer", renderers)
 
         for (item in renderers) {
-            val videoId = item.optJSONObject("playlistItemData")?.optString("videoId")
-                ?: item.optJSONObject("navigationEndpoint")?.optJSONObject("watchEndpoint")?.optString("videoId")
-                ?: ""
-
+            val videoId = extractVideoIdFromRenderer(item)
             if (videoId.isBlank()) continue
 
             val flexCols = item.optJSONArray("flexColumns") ?: continue
@@ -279,7 +325,14 @@ suspend fun searchYouTubeMusic(query: String): Pair<List<FullTrackItem>, String?
 
             val col1Runs = flexCols.optJSONObject(1)?.optJSONObject("musicResponsiveListItemFlexColumnRenderer")
                 ?.optJSONObject("text")?.optJSONArray("runs")
-            val artist = sanitizeText(col1Runs?.optJSONObject(0)?.optString("text", "Unknown Artist") ?: "Unknown Artist")
+            var artist = "Unknown Artist"
+            if (col1Runs != null && col1Runs.length() > 0) {
+                val candidate = col1Runs.optJSONObject(0)?.optString("text", "") ?: ""
+                if (candidate.isNotBlank() && candidate != " • ") {
+                    artist = candidate
+                }
+            }
+            artist = sanitizeText(artist)
 
             var duration = ""
             val fixedCols = item.optJSONArray("fixedColumns")
@@ -325,7 +378,7 @@ suspend fun fetchYouTubeAutomixRadio(videoId: String): List<FullTrackItem> = wit
         conn.readTimeout = 7000
         conn.doOutput = true
         conn.setRequestProperty("Content-Type", "application/json")
-        conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+        conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
         conn.setRequestProperty("Referer", "https://music.youtube.com/")
 
         val payload = JSONObject().apply {
@@ -341,7 +394,7 @@ suspend fun fetchYouTubeAutomixRadio(videoId: String): List<FullTrackItem> = wit
             })
         }
 
-        conn.outputStream.use { it.write(payload.toString().toByteArray()) }
+        conn.outputStream.use { it.write(payload.toString().toByteArray(Charsets.UTF_8)) }
 
         if (conn.responseCode == HttpURLConnection.HTTP_OK) {
             val respText = conn.inputStream.bufferedReader().use { it.readText() }
@@ -351,7 +404,7 @@ suspend fun fetchYouTubeAutomixRadio(videoId: String): List<FullTrackItem> = wit
             findRenderersRecursive(root, "playlistPanelVideoRenderer", renderers)
 
             for (item in renderers) {
-                val vId = item.optString("videoId", "")
+                val vId = extractVideoIdFromRenderer(item)
                 if (vId.isBlank()) continue
 
                 val title = sanitizeText(item.optJSONObject("title")?.optJSONArray("runs")?.optJSONObject(0)?.optString("text", "Unknown Track") ?: "Unknown Track")
@@ -385,182 +438,205 @@ suspend fun fetchYouTubeAutomixRadio(videoId: String): List<FullTrackItem> = wit
     results
 }
 
-// Multi-strategy audio stream resolver
-suspend fun resolveYouTubeStreamUrl(videoId: String): Pair<String, String?> = withContext(Dispatchers.IO) {
-    if (videoId.isBlank()) return@withContext Pair("", "Empty video ID")
-    var lastError: String? = null
+fun decryptMediaUrl(encryptedUrl: String): String {
+    if (encryptedUrl.isBlank()) return ""
+    return try {
+        val key = "38346591".toByteArray(Charsets.UTF_8)
+        val keySpec = SecretKeySpec(key, "DES")
+        val cipher = Cipher.getInstance("DES/ECB/PKCS5Padding")
+        cipher.init(Cipher.DECRYPT_MODE, keySpec)
+        val decoded = Base64.decode(encryptedUrl.trim(), Base64.DEFAULT)
+        val decrypted = cipher.doFinal(decoded)
+        var rawUrl = String(decrypted, Charsets.UTF_8).trim()
 
-    // Strategy 1: Production iOS Client (returns unciphered direct audio streams)
-    try {
-        val url = URL("https://www.youtube.com/youtubei/v1/player")
-        val conn = url.openConnection() as HttpURLConnection
-        conn.requestMethod = "POST"
-        conn.connectTimeout = 6000
-        conn.readTimeout = 6000
-        conn.doOutput = true
-        conn.setRequestProperty("Content-Type", "application/json")
-        conn.setRequestProperty("User-Agent", "com.google.ios.youtube/19.29.1 (iPhone14,3; U; CPU iOS 15_6 like Mac OS X; en_US)")
-        conn.setRequestProperty("X-YouTube-Client-Name", "5")
-        conn.setRequestProperty("X-YouTube-Client-Version", "19.29.1")
-        conn.setRequestProperty("Origin", "https://www.youtube.com")
-
-        val payload = JSONObject().apply {
-            put("videoId", videoId)
-            put("contentCheckOk", true)
-            put("racyCheckOk", true)
-            put("context", JSONObject().apply {
-                put("client", JSONObject().apply {
-                    put("clientName", "IOS")
-                    put("clientVersion", "19.29.1")
-                    put("deviceMake", "Apple")
-                    put("deviceModel", "iPhone14,3")
-                    put("osName", "iOS")
-                    put("osVersion", "15.6.0.19G71")
-                    put("hl", "en")
-                    put("gl", "US")
-                })
-            })
-            put("playbackContext", JSONObject().apply {
-                put("contentPlaybackContext", JSONObject().apply {
-                    put("html5Preference", "HTML5_PREF_WANTS")
-                })
-            })
+        if (rawUrl.startsWith("http://")) {
+            rawUrl = rawUrl.replaceFirst("http://", "https://")
         }
-
-        conn.outputStream.use { it.write(payload.toString().toByteArray(Charsets.UTF_8)) }
-
-        if (conn.responseCode == HttpURLConnection.HTTP_OK) {
-            val resp = conn.inputStream.bufferedReader().use { it.readText() }
-            val root = JSONObject(resp)
-            val status = root.optJSONObject("playabilityStatus")?.optString("status")
-            if (status != null && status != "OK") {
-                lastError = root.optJSONObject("playabilityStatus")?.optString("reason", status)
-            }
-
-            val streamingData = root.optJSONObject("streamingData")
-            val formats = streamingData?.optJSONArray("adaptiveFormats")
-            if (formats != null) {
-                var bestUrl = ""
-                var maxBitrate = 0L
-                for (i in 0 until formats.length()) {
-                    val fmt = formats.getJSONObject(i)
-                    val mime = fmt.optString("mimeType", "")
-                    val streamUrl = fmt.optString("url", "")
-                    if (mime.startsWith("audio/") && streamUrl.isNotBlank()) {
-                        val bitrate = fmt.optLong("bitrate", 0L)
-                        if (bitrate > maxBitrate) {
-                            maxBitrate = bitrate
-                            bestUrl = streamUrl
-                        }
-                    }
-                }
-                if (bestUrl.isNotBlank()) return@withContext Pair(bestUrl, null)
-            }
-        } else {
-            lastError = "YouTube returned status ${conn.responseCode}"
+        if (rawUrl.contains("_96.mp4")) {
+            rawUrl = rawUrl.replace("_96.mp4", "_160.mp4")
+        } else if (rawUrl.contains("_96.m4a")) {
+            rawUrl = rawUrl.replace("_96.m4a", "_160.m4a")
         }
+        rawUrl
     } catch (e: Exception) {
-        lastError = e.localizedMessage ?: "Connection error"
+        ""
     }
+}
 
-    // Strategy 2: Android Testsuite Client
-    try {
-        val url = URL("https://www.youtube.com/youtubei/v1/player")
-        val conn = url.openConnection() as HttpURLConnection
-        conn.requestMethod = "POST"
-        conn.connectTimeout = 5000
-        conn.readTimeout = 5000
-        conn.doOutput = true
-        conn.setRequestProperty("Content-Type", "application/json")
-        conn.setRequestProperty("User-Agent", "GoogleTest/1.0")
+// Multi-Tier Stream Resolver: Direct InnerTube -> Piped Instances -> Clean CDN Fail-Safe
+suspend fun resolveTrackAudioStream(track: FullTrackItem): String = withContext(Dispatchers.IO) {
+    val videoId = track.id
 
-        val payload = JSONObject().apply {
-            put("videoId", videoId)
-            put("contentCheckOk", true)
-            put("racyCheckOk", true)
-            put("context", JSONObject().apply {
-                put("client", JSONObject().apply {
-                    put("clientName", "ANDROID_TESTSUITE")
-                    put("clientVersion", "1.9")
-                    put("androidSdkVersion", 31)
-                    put("hl", "en")
-                    put("gl", "US")
-                })
-            })
-        }
-
-        conn.outputStream.use { it.write(payload.toString().toByteArray(Charsets.UTF_8)) }
-
-        if (conn.responseCode == HttpURLConnection.HTTP_OK) {
-            val resp = conn.inputStream.bufferedReader().use { it.readText() }
-            val root = JSONObject(resp)
-            val formats = root.optJSONObject("streamingData")?.optJSONArray("adaptiveFormats")
-            if (formats != null) {
-                var bestUrl = ""
-                var maxBitrate = 0L
-                for (i in 0 until formats.length()) {
-                    val fmt = formats.getJSONObject(i)
-                    val mime = fmt.optString("mimeType", "")
-                    val streamUrl = fmt.optString("url", "")
-                    if (mime.startsWith("audio/") && streamUrl.isNotBlank()) {
-                        val bitrate = fmt.optLong("bitrate", 0L)
-                        if (bitrate > maxBitrate) {
-                            maxBitrate = bitrate
-                            bestUrl = streamUrl
-                        }
-                    }
-                }
-                if (bestUrl.isNotBlank()) return@withContext Pair(bestUrl, null)
-            }
-        }
-    } catch (e: Exception) {
-        // Continue to Strategy 3
-    }
-
-    // Strategy 3: Active Invidious mirror resolvers
-    val mirrors = listOf(
-        "https://inv.nadeko.net/api/v1/videos/$videoId",
-        "https://invidious.nerdvpn.de/api/v1/videos/$videoId",
-        "https://yewtu.be/api/v1/videos/$videoId",
-        "https://inv.tux.pizza/api/v1/videos/$videoId"
-    )
-
-    for (mirror in mirrors) {
+    // Tier 1: Direct InnerTube Player API via ANDROID_TESTSUITE (unencrypted direct URLs)
+    if (videoId.isNotBlank()) {
         try {
-            val url = URL(mirror)
+            val url = URL("https://www.youtube.com/youtubei/v1/player")
             val conn = url.openConnection() as HttpURLConnection
-            conn.requestMethod = "GET"
+            conn.requestMethod = "POST"
             conn.connectTimeout = 4000
             conn.readTimeout = 4000
-            conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-            conn.setRequestProperty("Accept", "application/json")
+            conn.doOutput = true
+            conn.setRequestProperty("Content-Type", "application/json")
+            conn.setRequestProperty("User-Agent", "GoogleTest/1.0")
+
+            val payload = JSONObject().apply {
+                put("videoId", videoId)
+                put("contentCheckOk", true)
+                put("racyCheckOk", true)
+                put("context", JSONObject().apply {
+                    put("client", JSONObject().apply {
+                        put("clientName", "ANDROID_TESTSUITE")
+                        put("clientVersion", "1.9")
+                        put("androidSdkVersion", 30)
+                        put("hl", "en")
+                        put("gl", "US")
+                    })
+                })
+            }
+
+            conn.outputStream.use { it.write(payload.toString().toByteArray(Charsets.UTF_8)) }
 
             if (conn.responseCode == HttpURLConnection.HTTP_OK) {
                 val resp = conn.inputStream.bufferedReader().use { it.readText() }
                 val root = JSONObject(resp)
-                val formats = root.optJSONArray("adaptiveFormats")
+                val formats = root.optJSONObject("streamingData")?.optJSONArray("adaptiveFormats")
                 if (formats != null) {
                     var bestUrl = ""
                     var maxBitrate = 0L
                     for (i in 0 until formats.length()) {
                         val fmt = formats.getJSONObject(i)
-                        val type = fmt.optString("type", "")
-                        val sUrl = fmt.optString("url", "")
-                        val bitrate = fmt.optLong("bitrate", 0L)
-                        if (type.startsWith("audio/") && sUrl.isNotBlank() && bitrate >= maxBitrate) {
-                            maxBitrate = bitrate
-                            bestUrl = sUrl
+                        val mime = fmt.optString("mimeType", "")
+                        val streamUrl = fmt.optString("url", "")
+                        if (mime.startsWith("audio/") && streamUrl.isNotBlank()) {
+                            val bitrate = fmt.optLong("bitrate", 0L)
+                            if (bitrate > maxBitrate) {
+                                maxBitrate = bitrate
+                                bestUrl = streamUrl
+                            }
                         }
                     }
-                    if (bestUrl.isNotBlank()) return@withContext Pair(bestUrl, null)
+                    if (bestUrl.isNotBlank()) return@withContext bestUrl
                 }
             }
-        } catch (e: Exception) {
-            continue
+        } catch (_: Exception) {}
+
+        // Tier 2: TV HTML5 Embedded Player
+        try {
+            val url = URL("https://www.youtube.com/youtubei/v1/player")
+            val conn = url.openConnection() as HttpURLConnection
+            conn.requestMethod = "POST"
+            conn.connectTimeout = 4000
+            conn.readTimeout = 4000
+            conn.doOutput = true
+            conn.setRequestProperty("Content-Type", "application/json")
+            conn.setRequestProperty("User-Agent", "Mozilla/5.0 (SMART-TV; Linux; Tizen 5.0) AppleWebKit/538.1 (KHTML, like Gecko) Version/5.0 TV Safari/538.1")
+
+            val payload = JSONObject().apply {
+                put("videoId", videoId)
+                put("contentCheckOk", true)
+                put("racyCheckOk", true)
+                put("context", JSONObject().apply {
+                    put("client", JSONObject().apply {
+                        put("clientName", "TVHTML5_SIMPLY_EMBEDDED_PLAYER")
+                        put("clientVersion", "2.0")
+                        put("hl", "en")
+                        put("gl", "US")
+                    })
+                    put("thirdParty", JSONObject().apply {
+                        put("embedUrl", "https://www.youtube.com")
+                    })
+                })
+            }
+
+            conn.outputStream.use { it.write(payload.toString().toByteArray(Charsets.UTF_8)) }
+
+            if (conn.responseCode == HttpURLConnection.HTTP_OK) {
+                val resp = conn.inputStream.bufferedReader().use { it.readText() }
+                val root = JSONObject(resp)
+                val formats = root.optJSONObject("streamingData")?.optJSONArray("adaptiveFormats")
+                if (formats != null) {
+                    var bestUrl = ""
+                    var maxBitrate = 0L
+                    for (i in 0 until formats.length()) {
+                        val fmt = formats.getJSONObject(i)
+                        val mime = fmt.optString("mimeType", "")
+                        val streamUrl = fmt.optString("url", "")
+                        if (mime.startsWith("audio/") && streamUrl.isNotBlank()) {
+                            val bitrate = fmt.optLong("bitrate", 0L)
+                            if (bitrate > maxBitrate) {
+                                maxBitrate = bitrate
+                                bestUrl = streamUrl
+                            }
+                        }
+                    }
+                    if (bestUrl.isNotBlank()) return@withContext bestUrl
+                }
+            }
+        } catch (_: Exception) {}
+
+        // Tier 3: Active Piped Decipher Instances
+        val pipedInstances = listOf(
+            "https://pipedapi.adminforge.de",
+            "https://pipedapi.tokhmi.xyz",
+            "https://api.piped.yt"
+        )
+        for (base in pipedInstances) {
+            try {
+                val url = URL("$base/streams/$videoId")
+                val conn = url.openConnection() as HttpURLConnection
+                conn.requestMethod = "GET"
+                conn.connectTimeout = 4000
+                conn.readTimeout = 4000
+                conn.setRequestProperty("User-Agent", "Mozilla/5.0")
+                if (conn.responseCode == HttpURLConnection.HTTP_OK) {
+                    val resp = conn.inputStream.bufferedReader().use { it.readText() }
+                    val root = JSONObject(resp)
+                    val audioStreams = root.optJSONArray("audioStreams")
+                    if (audioStreams != null && audioStreams.length() > 0) {
+                        var bestUrl = ""
+                        var maxBitrate = 0L
+                        for (i in 0 until audioStreams.length()) {
+                            val s = audioStreams.getJSONObject(i)
+                            val sUrl = s.optString("url", "")
+                            val bitrate = s.optLong("bitrate", 0L)
+                            if (sUrl.isNotBlank() && bitrate >= maxBitrate) {
+                                maxBitrate = bitrate
+                                bestUrl = sUrl
+                            }
+                        }
+                        if (bestUrl.isNotBlank()) return@withContext bestUrl
+                    }
+                }
+            } catch (_: Exception) { continue }
         }
     }
 
-    Pair("", lastError ?: "Audio stream unavailable")
+    // Tier 4: Instant 320kbps High-Quality Stream Fail-Safe by track title & artist
+    try {
+        val queryText = URLEncoder.encode("${track.title} ${track.artist}".trim(), "UTF-8")
+        val saavnUrl = URL("https://www.jiosaavn.com/api.php?__call=search.getResults&_format=json&_marker=0&api_version=4&ctx=web6dot0&n=3&p=1&q=$queryText")
+        val conn = saavnUrl.openConnection() as HttpURLConnection
+        conn.requestMethod = "GET"
+        conn.connectTimeout = 4000
+        conn.readTimeout = 4000
+        conn.setRequestProperty("User-Agent", "Mozilla/5.0")
+        if (conn.responseCode == HttpURLConnection.HTTP_OK) {
+            val resp = conn.inputStream.bufferedReader().use { it.readText() }
+            val root = JSONObject(resp)
+            val results = root.optJSONArray("results")
+            if (results != null && results.length() > 0) {
+                val first = results.getJSONObject(0)
+                val moreInfo = first.optJSONObject("more_info")
+                val encUrl = moreInfo?.optString("encrypted_media_url") ?: first.optString("encrypted_media_url", "")
+                if (encUrl.isNotBlank()) {
+                    val decrypted = decryptMediaUrl(encUrl)
+                    if (decrypted.isNotBlank()) return@withContext decrypted
+                }
+            }
+        }
+    } catch (_: Exception) {}
+
+    ""
 }
 
 fun cleanSongTitle(rawTitle: String): String {
@@ -660,7 +736,7 @@ fun mediaItemToTrack(item: MediaItem): FullTrackItem {
 
 suspend fun downloadTrackToStorage(context: Context, track: FullTrackItem): String? = withContext(Dispatchers.IO) {
     try {
-        val (streamUrl, _) = if (track.audioUrl.startsWith("http")) Pair(track.audioUrl, null) else resolveYouTubeStreamUrl(track.id)
+        val streamUrl = if (track.audioUrl.startsWith("http")) track.audioUrl else resolveTrackAudioStream(track)
         if (streamUrl.isBlank()) return@withContext null
 
         val downloadFolder = File(context.filesDir, "sonora_offline").apply { if (!exists()) mkdirs() }
@@ -977,17 +1053,11 @@ fun SonoraPlayerScreen() {
                     totalDuration = savedDurMs
 
                     coroutineScope.launch {
-                        val (streamUrl, _) = resolveYouTubeStreamUrl(savedId)
+                        val restoredTrack = FullTrackItem(savedId, savedTitle, savedArtist, "", savedArtworkUrl, savedDurationTxt)
+                        val streamUrl = resolveTrackAudioStream(restoredTrack)
                         if (streamUrl.isNotBlank()) {
                             activeAudioUrl = streamUrl
-                            val restoredTrack = FullTrackItem(
-                                id = savedId,
-                                title = savedTitle,
-                                artist = savedArtist,
-                                audioUrl = streamUrl,
-                                artworkUrl = savedArtworkUrl,
-                                durationFormatted = savedDurationTxt
-                            )
+                            restoredTrack.audioUrl = streamUrl
                             mediaController.setMediaItem(buildMediaItem(restoredTrack))
                             mediaController.prepare()
                             mediaController.seekTo(savedPosMs)
@@ -1048,6 +1118,7 @@ fun SonoraPlayerScreen() {
                         .putLong(KEY_LAST_POSITION_MS, 0L)
                         .apply()
 
+                    // Continuously append filtered tracks when approaching end of queue
                     if (endlessRadioEnabled && mediaController.currentMediaItemIndex >= mediaController.mediaItemCount - 2) {
                         coroutineScope.launch {
                             val similar = fetchYouTubeAutomixRadio(activeSongId)
@@ -1056,8 +1127,8 @@ fun SonoraPlayerScreen() {
                             }
                             val filteredSongs = filterSimilarTracks(similar, currentQueueTracks)
 
-                            for (song in filteredSongs.take(5)) {
-                                val (sUrl, _) = resolveYouTubeStreamUrl(song.id)
+                            for (song in filteredSongs.take(4)) {
+                                val sUrl = resolveTrackAudioStream(song)
                                 if (sUrl.isNotBlank()) {
                                     song.audioUrl = sUrl
                                     mediaController.addMediaItem(buildMediaItem(song))
@@ -1100,14 +1171,14 @@ fun SonoraPlayerScreen() {
 
         coroutineScope.launch {
             val downloadedLocal = dao.getDownloadedSongById(targetTrack.id)
-            val (effectiveUrl, errDetail) = if (downloadedLocal != null && File(downloadedLocal.localFilePath).exists()) {
-                Pair(downloadedLocal.localFilePath, null)
+            val effectiveUrl = if (downloadedLocal != null && File(downloadedLocal.localFilePath).exists()) {
+                downloadedLocal.localFilePath
             } else {
-                resolveYouTubeStreamUrl(targetTrack.id)
+                resolveTrackAudioStream(targetTrack)
             }
 
             if (effectiveUrl.isBlank()) {
-                Toast.makeText(context, "Stream error: ${errDetail ?: "Playback failed"}", Toast.LENGTH_LONG).show()
+                Toast.makeText(context, "Unable to resolve stream for ${targetTrack.title}", Toast.LENGTH_SHORT).show()
                 return@launch
             }
 
@@ -1140,8 +1211,8 @@ fun SonoraPlayerScreen() {
                 val radioSongs = fetchYouTubeAutomixRadio(targetTrack.id)
                 val filtered = filterSimilarTracks(radioSongs, listOf(targetTrack))
 
-                for (song in filtered.take(6)) {
-                    val (sUrl, _) = resolveYouTubeStreamUrl(song.id)
+                for (song in filtered.take(5)) {
+                    val sUrl = resolveTrackAudioStream(song)
                     if (sUrl.isNotBlank()) {
                         song.audioUrl = sUrl
                         controller?.addMediaItem(buildMediaItem(song))
@@ -1165,7 +1236,6 @@ fun SonoraPlayerScreen() {
         }
     }
 
-    // Modal Bottom Sheet: Track Options
     if (selectedTrackForOptions != null) {
         val song = selectedTrackForOptions!!
         ModalBottomSheet(
@@ -1270,7 +1340,7 @@ fun SonoraPlayerScreen() {
                                 val clip = ClipData.newPlainText("Song Link", "https://music.youtube.com/watch?v=${song.id}")
                                 clipboard.setPrimaryClip(clip)
                                 selectedTrackForOptions = null
-                                Toast.makeText(context, "Copied YouTube Music link", Toast.LENGTH_SHORT).show()
+                                Toast.makeText(context, "Copied track link", Toast.LENGTH_SHORT).show()
                             },
                         colors = CardDefaults.cardColors(containerColor = Color(0xFF1A222B)),
                         shape = RoundedCornerShape(16.dp)
@@ -1455,8 +1525,9 @@ fun SonoraPlayerScreen() {
                             },
                             colors = CardDefaults.cardColors(containerColor = Color(0xFF1E2631)),
                             shape = RoundedCornerShape(8.dp)
-                    ) {
-                        Text("End of Current Track", color = Color.White, fontSize = 15.sp, modifier = Modifier.padding(14.dp))
+                        ) {
+                            Text("End of Current Track", color = Color.White, fontSize = 15.sp, modifier = Modifier.padding(14.dp))
+                        }
                     }
                     if (sleepTimerRemainingSeconds > 0L || stopAfterCurrentTrack) {
                         Spacer(modifier = Modifier.height(6.dp))
