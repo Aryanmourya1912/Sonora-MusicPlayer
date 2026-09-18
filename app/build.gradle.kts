@@ -13,8 +13,9 @@ android {
         applicationId = "com.example.music"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.0.0"
+        // Increment versionCode so Android treats new APKs as true updates
+        versionCode = 2
+        versionName = "1.1.0"
     }
 
     buildTypes {
@@ -57,7 +58,7 @@ dependencies {
     // Coil Image Loading
     implementation("io.coil-kt:coil-compose:2.7.0")
 
-    // Room Database
+    // Room SQLite Database
     val roomVersion = "2.6.1"
     implementation("androidx.room:room-runtime:$roomVersion")
     implementation("androidx.room:room-ktx:$roomVersion")
