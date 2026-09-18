@@ -256,7 +256,7 @@ suspend fun searchYouTubeMusic(query: String): Pair<List<FullTrackItem>, String?
         conn.outputStream.use { it.write(payload.toString().toByteArray()) }
 
         if (conn.responseCode != HttpURLConnection.HTTP_OK) {
-            return@withContext Pair(emptyList(), "YouTube Music error: ${conn.responseCode}")
+            return@withContext Pair(emptyList(), "YouTube Music status: ${conn.responseCode}")
         }
 
         val respText = conn.inputStream.bufferedReader().use { it.readText() }
@@ -385,22 +385,24 @@ suspend fun fetchYouTubeAutomixRadio(videoId: String): List<FullTrackItem> = wit
     results
 }
 
-// Multi-Strategy Audio Stream Resolver
-suspend fun resolveYouTubeStreamUrl(videoId: String): String = withContext(Dispatchers.IO) {
-    if (videoId.isBlank()) return@withContext ""
+// Multi-strategy audio stream resolver
+suspend fun resolveYouTubeStreamUrl(videoId: String): Pair<String, String?> = withContext(Dispatchers.IO) {
+    if (videoId.isBlank()) return@withContext Pair("", "Empty video ID")
+    var lastError: String? = null
 
-    // Strategy 1: Direct InnerTube VR Core Client with authenticated parameters
+    // Strategy 1: Production iOS Client (returns unciphered direct audio streams)
     try {
         val url = URL("https://www.youtube.com/youtubei/v1/player")
         val conn = url.openConnection() as HttpURLConnection
         conn.requestMethod = "POST"
-        conn.connectTimeout = 4000
-        conn.readTimeout = 4000
+        conn.connectTimeout = 6000
+        conn.readTimeout = 6000
         conn.doOutput = true
         conn.setRequestProperty("Content-Type", "application/json")
-        conn.setRequestProperty("User-Agent", "com.google.android.apps.vr.vrcore/1.65.10 (Linux; U; Android 14)")
-        conn.setRequestProperty("X-YouTube-Client-Name", "ANDROID_VR")
-        conn.setRequestProperty("X-YouTube-Client-Version", "1.65.10")
+        conn.setRequestProperty("User-Agent", "com.google.ios.youtube/19.29.1 (iPhone14,3; U; CPU iOS 15_6 like Mac OS X; en_US)")
+        conn.setRequestProperty("X-YouTube-Client-Name", "5")
+        conn.setRequestProperty("X-YouTube-Client-Version", "19.29.1")
+        conn.setRequestProperty("Origin", "https://www.youtube.com")
 
         val payload = JSONObject().apply {
             put("videoId", videoId)
@@ -408,31 +410,42 @@ suspend fun resolveYouTubeStreamUrl(videoId: String): String = withContext(Dispa
             put("racyCheckOk", true)
             put("context", JSONObject().apply {
                 put("client", JSONObject().apply {
-                    put("clientName", "ANDROID_VR")
-                    put("clientVersion", "1.65.10")
-                    put("androidSdkVersion", 34)
+                    put("clientName", "IOS")
+                    put("clientVersion", "19.29.1")
+                    put("deviceMake", "Apple")
+                    put("deviceModel", "iPhone14,3")
+                    put("osName", "iOS")
+                    put("osVersion", "15.6.0.19G71")
                     put("hl", "en")
                     put("gl", "US")
                 })
             })
+            put("playbackContext", JSONObject().apply {
+                put("contentPlaybackContext", JSONObject().apply {
+                    put("html5Preference", "HTML5_PREF_WANTS")
+                })
+            })
         }
 
-        conn.outputStream.use { it.write(payload.toString().toByteArray()) }
+        conn.outputStream.use { it.write(payload.toString().toByteArray(Charsets.UTF_8)) }
 
         if (conn.responseCode == HttpURLConnection.HTTP_OK) {
             val resp = conn.inputStream.bufferedReader().use { it.readText() }
             val root = JSONObject(resp)
-            val formats = root.optJSONObject("streamingData")?.optJSONArray("adaptiveFormats")
+            val status = root.optJSONObject("playabilityStatus")?.optString("status")
+            if (status != null && status != "OK") {
+                lastError = root.optJSONObject("playabilityStatus")?.optString("reason", status)
+            }
 
+            val streamingData = root.optJSONObject("streamingData")
+            val formats = streamingData?.optJSONArray("adaptiveFormats")
             if (formats != null) {
                 var bestUrl = ""
                 var maxBitrate = 0L
-
                 for (i in 0 until formats.length()) {
                     val fmt = formats.getJSONObject(i)
                     val mime = fmt.optString("mimeType", "")
                     val streamUrl = fmt.optString("url", "")
-
                     if (mime.startsWith("audio/") && streamUrl.isNotBlank()) {
                         val bitrate = fmt.optLong("bitrate", 0L)
                         if (bitrate > maxBitrate) {
@@ -441,25 +454,80 @@ suspend fun resolveYouTubeStreamUrl(videoId: String): String = withContext(Dispa
                         }
                     }
                 }
-                if (bestUrl.isNotBlank()) return@withContext bestUrl
+                if (bestUrl.isNotBlank()) return@withContext Pair(bestUrl, null)
+            }
+        } else {
+            lastError = "YouTube returned status ${conn.responseCode}"
+        }
+    } catch (e: Exception) {
+        lastError = e.localizedMessage ?: "Connection error"
+    }
+
+    // Strategy 2: Android Testsuite Client
+    try {
+        val url = URL("https://www.youtube.com/youtubei/v1/player")
+        val conn = url.openConnection() as HttpURLConnection
+        conn.requestMethod = "POST"
+        conn.connectTimeout = 5000
+        conn.readTimeout = 5000
+        conn.doOutput = true
+        conn.setRequestProperty("Content-Type", "application/json")
+        conn.setRequestProperty("User-Agent", "GoogleTest/1.0")
+
+        val payload = JSONObject().apply {
+            put("videoId", videoId)
+            put("contentCheckOk", true)
+            put("racyCheckOk", true)
+            put("context", JSONObject().apply {
+                put("client", JSONObject().apply {
+                    put("clientName", "ANDROID_TESTSUITE")
+                    put("clientVersion", "1.9")
+                    put("androidSdkVersion", 31)
+                    put("hl", "en")
+                    put("gl", "US")
+                })
+            })
+        }
+
+        conn.outputStream.use { it.write(payload.toString().toByteArray(Charsets.UTF_8)) }
+
+        if (conn.responseCode == HttpURLConnection.HTTP_OK) {
+            val resp = conn.inputStream.bufferedReader().use { it.readText() }
+            val root = JSONObject(resp)
+            val formats = root.optJSONObject("streamingData")?.optJSONArray("adaptiveFormats")
+            if (formats != null) {
+                var bestUrl = ""
+                var maxBitrate = 0L
+                for (i in 0 until formats.length()) {
+                    val fmt = formats.getJSONObject(i)
+                    val mime = fmt.optString("mimeType", "")
+                    val streamUrl = fmt.optString("url", "")
+                    if (mime.startsWith("audio/") && streamUrl.isNotBlank()) {
+                        val bitrate = fmt.optLong("bitrate", 0L)
+                        if (bitrate > maxBitrate) {
+                            maxBitrate = bitrate
+                            bestUrl = streamUrl
+                        }
+                    }
+                }
+                if (bestUrl.isNotBlank()) return@withContext Pair(bestUrl, null)
             }
         }
     } catch (e: Exception) {
-        // Fall through to Strategy 2
+        // Continue to Strategy 3
     }
 
-    // Strategy 2: High-Availability Stream Decipher Endpoints (Piped & Invidious)
-    val resolverMirrors = listOf(
-        "https://pipedapi.kavin.rocks/streams/$videoId",
-        "https://api.piped.privacy.com.de/streams/$videoId",
-        "https://piped-api.lunar.icu/streams/$videoId",
-        "https://inv.tux.pizza/api/v1/videos/$videoId",
-        "https://invidious.nerdvpn.de/api/v1/videos/$videoId"
+    // Strategy 3: Active Invidious mirror resolvers
+    val mirrors = listOf(
+        "https://inv.nadeko.net/api/v1/videos/$videoId",
+        "https://invidious.nerdvpn.de/api/v1/videos/$videoId",
+        "https://yewtu.be/api/v1/videos/$videoId",
+        "https://inv.tux.pizza/api/v1/videos/$videoId"
     )
 
-    for (endpoint in resolverMirrors) {
+    for (mirror in mirrors) {
         try {
-            val url = URL(endpoint)
+            val url = URL(mirror)
             val conn = url.openConnection() as HttpURLConnection
             conn.requestMethod = "GET"
             conn.connectTimeout = 4000
@@ -470,31 +538,12 @@ suspend fun resolveYouTubeStreamUrl(videoId: String): String = withContext(Dispa
             if (conn.responseCode == HttpURLConnection.HTTP_OK) {
                 val resp = conn.inputStream.bufferedReader().use { it.readText() }
                 val root = JSONObject(resp)
-
-                // Piped audioStreams format
-                val audioStreams = root.optJSONArray("audioStreams")
-                if (audioStreams != null && audioStreams.length() > 0) {
+                val formats = root.optJSONArray("adaptiveFormats")
+                if (formats != null) {
                     var bestUrl = ""
                     var maxBitrate = 0L
-                    for (i in 0 until audioStreams.length()) {
-                        val stream = audioStreams.getJSONObject(i)
-                        val sUrl = stream.optString("url", "")
-                        val bitrate = stream.optLong("bitrate", 0L)
-                        if (sUrl.isNotBlank() && bitrate >= maxBitrate) {
-                            maxBitrate = bitrate
-                            bestUrl = sUrl
-                        }
-                    }
-                    if (bestUrl.isNotBlank()) return@withContext bestUrl
-                }
-
-                // Invidious adaptiveFormats format
-                val adaptiveFormats = root.optJSONArray("adaptiveFormats")
-                if (adaptiveFormats != null && adaptiveFormats.length() > 0) {
-                    var bestUrl = ""
-                    var maxBitrate = 0L
-                    for (i in 0 until adaptiveFormats.length()) {
-                        val fmt = adaptiveFormats.getJSONObject(i)
+                    for (i in 0 until formats.length()) {
+                        val fmt = formats.getJSONObject(i)
                         val type = fmt.optString("type", "")
                         val sUrl = fmt.optString("url", "")
                         val bitrate = fmt.optLong("bitrate", 0L)
@@ -503,7 +552,7 @@ suspend fun resolveYouTubeStreamUrl(videoId: String): String = withContext(Dispa
                             bestUrl = sUrl
                         }
                     }
-                    if (bestUrl.isNotBlank()) return@withContext bestUrl
+                    if (bestUrl.isNotBlank()) return@withContext Pair(bestUrl, null)
                 }
             }
         } catch (e: Exception) {
@@ -511,7 +560,7 @@ suspend fun resolveYouTubeStreamUrl(videoId: String): String = withContext(Dispa
         }
     }
 
-    ""
+    Pair("", lastError ?: "Audio stream unavailable")
 }
 
 fun cleanSongTitle(rawTitle: String): String {
@@ -611,7 +660,7 @@ fun mediaItemToTrack(item: MediaItem): FullTrackItem {
 
 suspend fun downloadTrackToStorage(context: Context, track: FullTrackItem): String? = withContext(Dispatchers.IO) {
     try {
-        val streamUrl = if (track.audioUrl.startsWith("http")) track.audioUrl else resolveYouTubeStreamUrl(track.id)
+        val (streamUrl, _) = if (track.audioUrl.startsWith("http")) Pair(track.audioUrl, null) else resolveYouTubeStreamUrl(track.id)
         if (streamUrl.isBlank()) return@withContext null
 
         val downloadFolder = File(context.filesDir, "sonora_offline").apply { if (!exists()) mkdirs() }
@@ -928,7 +977,7 @@ fun SonoraPlayerScreen() {
                     totalDuration = savedDurMs
 
                     coroutineScope.launch {
-                        val streamUrl = resolveYouTubeStreamUrl(savedId)
+                        val (streamUrl, _) = resolveYouTubeStreamUrl(savedId)
                         if (streamUrl.isNotBlank()) {
                             activeAudioUrl = streamUrl
                             val restoredTrack = FullTrackItem(
@@ -1008,7 +1057,7 @@ fun SonoraPlayerScreen() {
                             val filteredSongs = filterSimilarTracks(similar, currentQueueTracks)
 
                             for (song in filteredSongs.take(5)) {
-                                val sUrl = resolveYouTubeStreamUrl(song.id)
+                                val (sUrl, _) = resolveYouTubeStreamUrl(song.id)
                                 if (sUrl.isNotBlank()) {
                                     song.audioUrl = sUrl
                                     mediaController.addMediaItem(buildMediaItem(song))
@@ -1051,14 +1100,14 @@ fun SonoraPlayerScreen() {
 
         coroutineScope.launch {
             val downloadedLocal = dao.getDownloadedSongById(targetTrack.id)
-            val effectiveUrl = if (downloadedLocal != null && File(downloadedLocal.localFilePath).exists()) {
-                downloadedLocal.localFilePath
+            val (effectiveUrl, errDetail) = if (downloadedLocal != null && File(downloadedLocal.localFilePath).exists()) {
+                Pair(downloadedLocal.localFilePath, null)
             } else {
                 resolveYouTubeStreamUrl(targetTrack.id)
             }
 
             if (effectiveUrl.isBlank()) {
-                Toast.makeText(context, "Failed to resolve audio stream", Toast.LENGTH_SHORT).show()
+                Toast.makeText(context, "Stream error: ${errDetail ?: "Playback failed"}", Toast.LENGTH_LONG).show()
                 return@launch
             }
 
@@ -1092,7 +1141,7 @@ fun SonoraPlayerScreen() {
                 val filtered = filterSimilarTracks(radioSongs, listOf(targetTrack))
 
                 for (song in filtered.take(6)) {
-                    val sUrl = resolveYouTubeStreamUrl(song.id)
+                    val (sUrl, _) = resolveYouTubeStreamUrl(song.id)
                     if (sUrl.isNotBlank()) {
                         song.audioUrl = sUrl
                         controller?.addMediaItem(buildMediaItem(song))
@@ -1116,6 +1165,7 @@ fun SonoraPlayerScreen() {
         }
     }
 
+    // Modal Bottom Sheet: Track Options
     if (selectedTrackForOptions != null) {
         val song = selectedTrackForOptions!!
         ModalBottomSheet(
@@ -2089,6 +2139,7 @@ fun SonoraPlayerScreen() {
                 }
             }
 
+            // Floating Miniplayer
             if (activeSongId.isNotBlank()) {
                 val progressFraction = if (totalDuration > 0) (currentPosition.toFloat() / totalDuration.toFloat()).coerceIn(0f, 1f) else 0f
 
@@ -2205,6 +2256,7 @@ fun SonoraPlayerScreen() {
                 }
             }
 
+            // Bottom Navigation Bar
             NavigationBar(
                 containerColor = Color(0xFF0A0F14),
                 contentColor = Color.White,
@@ -2252,6 +2304,7 @@ fun SonoraPlayerScreen() {
             }
         }
 
+        // Full Screen Now Playing View
         AnimatedVisibility(
             visible = isPlayerExpanded,
             enter = slideInVertically(initialOffsetY = { it }),
