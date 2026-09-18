@@ -8,7 +8,6 @@ import android.content.SharedPreferences
 import android.media.AudioManager
 import android.net.Uri
 import android.os.Bundle
-import android.util.Base64
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
@@ -152,17 +151,14 @@ import org.json.JSONObject
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
-import java.net.URLEncoder
 import java.util.Locale
-import javax.crypto.Cipher
-import javax.crypto.spec.SecretKeySpec
 import kotlin.math.max
 
 data class FullTrackItem(
-    val id: String,
+    val id: String, // YouTube Video ID
     val title: String,
     val artist: String,
-    val audioUrl: String,
+    var audioUrl: String,
     val artworkUrl: String,
     val durationFormatted: String
 )
@@ -173,14 +169,14 @@ data class DiscoveryCategory(
 )
 
 val DiscoveryCategoryList = listOf(
-    DiscoveryCategory("Chill", "Chill Vibes Lofi"),
-    DiscoveryCategory("Focus", "Deep Focus Instrumental"),
+    DiscoveryCategory("Chill", "Chill Lofi Beats"),
+    DiscoveryCategory("Focus", "Deep Focus Study Music"),
     DiscoveryCategory("Commute", "Road Trip Hits"),
-    DiscoveryCategory("Gaming", "Phonk EDM Gaming"),
-    DiscoveryCategory("Energize", "Workout Motivation Gym"),
-    DiscoveryCategory("Party", "Club Dance Party Hits"),
-    DiscoveryCategory("Feel good", "Feel Good Uplifting"),
-    DiscoveryCategory("Romance", "Romantic Love Songs")
+    DiscoveryCategory("Gaming", "Gaming Phonk EDM"),
+    DiscoveryCategory("Energize", "Gym Workout Motivation"),
+    DiscoveryCategory("Party", "Party Club Dance Hits"),
+    DiscoveryCategory("Feel good", "Feel Good Upbeat Pop"),
+    DiscoveryCategory("Romance", "Romantic Acoustic Love Songs")
 )
 
 private val SonoraThemeColors = darkColorScheme(
@@ -210,7 +206,404 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-// Custom refined Download indicator with idle, downloading, and completed states
+// ---------------------------------------------------------------------------
+// INNER TUBE ENGINE: YOUTUBE MUSIC SEARCH, AUTOMIX RADIO & STREAM RESOLVER
+// ---------------------------------------------------------------------------
+
+// Recursively walks arbitrary InnerTube JSON responses to find all matching renderer objects
+fun findRenderersRecursive(json: Any?, targetKey: String, sink: MutableList<JSONObject>) {
+    when (json) {
+        is JSONObject -> {
+            val keys = json.keys()
+            while (keys.hasNext()) {
+                val k = keys.next()
+                if (k == targetKey) {
+                    val obj = json.optJSONObject(k)
+                    if (obj != null) sink.add(obj)
+                } else {
+                    findRenderersRecursive(json.opt(k), targetKey, sink)
+                }
+            }
+        }
+        is JSONArray -> {
+            for (i in 0 until json.length()) {
+                findRenderersRecursive(json.opt(i), targetKey, sink)
+            }
+        }
+    }
+}
+
+// MODULE 1: YouTube Music Native Search (/youtubei/v1/search)
+suspend fun searchYouTubeMusic(query: String): Pair<List<FullTrackItem>, String?> = withContext(Dispatchers.IO) {
+    val results = mutableListOf<FullTrackItem>()
+    try {
+        val url = URL("https://music.youtube.com/youtubei/v1/search")
+        val conn = url.openConnection() as HttpURLConnection
+        conn.requestMethod = "POST"
+        conn.connectTimeout = 8000
+        conn.readTimeout = 8000
+        conn.doOutput = true
+        conn.setRequestProperty("Content-Type", "application/json")
+        conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+        conn.setRequestProperty("Referer", "https://music.youtube.com/")
+
+        val payload = JSONObject().apply {
+            put("query", query.trim())
+            put("context", JSONObject().apply {
+                put("client", JSONObject().apply {
+                    put("clientName", "WEB_REMIX")
+                    put("clientVersion", "1.20231204.01.00")
+                    put("hl", "en")
+                    put("gl", "US")
+                })
+            })
+        }
+
+        conn.outputStream.use { it.write(payload.toString().toByteArray()) }
+
+        if (conn.responseCode != HttpURLConnection.HTTP_OK) {
+            return@withContext Pair(emptyList(), "YouTube Music error: ${conn.responseCode}")
+        }
+
+        val respText = conn.inputStream.bufferedReader().use { it.readText() }
+        val root = JSONObject(respText)
+
+        val renderers = mutableListOf<JSONObject>()
+        findRenderersRecursive(root, "musicResponsiveListItemRenderer", renderers)
+
+        for (item in renderers) {
+            val videoId = item.optJSONObject("playlistItemData")?.optString("videoId")
+                ?: item.optJSONObject("navigationEndpoint")?.optJSONObject("watchEndpoint")?.optString("videoId")
+                ?: ""
+
+            if (videoId.isBlank()) continue
+
+            val flexCols = item.optJSONArray("flexColumns") ?: continue
+            val col0Runs = flexCols.optJSONObject(0)?.optJSONObject("musicResponsiveListItemFlexColumnRenderer")
+                ?.optJSONObject("text")?.optJSONArray("runs")
+            val title = sanitizeText(col0Runs?.optJSONObject(0)?.optString("text", "Unknown Track") ?: "Unknown Track")
+
+            val col1Runs = flexCols.optJSONObject(1)?.optJSONObject("musicResponsiveListItemFlexColumnRenderer")
+                ?.optJSONObject("text")?.optJSONArray("runs")
+            val artist = sanitizeText(col1Runs?.optJSONObject(0)?.optString("text", "Unknown Artist") ?: "Unknown Artist")
+
+            var duration = ""
+            val fixedCols = item.optJSONArray("fixedColumns")
+            if (fixedCols != null && fixedCols.length() > 0) {
+                duration = fixedCols.optJSONObject(0)?.optJSONObject("musicResponsiveListItemFixedColumnRenderer")
+                    ?.optJSONObject("text")?.optJSONArray("runs")?.optJSONObject(0)?.optString("text", "") ?: ""
+            }
+            if (duration.isBlank() && col1Runs != null && col1Runs.length() > 2) {
+                duration = col1Runs.optJSONObject(col1Runs.length() - 1)?.optString("text", "") ?: ""
+            }
+
+            val thumbArray = item.optJSONObject("thumbnail")?.optJSONObject("musicThumbnailRenderer")
+                ?.optJSONObject("thumbnail")?.optJSONArray("thumbnails")
+            val artworkUrl = if (thumbArray != null && thumbArray.length() > 0) {
+                thumbArray.getJSONObject(thumbArray.length() - 1).optString("url", "")
+            } else ""
+
+            results.add(
+                FullTrackItem(
+                    id = videoId,
+                    title = title,
+                    artist = artist,
+                    audioUrl = "", // Resolved on demand when played
+                    artworkUrl = artworkUrl,
+                    durationFormatted = duration
+                )
+            )
+        }
+        Pair(results, null)
+    } catch (e: Exception) {
+        Pair(results, e.localizedMessage ?: "Network error occurred")
+    }
+}
+
+// MODULE 2: Endless Automix Radio (/youtubei/v1/next)
+suspend fun fetchYouTubeAutomixRadio(videoId: String): List<FullTrackItem> = withContext(Dispatchers.IO) {
+    val results = mutableListOf<FullTrackItem>()
+    if (videoId.isBlank()) return@withContext results
+    try {
+        val url = URL("https://music.youtube.com/youtubei/v1/next")
+        val conn = url.openConnection() as HttpURLConnection
+        conn.requestMethod = "POST"
+        conn.connectTimeout = 7000
+        conn.readTimeout = 7000
+        conn.doOutput = true
+        conn.setRequestProperty("Content-Type", "application/json")
+        conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+        conn.setRequestProperty("Referer", "https://music.youtube.com/")
+
+        val payload = JSONObject().apply {
+            put("videoId", videoId)
+            put("playlistId", "RDAMVM$videoId")
+            put("context", JSONObject().apply {
+                put("client", JSONObject().apply {
+                    put("clientName", "WEB_REMIX")
+                    put("clientVersion", "1.20231204.01.00")
+                    put("hl", "en")
+                    put("gl", "US")
+                })
+            })
+        }
+
+        conn.outputStream.use { it.write(payload.toString().toByteArray()) }
+
+        if (conn.responseCode == HttpURLConnection.HTTP_OK) {
+            val respText = conn.inputStream.bufferedReader().use { it.readText() }
+            val root = JSONObject(respText)
+
+            val renderers = mutableListOf<JSONObject>()
+            findRenderersRecursive(root, "playlistPanelVideoRenderer", renderers)
+
+            for (item in renderers) {
+                val vId = item.optString("videoId", "")
+                if (vId.isBlank()) continue
+
+                val title = sanitizeText(item.optJSONObject("title")?.optJSONArray("runs")?.optJSONObject(0)?.optString("text", "Unknown Track") ?: "Unknown Track")
+                val artist = sanitizeText(
+                    item.optJSONObject("longBylineText")?.optJSONArray("runs")?.optJSONObject(0)?.optString("text")
+                        ?: item.optJSONObject("shortBylineText")?.optJSONArray("runs")?.optJSONObject(0)?.optString("text")
+                        ?: "Unknown Artist"
+                )
+                val duration = item.optJSONObject("lengthText")?.optJSONArray("runs")?.optJSONObject(0)?.optString("text", "") ?: ""
+
+                val thumbArray = item.optJSONObject("thumbnail")?.optJSONArray("thumbnails")
+                val artworkUrl = if (thumbArray != null && thumbArray.length() > 0) {
+                    thumbArray.getJSONObject(thumbArray.length() - 1).optString("url", "")
+                } else ""
+
+                results.add(
+                    FullTrackItem(
+                        id = vId,
+                        title = title,
+                        artist = artist,
+                        audioUrl = "",
+                        artworkUrl = artworkUrl,
+                        durationFormatted = duration
+                    )
+                )
+            }
+        }
+    } catch (e: Exception) {
+        e.printStackTrace()
+    }
+    results
+}
+
+// MODULE 3: On-Demand Stream Extraction via ANDROID_VR client (/youtubei/v1/player)
+suspend fun resolveYouTubeStreamUrl(videoId: String): String = withContext(Dispatchers.IO) {
+    if (videoId.isBlank()) return@withContext ""
+    try {
+        val url = URL("https://www.youtube.com/youtubei/v1/player")
+        val conn = url.openConnection() as HttpURLConnection
+        conn.requestMethod = "POST"
+        conn.connectTimeout = 8000
+        conn.readTimeout = 8000
+        conn.doOutput = true
+        conn.setRequestProperty("Content-Type", "application/json")
+        conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+        conn.setRequestProperty("Referer", "https://www.youtube.com/")
+
+        val payload = JSONObject().apply {
+            put("videoId", videoId)
+            put("context", JSONObject().apply {
+                put("client", JSONObject().apply {
+                    put("clientName", "ANDROID_VR")
+                    put("clientVersion", "1.65.10")
+                    put("hl", "en")
+                    put("gl", "US")
+                })
+            })
+        }
+
+        conn.outputStream.use { it.write(payload.toString().toByteArray()) }
+
+        if (conn.responseCode == HttpURLConnection.HTTP_OK) {
+            val resp = conn.inputStream.bufferedReader().use { it.readText() }
+            val root = JSONObject(resp)
+            val streamingData = root.optJSONObject("streamingData")
+            val formats = streamingData?.optJSONArray("adaptiveFormats")
+
+            if (formats != null) {
+                var bestAudioUrl = ""
+                var maxBitrate = 0L
+
+                for (i in 0 until formats.length()) {
+                    val fmt = formats.getJSONObject(i)
+                    val mime = fmt.optString("mimeType", "")
+                    val streamUrl = fmt.optString("url", "")
+
+                    if (mime.startsWith("audio/") && streamUrl.isNotBlank()) {
+                        val bitrate = fmt.optLong("bitrate", 0L)
+                        if (bitrate > maxBitrate) {
+                            maxBitrate = bitrate
+                            bestAudioUrl = streamUrl
+                        }
+                    }
+                }
+                if (bestAudioUrl.isNotBlank()) return@withContext bestAudioUrl
+            }
+        }
+    } catch (e: Exception) {
+        e.printStackTrace()
+    }
+    ""
+}
+
+// ---------------------------------------------------------------------------
+// DEDUPLICATION & REFINEMENT HELPERS
+// ---------------------------------------------------------------------------
+
+fun cleanSongTitle(rawTitle: String): String {
+    var clean = rawTitle.lowercase(Locale.ROOT)
+    clean = clean.replace("\\(.*?\\)".toRegex(), " ")
+    clean = clean.replace("\\[.*?\\]".toRegex(), " ")
+    clean = clean.replace("\\{.*?\\}".toRegex(), " ")
+    clean = clean.replace("-\\s*(slowed|reverb|remix|acoustic|live|sped up|speed up|lofi|instrumental|edit|deluxe|remastered|version|from|soundtrack|ost).*".toRegex(), " ")
+    clean = clean.replace("\\b(slowed|reverb|remix|acoustic|live|sped up|speed up|lofi|instrumental|edit|deluxe|remastered|remaster|version|soundtrack|ost|audio|video|lyrics|official)\\b".toRegex(), " ")
+    clean = clean.replace("\\b(feat|ft)\\.?\\s+.*".toRegex(), " ")
+    clean = clean.replace("[^a-z0-9 ]".toRegex(), " ")
+    return clean.trim().replace("\\s+".toRegex(), " ")
+}
+
+fun cleanArtist(rawArtist: String): String {
+    val firstArtist = rawArtist.split(",", "&", "feat.", "ft.", "and", "/", ";").firstOrNull() ?: rawArtist
+    return firstArtist.lowercase(Locale.ROOT)
+        .replace("[^a-z0-9 ]".toRegex(), " ")
+        .trim()
+        .replace("\\s+".toRegex(), " ")
+}
+
+fun areTracksSimilar(trackA: FullTrackItem, trackB: FullTrackItem): Boolean {
+    if (trackA.id.isNotBlank() && trackA.id == trackB.id) return true
+
+    val titleA = cleanSongTitle(trackA.title)
+    val titleB = cleanSongTitle(trackB.title)
+    if (titleA.isBlank() || titleB.isBlank()) return false
+
+    val artistA = cleanArtist(trackA.artist)
+    val artistB = cleanArtist(trackB.artist)
+    val artistsMatch = artistA.isBlank() || artistB.isBlank() || artistA == artistB ||
+            artistA.contains(artistB) || artistB.contains(artistA)
+
+    if (titleA == titleB && artistsMatch) return true
+
+    if (titleA.length >= 5 && titleB.length >= 5) {
+        if ((titleA.contains(titleB) || titleB.contains(titleA)) && artistsMatch) {
+            return true
+        }
+    }
+    return false
+}
+
+fun filterSimilarTracks(incoming: List<FullTrackItem>, existingQueue: List<FullTrackItem>): List<FullTrackItem> {
+    val result = mutableListOf<FullTrackItem>()
+    val pool = existingQueue.toMutableList()
+
+    for (candidate in incoming) {
+        val isDuplicate = pool.any { existing -> areTracksSimilar(candidate, existing) }
+        if (!isDuplicate) {
+            result.add(candidate)
+            pool.add(candidate)
+        }
+    }
+    return result
+}
+
+fun buildMediaItem(track: FullTrackItem): MediaItem {
+    val metadata = MediaMetadata.Builder()
+        .setTitle(track.title)
+        .setArtist(track.artist)
+        .setArtworkUri(Uri.parse(track.artworkUrl))
+        .build()
+
+    val playbackUri = if (track.audioUrl.startsWith("/")) {
+        Uri.fromFile(File(track.audioUrl))
+    } else {
+        Uri.parse(track.audioUrl)
+    }
+
+    return MediaItem.Builder()
+        .setMediaId(track.id)
+        .setUri(playbackUri)
+        .setRequestMetadata(
+            MediaItem.RequestMetadata.Builder()
+                .setMediaUri(playbackUri)
+                .build()
+        )
+        .setMediaMetadata(metadata)
+        .build()
+}
+
+fun mediaItemToTrack(item: MediaItem): FullTrackItem {
+    val streamUri = item.requestMetadata.mediaUri?.toString()
+        ?: item.localConfiguration?.uri?.toString()
+        ?: ""
+    return FullTrackItem(
+        id = item.mediaId,
+        title = item.mediaMetadata.title?.toString() ?: "Unknown Track",
+        artist = item.mediaMetadata.artist?.toString() ?: "Unknown Artist",
+        audioUrl = streamUri,
+        artworkUrl = item.mediaMetadata.artworkUri?.toString() ?: "",
+        durationFormatted = ""
+    )
+}
+
+suspend fun downloadTrackToStorage(context: Context, track: FullTrackItem): String? = withContext(Dispatchers.IO) {
+    try {
+        val streamUrl = if (track.audioUrl.startsWith("http")) track.audioUrl else resolveYouTubeStreamUrl(track.id)
+        if (streamUrl.isBlank()) return@withContext null
+
+        val downloadFolder = File(context.filesDir, "sonora_offline").apply { if (!exists()) mkdirs() }
+        val cleanName = "${track.id}.m4a"
+        val targetFile = File(downloadFolder, cleanName)
+
+        if (targetFile.exists() && targetFile.length() > 50_000L) {
+            return@withContext targetFile.absolutePath
+        }
+
+        val url = URL(streamUrl)
+        val connection = url.openConnection() as HttpURLConnection
+        connection.requestMethod = "GET"
+        connection.connectTimeout = 12000
+        connection.readTimeout = 25000
+        connection.instanceFollowRedirects = true
+        connection.connect()
+
+        if (connection.responseCode in 200..299) {
+            connection.inputStream.use { input ->
+                targetFile.outputStream().use { output ->
+                    input.copyTo(output)
+                }
+            }
+            if (targetFile.exists() && targetFile.length() > 50_000L) {
+                return@withContext targetFile.absolutePath
+            }
+        }
+    } catch (e: Exception) {
+        e.printStackTrace()
+    }
+    return@withContext null
+}
+
+fun formatTime(millis: Long): String {
+    if (millis <= 0) return "0:00"
+    val totalSeconds = millis / 1000
+    val minutes = totalSeconds / 60
+    val seconds = totalSeconds % 60
+    return String.format(Locale.ROOT, "%d:%02d", minutes, seconds)
+}
+
+fun sanitizeText(input: String): String {
+    return input.replace("&quot;", "\"")
+        .replace("&amp;", "&")
+        .replace("&#039;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+}
+
 @Composable
 fun RefinedDownloadMark(
     isDownloaded: Boolean,
@@ -261,7 +654,6 @@ fun RefinedDownloadMark(
     }
 }
 
-// Custom refined Like Heart Mark with smooth pink fill animation
 @Composable
 fun RefinedLikeMark(
     isLiked: Boolean,
@@ -285,362 +677,6 @@ fun RefinedLikeMark(
             modifier = Modifier.size(20.dp)
         )
     }
-}
-
-fun formatTime(millis: Long): String {
-    if (millis <= 0) return "0:00"
-    val totalSeconds = millis / 1000
-    val minutes = totalSeconds / 60
-    val seconds = totalSeconds % 60
-    return String.format(Locale.ROOT, "%d:%02d", minutes, seconds)
-}
-
-fun sanitizeText(input: String): String {
-    return input.replace("&quot;", "\"")
-        .replace("&amp;", "&")
-        .replace("&#039;", "'")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-}
-
-fun cleanSongTitle(rawTitle: String): String {
-    var clean = rawTitle.lowercase(Locale.ROOT)
-    clean = clean.replace("\\(.*?\\)".toRegex(), " ")
-    clean = clean.replace("\\[.*?\\]".toRegex(), " ")
-    clean = clean.replace("\\{.*?\\}".toRegex(), " ")
-    clean = clean.replace("-\\s*(slowed|reverb|remix|acoustic|live|sped up|speed up|lofi|instrumental|edit|deluxe|remastered|version|from|soundtrack|ost).*".toRegex(), " ")
-    clean = clean.replace("\\b(slowed|reverb|remix|acoustic|live|sped up|speed up|lofi|instrumental|edit|deluxe|remastered|remaster|version|soundtrack|ost|audio|video|lyrics|official)\\b".toRegex(), " ")
-    clean = clean.replace("\\b(feat|ft)\\.?\\s+.*".toRegex(), " ")
-    clean = clean.replace("[^a-z0-9 ]".toRegex(), " ")
-    return clean.trim().replace("\\s+".toRegex(), " ")
-}
-
-fun cleanArtist(rawArtist: String): String {
-    val firstArtist = rawArtist.split(",", "&", "feat.", "ft.", "and", "/", ";").firstOrNull() ?: rawArtist
-    return firstArtist.lowercase(Locale.ROOT)
-        .replace("[^a-z0-9 ]".toRegex(), " ")
-        .trim()
-        .replace("\\s+".toRegex(), " ")
-}
-
-fun areTracksSimilar(trackA: FullTrackItem, trackB: FullTrackItem): Boolean {
-    if (trackA.id.isNotBlank() && trackA.id == trackB.id) return true
-
-    val titleA = cleanSongTitle(trackA.title)
-    val titleB = cleanSongTitle(trackB.title)
-    if (titleA.isBlank() || titleB.isBlank()) return false
-
-    val artistA = cleanArtist(trackA.artist)
-    val artistB = cleanArtist(trackB.artist)
-    val artistsMatch = artistA.isBlank() || artistB.isBlank() || artistA == artistB ||
-            artistA.contains(artistB) || artistB.contains(artistA)
-
-    if (titleA == titleB && artistsMatch) return true
-
-    if (titleA.length >= 5 && titleB.length >= 5) {
-        if ((titleA.contains(titleB) || titleB.contains(titleA)) && artistsMatch) {
-            return true
-        }
-    }
-
-    return false
-}
-
-fun filterSimilarTracks(incoming: List<FullTrackItem>, existingQueue: List<FullTrackItem>): List<FullTrackItem> {
-    val result = mutableListOf<FullTrackItem>()
-    val pool = existingQueue.toMutableList()
-
-    for (candidate in incoming) {
-        val isDuplicate = pool.any { existing -> areTracksSimilar(candidate, existing) }
-        if (!isDuplicate) {
-            result.add(candidate)
-            pool.add(candidate)
-        }
-    }
-    return result
-}
-
-fun decryptMediaUrl(encryptedUrl: String): String {
-    if (encryptedUrl.isBlank()) return ""
-    return try {
-        val key = "38346591".toByteArray(Charsets.UTF_8)
-        val keySpec = SecretKeySpec(key, "DES")
-        val cipher = Cipher.getInstance("DES/ECB/PKCS5Padding")
-        cipher.init(Cipher.DECRYPT_MODE, keySpec)
-        val decoded = Base64.decode(encryptedUrl.trim(), Base64.DEFAULT)
-        val decrypted = cipher.doFinal(decoded)
-        var rawUrl = String(decrypted, Charsets.UTF_8).trim()
-
-        if (rawUrl.startsWith("http://")) {
-            rawUrl = rawUrl.replaceFirst("http://", "https://")
-        }
-        if (rawUrl.contains("_96.mp4")) {
-            rawUrl = rawUrl.replace("_96.mp4", "_160.mp4")
-        } else if (rawUrl.contains("_96.m4a")) {
-            rawUrl = rawUrl.replace("_96.m4a", "_160.m4a")
-        }
-        rawUrl
-    } catch (e: Exception) {
-        ""
-    }
-}
-
-fun buildMediaItem(track: FullTrackItem): MediaItem {
-    val metadata = MediaMetadata.Builder()
-        .setTitle(track.title)
-        .setArtist(track.artist)
-        .setArtworkUri(Uri.parse(track.artworkUrl))
-        .build()
-
-    val playbackUri = if (track.audioUrl.startsWith("/")) {
-        Uri.fromFile(File(track.audioUrl))
-    } else {
-        Uri.parse(track.audioUrl)
-    }
-
-    return MediaItem.Builder()
-        .setMediaId(track.id)
-        .setUri(playbackUri)
-        .setRequestMetadata(
-            MediaItem.RequestMetadata.Builder()
-                .setMediaUri(playbackUri)
-                .build()
-        )
-        .setMediaMetadata(metadata)
-        .build()
-}
-
-fun mediaItemToTrack(item: MediaItem): FullTrackItem {
-    val streamUri = item.requestMetadata.mediaUri?.toString()
-        ?: item.localConfiguration?.uri?.toString()
-        ?: ""
-    return FullTrackItem(
-        id = item.mediaId,
-        title = item.mediaMetadata.title?.toString() ?: "Unknown Track",
-        artist = item.mediaMetadata.artist?.toString() ?: "Unknown Artist",
-        audioUrl = streamUri,
-        artworkUrl = item.mediaMetadata.artworkUri?.toString() ?: "",
-        durationFormatted = ""
-    )
-}
-
-suspend fun downloadTrackToStorage(context: Context, track: FullTrackItem): String? = withContext(Dispatchers.IO) {
-    try {
-        val downloadFolder = File(context.filesDir, "sonora_offline").apply { if (!exists()) mkdirs() }
-        val cleanName = "${track.id}_${track.title.replace("[^a-zA-Z0-9]".toRegex(), "_")}.m4a"
-        val targetFile = File(downloadFolder, cleanName)
-
-        if (targetFile.exists() && targetFile.length() > 50_000L) {
-            return@withContext targetFile.absolutePath
-        }
-
-        val url = URL(track.audioUrl)
-        val connection = url.openConnection() as HttpURLConnection
-        connection.requestMethod = "GET"
-        connection.connectTimeout = 12000
-        connection.readTimeout = 25000
-        connection.instanceFollowRedirects = true
-        connection.connect()
-
-        if (connection.responseCode in 200..299) {
-            connection.inputStream.use { input ->
-                targetFile.outputStream().use { output ->
-                    input.copyTo(output)
-                }
-            }
-            if (targetFile.exists() && targetFile.length() > 50_000L) {
-                return@withContext targetFile.absolutePath
-            }
-        }
-    } catch (e: Exception) {
-        e.printStackTrace()
-    }
-    return@withContext null
-}
-
-suspend fun searchOfficialSongs(query: String): Pair<List<FullTrackItem>, String?> = withContext(Dispatchers.IO) {
-    val resultsList = mutableListOf<FullTrackItem>()
-    try {
-        val encodedQuery = URLEncoder.encode(query.trim(), "UTF-8")
-        val endpoint = "https://www.jiosaavn.com/api.php?__call=search.getResults&_format=json&_marker=0&api_version=4&ctx=web6dot0&n=25&p=1&q=$encodedQuery"
-
-        val url = URL(endpoint)
-        val connection = url.openConnection() as HttpURLConnection
-        connection.requestMethod = "GET"
-        connection.connectTimeout = 8000
-        connection.readTimeout = 8000
-        connection.setRequestProperty(
-            "User-Agent",
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-        )
-        connection.setRequestProperty("Accept", "application/json, text/plain, */*")
-        connection.setRequestProperty("Referer", "https://www.jiosaavn.com/")
-        connection.setRequestProperty("Cookie", "L=english; gdpr_acceptance=true;")
-
-        val responseCode = connection.responseCode
-        if (responseCode != HttpURLConnection.HTTP_OK) {
-            return@withContext Pair(emptyList(), "Server response code: $responseCode")
-        }
-
-        val responseText = connection.inputStream.bufferedReader().use { it.readText() }
-        val root = JSONObject(responseText)
-        val resultsArray = root.optJSONArray("results") ?: return@withContext Pair(emptyList(), "No tracks found for \"$query\"")
-
-        for (i in 0 until resultsArray.length()) {
-            val item = resultsArray.getJSONObject(i)
-            val trackId = item.optString("id", "$i")
-            val rawTitle = when {
-                item.has("title") && item.optString("title").isNotBlank() -> item.optString("title")
-                item.has("song") && item.optString("song").isNotBlank() -> item.optString("song")
-                else -> "Unknown Track"
-            }
-            val trackTitle = sanitizeText(rawTitle)
-            val moreInfo = item.optJSONObject("more_info")
-
-            var artistName = item.optString("subtitle", "")
-            if (artistName.isBlank() && moreInfo != null) {
-                artistName = moreInfo.optString("music", "")
-            }
-            if (artistName.isBlank()) {
-                artistName = item.optString("primary_artists", "Unknown Artist")
-            }
-            artistName = sanitizeText(artistName)
-
-            var artUrl = item.optString("image", "")
-            if (artUrl.isBlank() && moreInfo != null) {
-                artUrl = moreInfo.optString("image", "")
-            }
-            artUrl = artUrl.replace("150x150", "500x500").replace("50x50", "500x500")
-            if (artUrl.startsWith("http://")) artUrl = artUrl.replaceFirst("http://", "https://")
-
-            val encryptedUrl = when {
-                moreInfo != null && moreInfo.has("encrypted_media_url") -> moreInfo.optString("encrypted_media_url")
-                item.has("encrypted_media_url") -> item.optString("encrypted_media_url")
-                else -> ""
-            }
-            val playableStream = decryptMediaUrl(encryptedUrl)
-            val durationSeconds = when {
-                moreInfo != null && moreInfo.has("duration") -> moreInfo.optLong("duration", 0L)
-                item.has("duration") -> item.optLong("duration", 0L)
-                else -> 0L
-            }
-            val durationLabel = formatTime(durationSeconds * 1000)
-
-            if (trackTitle.isNotBlank() && playableStream.isNotBlank()) {
-                resultsList.add(
-                    FullTrackItem(
-                        id = trackId,
-                        title = trackTitle,
-                        artist = artistName,
-                        audioUrl = playableStream,
-                        artworkUrl = artUrl,
-                        durationFormatted = durationLabel
-                    )
-                )
-            }
-        }
-        Pair(resultsList, null)
-    } catch (e: Exception) {
-        Pair(resultsList, e.localizedMessage ?: "Network error occurred")
-    }
-}
-
-suspend fun fetchRelatedSongs(songId: String, artist: String): List<FullTrackItem> = withContext(Dispatchers.IO) {
-    val resultsList = mutableListOf<FullTrackItem>()
-    if (songId.isNotBlank()) {
-        try {
-            val endpoint = "https://www.jiosaavn.com/api.php?__call=reco.getreco&api_version=4&_format=json&_marker=0&ctx=web6dot0&pid=${URLEncoder.encode(songId, "UTF-8")}"
-            val url = URL(endpoint)
-            val connection = url.openConnection() as HttpURLConnection
-            connection.requestMethod = "GET"
-            connection.connectTimeout = 7000
-            connection.readTimeout = 7000
-            connection.setRequestProperty(
-                "User-Agent",
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-            )
-            connection.setRequestProperty("Accept", "application/json, text/plain, */*")
-            connection.setRequestProperty("Referer", "https://www.jiosaavn.com/")
-            connection.setRequestProperty("Cookie", "L=english; gdpr_acceptance=true;")
-
-            if (connection.responseCode == HttpURLConnection.HTTP_OK) {
-                val responseText = connection.inputStream.bufferedReader().use { it.readText() }.trim()
-                val jsonArray = when {
-                    responseText.startsWith("[") -> JSONArray(responseText)
-                    responseText.startsWith("{") -> {
-                        val obj = JSONObject(responseText)
-                        obj.optJSONArray("results") ?: obj.optJSONArray("data")
-                    }
-                    else -> null
-                }
-
-                if (jsonArray != null) {
-                    for (i in 0 until jsonArray.length()) {
-                        val item = jsonArray.getJSONObject(i)
-                        val trackId = item.optString("id", "$i")
-                        val rawTitle = when {
-                            item.has("title") && item.optString("title").isNotBlank() -> item.optString("title")
-                            item.has("song") && item.optString("song").isNotBlank() -> item.optString("song")
-                            else -> "Unknown Track"
-                        }
-                        val trackTitle = sanitizeText(rawTitle)
-                        val moreInfo = item.optJSONObject("more_info")
-
-                        var artistName = item.optString("subtitle", "")
-                        if (artistName.isBlank() && moreInfo != null) {
-                            artistName = moreInfo.optString("music", "")
-                        }
-                        if (artistName.isBlank()) {
-                            artistName = item.optString("primary_artists", "Unknown Artist")
-                        }
-                        artistName = sanitizeText(artistName)
-
-                        var artUrl = item.optString("image", "")
-                        if (artUrl.isBlank() && moreInfo != null) {
-                            artUrl = moreInfo.optString("image", "")
-                        }
-                        artUrl = artUrl.replace("150x150", "500x500").replace("50x50", "500x500")
-                        if (artUrl.startsWith("http://")) artUrl = artUrl.replaceFirst("http://", "https://")
-
-                        val encryptedUrl = when {
-                            moreInfo != null && moreInfo.has("encrypted_media_url") -> moreInfo.optString("encrypted_media_url")
-                            item.has("encrypted_media_url") -> item.optString("encrypted_media_url")
-                            else -> ""
-                        }
-                        val playableStream = decryptMediaUrl(encryptedUrl)
-                        val durationSeconds = when {
-                            moreInfo != null && moreInfo.has("duration") -> moreInfo.optLong("duration", 0L)
-                            item.has("duration") -> item.optLong("duration", 0L)
-                            else -> 0L
-                        }
-                        val durationLabel = formatTime(durationSeconds * 1000)
-
-                        if (trackTitle.isNotBlank() && playableStream.isNotBlank()) {
-                            resultsList.add(
-                                FullTrackItem(
-                                    id = trackId,
-                                    title = trackTitle,
-                                    artist = artistName,
-                                    audioUrl = playableStream,
-                                    artworkUrl = artUrl,
-                                    durationFormatted = durationLabel
-                                )
-                            )
-                        }
-                    }
-                }
-            }
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
-    }
-
-    if (resultsList.isEmpty() && artist.isNotBlank() && artist != "Unknown Artist") {
-        val (artistSongs, _) = searchOfficialSongs(artist)
-        resultsList.addAll(artistSongs.filter { it.id != songId })
-    }
-
-    resultsList
 }
 
 private const val PREFS_SONORA = "sonora_playback_state"
@@ -736,9 +772,10 @@ fun SonoraPlayerScreen() {
         isPlayerExpanded = false
     }
 
+    // Refresh Mood Tracks via YouTube Music Search
     LaunchedEffect(selectedMoodCategory) {
         isMoodLoading = true
-        val (tracks, _) = searchOfficialSongs(selectedMoodCategory.searchQuery)
+        val (tracks, _) = searchYouTubeMusic(selectedMoodCategory.searchQuery)
         moodTracks = tracks
         isMoodLoading = false
     }
@@ -790,6 +827,8 @@ fun SonoraPlayerScreen() {
                     )
                 )
                 Toast.makeText(context, "Downloaded \"${track.title}\"", Toast.LENGTH_SHORT).show()
+            } else {
+                Toast.makeText(context, "Download failed", Toast.LENGTH_SHORT).show()
             }
             downloadingSongIds = downloadingSongIds - track.id
         }
@@ -814,9 +853,8 @@ fun SonoraPlayerScreen() {
                 totalDuration = if (mediaController.duration > 0) mediaController.duration else 0L
                 updateQueueState(mediaController)
             } else {
-                val savedAudioUrl = prefs.getString(KEY_LAST_AUDIO_URL, "") ?: ""
-                if (savedAudioUrl.isNotBlank()) {
-                    val savedId = prefs.getString(KEY_LAST_ID, "") ?: ""
+                val savedId = prefs.getString(KEY_LAST_ID, "") ?: ""
+                if (savedId.isNotBlank()) {
                     val savedTitle = prefs.getString(KEY_LAST_TITLE, "Last Played Track") ?: ""
                     val savedArtist = prefs.getString(KEY_LAST_ARTIST, "Tap play to resume") ?: ""
                     val savedArtworkUrl = prefs.getString(KEY_LAST_ARTWORK_URL, "") ?: ""
@@ -828,25 +866,29 @@ fun SonoraPlayerScreen() {
                     activeTitle = savedTitle
                     activeArtist = savedArtist
                     activeArtworkUrl = savedArtworkUrl
-                    activeAudioUrl = savedAudioUrl
                     activeDurationFormatted = savedDurationTxt
                     currentPosition = savedPosMs
                     totalDuration = savedDurMs
 
-                    val restoredTrack = FullTrackItem(
-                        id = savedId,
-                        title = savedTitle,
-                        artist = savedArtist,
-                        audioUrl = savedAudioUrl,
-                        artworkUrl = savedArtworkUrl,
-                        durationFormatted = savedDurationTxt
-                    )
-
-                    mediaController.setMediaItem(buildMediaItem(restoredTrack))
-                    mediaController.prepare()
-                    mediaController.seekTo(savedPosMs)
-                    mediaController.pause()
-                    updateQueueState(mediaController)
+                    coroutineScope.launch {
+                        val streamUrl = resolveYouTubeStreamUrl(savedId)
+                        if (streamUrl.isNotBlank()) {
+                            activeAudioUrl = streamUrl
+                            val restoredTrack = FullTrackItem(
+                                id = savedId,
+                                title = savedTitle,
+                                artist = savedArtist,
+                                audioUrl = streamUrl,
+                                artworkUrl = savedArtworkUrl,
+                                durationFormatted = savedDurationTxt
+                            )
+                            mediaController.setMediaItem(buildMediaItem(restoredTrack))
+                            mediaController.prepare()
+                            mediaController.seekTo(savedPosMs)
+                            mediaController.pause()
+                            updateQueueState(mediaController)
+                        }
+                    }
                 }
             }
 
@@ -900,18 +942,23 @@ fun SonoraPlayerScreen() {
                         .putLong(KEY_LAST_POSITION_MS, 0L)
                         .apply()
 
+                    // YouTube Automix Radio continuation
                     if (endlessRadioEnabled && mediaController.currentMediaItemIndex >= mediaController.mediaItemCount - 2) {
                         coroutineScope.launch {
-                            val similar = fetchRelatedSongs(activeSongId, activeArtist)
+                            val similar = fetchYouTubeAutomixRadio(activeSongId)
                             val currentQueueTracks = (0 until mediaController.mediaItemCount).map { idx ->
                                 mediaItemToTrack(mediaController.getMediaItemAt(idx))
                             }
                             val filteredSongs = filterSimilarTracks(similar, currentQueueTracks)
-                            val freshItems = filteredSongs.map { buildMediaItem(it) }
-                            if (freshItems.isNotEmpty()) {
-                                mediaController.addMediaItems(freshItems)
-                                updateQueueState(mediaController)
+
+                            for (song in filteredSongs.take(5)) {
+                                val sUrl = resolveYouTubeStreamUrl(song.id)
+                                if (sUrl.isNotBlank()) {
+                                    song.audioUrl = sUrl
+                                    mediaController.addMediaItem(buildMediaItem(song))
+                                }
                             }
+                            updateQueueState(mediaController)
                         }
                     }
                 }
@@ -941,6 +988,7 @@ fun SonoraPlayerScreen() {
         }
     }
 
+    // Resolves stream on demand and launches playback queue
     fun playQueue(tracks: List<FullTrackItem>, startIndex: Int) {
         if (tracks.isEmpty()) return
         val safeIndex = startIndex.coerceIn(0, tracks.size - 1)
@@ -951,9 +999,15 @@ fun SonoraPlayerScreen() {
             val effectiveUrl = if (downloadedLocal != null && File(downloadedLocal.localFilePath).exists()) {
                 downloadedLocal.localFilePath
             } else {
-                targetTrack.audioUrl
+                resolveYouTubeStreamUrl(targetTrack.id)
             }
 
+            if (effectiveUrl.isBlank()) {
+                Toast.makeText(context, "Failed to resolve audio stream", Toast.LENGTH_SHORT).show()
+                return@launch
+            }
+
+            targetTrack.audioUrl = effectiveUrl
             activeSongId = targetTrack.id
             activeTitle = targetTrack.title
             activeArtist = targetTrack.artist
@@ -971,32 +1025,26 @@ fun SonoraPlayerScreen() {
                 .putLong(KEY_LAST_POSITION_MS, 0L)
                 .apply()
 
-            val mediaItems = tracks.map { trk ->
-                val offlineItem = dao.getDownloadedSongById(trk.id)
-                if (offlineItem != null && File(offlineItem.localFilePath).exists()) {
-                    buildMediaItem(trk.copy(audioUrl = offlineItem.localFilePath))
-                } else {
-                    buildMediaItem(trk)
-                }
-            }
-
             controller?.let { player ->
-                player.setMediaItems(mediaItems, safeIndex, 0L)
+                player.setMediaItem(buildMediaItem(targetTrack))
                 player.prepare()
                 player.play()
                 updateQueueState(player)
             }
 
-            if (tracks.size == 1 && endlessRadioEnabled) {
-                val related = fetchRelatedSongs(targetTrack.id, targetTrack.artist)
-                val filteredRelated = filterSimilarTracks(related, listOf(targetTrack))
-                controller?.let { player ->
-                    val newItems = filteredRelated.map { buildMediaItem(it) }
-                    if (newItems.isNotEmpty()) {
-                        player.addMediaItems(newItems)
-                        updateQueueState(player)
+            // Seed Automix Radio queue in background
+            if (endlessRadioEnabled) {
+                val radioSongs = fetchYouTubeAutomixRadio(targetTrack.id)
+                val filtered = filterSimilarTracks(radioSongs, listOf(targetTrack))
+
+                for (song in filtered.take(6)) {
+                    val sUrl = resolveYouTubeStreamUrl(song.id)
+                    if (sUrl.isNotBlank()) {
+                        song.audioUrl = sUrl
+                        controller?.addMediaItem(buildMediaItem(song))
                     }
                 }
+                controller?.let { updateQueueState(it) }
             }
         }
     }
@@ -1007,7 +1055,7 @@ fun SonoraPlayerScreen() {
             isSearching = true
             coroutineScope.launch {
                 dao.insertSearchQuery(SearchHistoryEntity(query = queryToSearch.trim()))
-                val (results, _) = searchOfficialSongs(queryToSearch)
+                val (results, _) = searchYouTubeMusic(queryToSearch)
                 searchResults = results
                 isSearching = false
             }
@@ -1029,7 +1077,6 @@ fun SonoraPlayerScreen() {
                     .padding(horizontal = 16.dp, vertical = 8.dp)
                     .navigationBarsPadding()
             ) {
-                // Top Volume Scrubber Capsule
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -1063,7 +1110,6 @@ fun SonoraPlayerScreen() {
 
                 Spacer(modifier = Modifier.height(14.dp))
 
-                // Three-Tile Quick Action Grid: Start Radio | Add to Playlist | Copy Link
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(10.dp)
@@ -1072,12 +1118,7 @@ fun SonoraPlayerScreen() {
                         modifier = Modifier
                             .weight(1f)
                             .clickable {
-                                coroutineScope.launch {
-                                    val related = fetchRelatedSongs(song.id, song.artist)
-                                    val filtered = filterSimilarTracks(related, listOf(song))
-                                    val fullQueue = listOf(song) + filtered
-                                    playQueue(fullQueue, 0)
-                                }
+                                playQueue(listOf(song), 0)
                                 selectedTrackForOptions = null
                                 Toast.makeText(context, "Started radio for ${song.title}", Toast.LENGTH_SHORT).show()
                             },
@@ -1123,10 +1164,10 @@ fun SonoraPlayerScreen() {
                             .weight(1f)
                             .clickable {
                                 val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                                val clip = ClipData.newPlainText("Song Link", song.audioUrl)
+                                val clip = ClipData.newPlainText("Song Link", "https://music.youtube.com/watch?v=${song.id}")
                                 clipboard.setPrimaryClip(clip)
                                 selectedTrackForOptions = null
-                                Toast.makeText(context, "Copied link to clipboard", Toast.LENGTH_SHORT).show()
+                                Toast.makeText(context, "Copied YouTube Music link", Toast.LENGTH_SHORT).show()
                             },
                         colors = CardDefaults.cardColors(containerColor = Color(0xFF1A222B)),
                         shape = RoundedCornerShape(16.dp)
@@ -1146,7 +1187,6 @@ fun SonoraPlayerScreen() {
 
                 Spacer(modifier = Modifier.height(14.dp))
 
-                // Detail and Navigation Rows
                 Column(modifier = Modifier.fillMaxWidth()) {
                     Card(
                         modifier = Modifier
@@ -1257,7 +1297,7 @@ fun SonoraPlayerScreen() {
                             .fillMaxWidth()
                             .padding(vertical = 3.dp)
                             .clickable {
-                                Toast.makeText(context, "${song.title} by ${song.artist}", Toast.LENGTH_LONG).show()
+                                Toast.makeText(context, "${song.title} by ${song.artist}\nYouTube ID: ${song.id}", Toast.LENGTH_LONG).show()
                                 selectedTrackForOptions = null
                             },
                         colors = CardDefaults.cardColors(containerColor = Color(0xFF141C24)),
@@ -1271,7 +1311,7 @@ fun SonoraPlayerScreen() {
                             Spacer(modifier = Modifier.width(14.dp))
                             Column {
                                 Text("Details", fontSize = 14.sp, color = Color.White, fontWeight = FontWeight.SemiBold)
-                                Text("View track format and stream info", fontSize = 12.sp, color = Color(0xFF94A3B8))
+                                Text("YouTube Music Track Info", fontSize = 12.sp, color = Color(0xFF94A3B8))
                             }
                         }
                     }
@@ -1996,7 +2036,7 @@ fun SonoraPlayerScreen() {
                 }
             }
 
-            // Floating Miniplayer with Circular Scrubber & Refined Vectors (Images 1 & 3)[cite: 1, 3]
+            // Floating Miniplayer
             if (activeSongId.isNotBlank()) {
                 val progressFraction = if (totalDuration > 0) (currentPosition.toFloat() / totalDuration.toFloat()).coerceIn(0f, 1f) else 0f
 
@@ -2113,7 +2153,7 @@ fun SonoraPlayerScreen() {
                 }
             }
 
-            // Bottom Navigation Bar with Rounded Vectors
+            // Bottom Navigation Bar
             NavigationBar(
                 containerColor = Color(0xFF0A0F14),
                 contentColor = Color.White,
@@ -2161,7 +2201,7 @@ fun SonoraPlayerScreen() {
             }
         }
 
-        // Full Screen Now Playing View (Image 2)[cite: 2]
+        // Full Screen Now Playing View
         AnimatedVisibility(
             visible = isPlayerExpanded,
             enter = slideInVertically(initialOffsetY = { it }),
@@ -2185,7 +2225,6 @@ fun SonoraPlayerScreen() {
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.SpaceBetween
                 ) {
-                    // Header: Keyboard Down Arrow + Title
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         verticalAlignment = Alignment.CenterVertically
@@ -2215,7 +2254,6 @@ fun SonoraPlayerScreen() {
                         Spacer(modifier = Modifier.width(48.dp))
                     }
 
-                    // Arched Large Artwork
                     Box(
                         modifier = Modifier
                             .fillMaxWidth(0.88f)
@@ -2232,7 +2270,6 @@ fun SonoraPlayerScreen() {
                         )
                     }
 
-                    // Track Title, Artists, Share and Like Pill Buttons
                     Column(modifier = Modifier.fillMaxWidth()) {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
@@ -2265,7 +2302,7 @@ fun SonoraPlayerScreen() {
                                         .background(Color(0xFF283444))
                                         .clickable {
                                             val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                                            clipboard.setPrimaryClip(ClipData.newPlainText("Track", activeAudioUrl))
+                                            clipboard.setPrimaryClip(ClipData.newPlainText("Track", "https://music.youtube.com/watch?v=$activeSongId"))
                                             Toast.makeText(context, "Copied track link", Toast.LENGTH_SHORT).show()
                                         }
                                         .padding(horizontal = 14.dp, vertical = 10.dp)
@@ -2351,7 +2388,6 @@ fun SonoraPlayerScreen() {
                         }
                     }
 
-                    // Main Media Controls: Steel Blue Pills with Vector Icons
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         verticalAlignment = Alignment.CenterVertically,
@@ -2424,7 +2460,6 @@ fun SonoraPlayerScreen() {
                         }
                     }
 
-                    // Bottom Action Bar with Utility Vector Icons
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
