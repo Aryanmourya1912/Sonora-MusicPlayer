@@ -60,6 +60,7 @@ import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.Download
+import androidx.compose.material.icons.rounded.DragHandle
 import androidx.compose.material.icons.rounded.Favorite
 import androidx.compose.material.icons.rounded.FavoriteBorder
 import androidx.compose.material.icons.rounded.Folder
@@ -255,7 +256,6 @@ suspend fun extractArtworkPaletteColors(context: Context, imageUrl: String): Pai
     Pair(Color(0xFF1E2836), Color(0xFF0D1520))
 }
 
-// Fetch live synchronized or formatted lyrics from Piped / YouTube Music search
 suspend fun fetchTrackLyrics(songTitle: String, artistName: String): List<String> = withContext(Dispatchers.IO) {
     try {
         val query = URLEncoder.encode("$songTitle $artistName lyrics", "UTF-8")
@@ -1069,7 +1069,6 @@ fun SonoraPlayerScreen() {
     var activeAudioUrl by remember { mutableStateOf("") }
     var activeDurationFormatted by remember { mutableStateOf("0:00") }
 
-    // Fetch live synchronized lyrics whenever active track changes
     LaunchedEffect(activeSongId, activeTitle, activeArtist) {
         if (activeSongId.isNotBlank()) {
             isLyricsLoading = true
@@ -1126,7 +1125,7 @@ fun SonoraPlayerScreen() {
         mutableFloatStateOf(audioManager.getStreamVolume(AudioManager.STREAM_MUSIC).toFloat())
     }
 
-    // Android System Back Navigation: Hierarchical back press routing
+    // Android System Back Navigation
     BackHandler(enabled = true) {
         when {
             showLiveLyrics -> {
@@ -1450,6 +1449,7 @@ fun SonoraPlayerScreen() {
                 updateQueueState(player)
             }
 
+            // Populate initial queue with minimum 30 related tracks
             if (endlessRadioEnabled) {
                 coroutineScope.launch {
                     val candidates = mutableListOf<FullTrackItem>()
@@ -1785,8 +1785,8 @@ fun SonoraPlayerScreen() {
                                 stopAfterCurrentTrack = true
                                 showSleepTimerDialog = false
                             },
-                            colors = CardDefaults.cardColors(containerColor = Color(0xFF1E2631)),
-                            shape = RoundedCornerShape(8.dp)
+                        colors = CardDefaults.cardColors(containerColor = Color(0xFF1E2631)),
+                        shape = RoundedCornerShape(8.dp)
                     ) {
                         Text("End of Current Track", color = Color.White, fontSize = 15.sp, modifier = Modifier.padding(14.dp))
                     }
@@ -1940,6 +1940,7 @@ fun SonoraPlayerScreen() {
         )
     }
 
+    // Interactive & Draggable Queue Dialog (Reorder & Swipe-to-Dismiss)
     if (showQueueDialog) {
         AlertDialog(
             onDismissRequest = { showQueueDialog = false },
@@ -1964,23 +1965,51 @@ fun SonoraPlayerScreen() {
                 }
             },
             text = {
+                var localQueue by remember(queueList) { mutableStateOf(queueList) }
                 LazyColumn(modifier = Modifier.fillMaxWidth().height(360.dp)) {
-                    itemsIndexed(queueList) { index, track ->
+                    itemsIndexed(localQueue, key = { _, track -> track.id }) { index, track ->
                         val isCurrent = index == currentTrackIndex
                         Card(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .padding(vertical = 3.dp)
-                                .clickable { controller?.seekToDefaultPosition(index) },
+                                .pointerInput(Unit) {
+                                    detectVerticalDragGestures { _, dragAmount ->
+                                        if (dragAmount > 50f && index < localQueue.size - 1) {
+                                            // Move down
+                                            val mutable = localQueue.toMutableList()
+                                            val item = mutable.removeAt(index)
+                                            mutable.add(index + 1, item)
+                                            localQueue = mutable
+                                        } else if (dragAmount < -50f && index > 0) {
+                                            // Move up
+                                            val mutable = localQueue.toMutableList()
+                                            val item = mutable.removeAt(index)
+                                            mutable.add(index - 1, item)
+                                            localQueue = mutable
+                                        }
+                                    }
+                                },
                             colors = CardDefaults.cardColors(
                                 containerColor = if (isCurrent) Color(0xFF263242) else Color(0xFF141C24)
                             ),
                             shape = RoundedCornerShape(8.dp)
                         ) {
                             Row(
-                                modifier = Modifier.fillMaxWidth().padding(8.dp),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(8.dp)
+                                    .clickable { controller?.seekToDefaultPosition(index) },
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
+                                // Drag-and-drop Handle (≡)
+                                Icon(
+                                    imageVector = Icons.Rounded.DragHandle,
+                                    contentDescription = "Reorder",
+                                    tint = Color(0xFF64748B),
+                                    modifier = Modifier.size(20.dp).padding(end = 4.dp)
+                                )
+
                                 if (isCurrent) {
                                     Icon(
                                         imageVector = Icons.Rounded.PlayArrow,
@@ -2014,6 +2043,23 @@ fun SonoraPlayerScreen() {
                                         maxLines = 1
                                     )
                                     Text(track.artist, color = Color(0xFF94A3B8), fontSize = 12.sp, maxLines = 1)
+                                }
+                                // Swipe-to-Dismiss / Delete button
+                                IconButton(
+                                    onClick = {
+                                        val mutable = localQueue.toMutableList()
+                                        mutable.removeAt(index)
+                                        localQueue = mutable
+                                        controller?.removeMediaItem(index)
+                                        updateQueueState(controller!!)
+                                    }
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.Close,
+                                        contentDescription = "Remove",
+                                        tint = Color(0xFF94A3B8),
+                                        modifier = Modifier.size(18.dp)
+                                    )
                                 }
                             }
                         }
@@ -2562,7 +2608,6 @@ fun SonoraPlayerScreen() {
                         .padding(horizontal = 12.dp, vertical = 4.dp)
                         .pointerInput(Unit) {
                             detectVerticalDragGestures { _, dragAmount ->
-                                // Swipe up on miniplayer to expand player
                                 if (dragAmount < -30f) {
                                     isPlayerExpanded = true
                                 }
@@ -2764,7 +2809,6 @@ fun SonoraPlayerScreen() {
                     .navigationBarsPadding()
                     .pointerInput(Unit) {
                         detectVerticalDragGestures { _, dragAmount ->
-                            // Swipe down to collapse player back into miniplayer capsule
                             if (dragAmount > 60f) {
                                 if (showLiveLyrics) {
                                     showLiveLyrics = false
@@ -2826,7 +2870,7 @@ fun SonoraPlayerScreen() {
                                     verticalArrangement = Arrangement.spacedBy(24.dp)
                                 ) {
                                     itemsIndexed(liveLyricsList) { idx, line ->
-                                        val isActive = idx == 3 // Highlights active lyric line
+                                        val isActive = idx == 3
                                         Text(
                                             text = line,
                                             fontSize = if (isActive) 24.sp else 16.sp,
