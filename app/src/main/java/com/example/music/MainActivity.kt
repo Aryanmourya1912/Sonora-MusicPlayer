@@ -3,6 +3,7 @@ package com.example.music
 import android.content.ComponentName
 import android.net.Uri
 import android.os.Bundle
+import android.util.Base64
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.clickable
@@ -60,12 +61,13 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import org.json.JSONArray
 import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
 import java.util.Locale
+import javax.crypto.Cipher
+import javax.crypto.spec.SecretKeySpec
 import kotlin.math.max
 
 data class FullTrackItem(
@@ -120,114 +122,127 @@ fun sanitizeText(input: String): String {
         .replace("&gt;", ">")
 }
 
-// Safely extracts URL from either {"url": "..."} or {"link": "..."}
-fun extractMediaUrl(jsonArray: JSONArray?): String {
-    if (jsonArray == null || jsonArray.length() == 0) return ""
-    val bestQuality = jsonArray.getJSONObject(jsonArray.length() - 1)
-    val url = bestQuality.optString("url", "")
-    return if (url.isNotBlank()) url else bestQuality.optString("link", "")
+// Decrypts JioSaavn's encrypted CDN media URLs directly on device
+fun decryptMediaUrl(encryptedUrl: String): String {
+    if (encryptedUrl.isBlank()) return ""
+    return try {
+        val key = "38346591".toByteArray(Charsets.UTF_8)
+        val keySpec = SecretKeySpec(key, "DES")
+        val cipher = Cipher.getInstance("DES/ECB/PKCS5Padding")
+        cipher.init(Cipher.DECRYPT_MODE, keySpec)
+        val decoded = Base64.decode(encryptedUrl.trim(), Base64.DEFAULT)
+        val decrypted = cipher.doFinal(decoded)
+        var rawUrl = String(decrypted, Charsets.UTF_8).trim()
+
+        if (rawUrl.startsWith("http://")) {
+            rawUrl = rawUrl.replaceFirst("http://", "https://")
+        }
+        // Upgrade preview audio to standard 160kbps stream
+        if (rawUrl.contains("_96.mp4")) {
+            rawUrl = rawUrl.replace("_96.mp4", "_160.mp4")
+        } else if (rawUrl.contains("_96.m4a")) {
+            rawUrl = rawUrl.replace("_96.m4a", "_160.m4a")
+        }
+        rawUrl
+    } catch (e: Exception) {
+        ""
+    }
 }
 
-// Queries the music API with browser headers and mirror failover
-suspend fun searchFullSongs(query: String): Pair<List<FullTrackItem>, String?> = withContext(Dispatchers.IO) {
+// Queries JioSaavn's official backend API directly (no middleman / no Vercel quotas)
+suspend fun searchOfficialSongs(query: String): Pair<List<FullTrackItem>, String?> = withContext(Dispatchers.IO) {
     val resultsList = mutableListOf<FullTrackItem>()
-    val encodedQuery = URLEncoder.encode(query.trim(), "UTF-8")
+    try {
+        val encodedQuery = URLEncoder.encode(query.trim(), "UTF-8")
+        val endpoint = "https://www.jiosaavn.com/api.php?__call=search.getResults&_format=json&_marker=0&api_version=4&ctx=web6dot0&n=25&p=1&q=$encodedQuery"
+        
+        val url = URL(endpoint)
+        val connection = url.openConnection() as HttpURLConnection
+        connection.requestMethod = "GET"
+        connection.connectTimeout = 8000
+        connection.readTimeout = 8000
+        connection.setRequestProperty(
+            "User-Agent",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        )
+        connection.setRequestProperty("Accept", "application/json, text/plain, */*")
+        connection.setRequestProperty("Referer", "https://www.jiosaavn.com/")
+        connection.setRequestProperty("Cookie", "L=english; gdpr_acceptance=true;")
 
-    // Endpoints tried sequentially if one is blocked or unavailable
-    val candidateEndpoints = listOf(
-        "https://saavn.dev/api/search/songs?query=$encodedQuery&limit=25",
-        "https://saavn.me/search/songs?query=$encodedQuery",
-        "https://jiosaavn-api-privatecvc2.vercel.app/search/songs?query=$encodedQuery"
-    )
-
-    var lastErrorMessage: String? = null
-
-    for (endpoint in candidateEndpoints) {
-        try {
-            val url = URL(endpoint)
-            val connection = url.openConnection() as HttpURLConnection
-            connection.requestMethod = "GET"
-            connection.connectTimeout = 7000
-            connection.readTimeout = 7000
-            // Set User-Agent so reverse proxies don't reject the connection
-            connection.setRequestProperty(
-                "User-Agent",
-                "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
-            )
-            connection.setRequestProperty("Accept", "application/json")
-
-            val responseCode = connection.responseCode
-            if (responseCode != HttpURLConnection.HTTP_OK) {
-                lastErrorMessage = "Server returned status $responseCode"
-                continue
-            }
-
-            val responseText = connection.inputStream.bufferedReader().use { it.readText() }
-            val root = JSONObject(responseText)
-
-            val dataObj = root.optJSONObject("data")
-            val resultsArray = when {
-                dataObj != null && dataObj.has("results") -> dataObj.optJSONArray("results")
-                root.has("data") && root.optJSONArray("data") != null -> root.optJSONArray("data")
-                root.has("results") -> root.optJSONArray("results")
-                else -> null
-            }
-
-            if (resultsArray != null && resultsArray.length() > 0) {
-                for (i in 0 until resultsArray.length()) {
-                    val item = resultsArray.getJSONObject(i)
-                    val trackId = item.optString("id", "$i")
-                    val rawName = if (item.has("name")) item.optString("name") else item.optString("title", "Unknown Track")
-                    val trackName = sanitizeText(rawName)
-
-                    var artistName = item.optString("primaryArtists", "")
-                    if (artistName.isBlank()) {
-                        val artistsObj = item.optJSONObject("artists")
-                        val primaryArray = artistsObj?.optJSONArray("primary")
-                        if (primaryArray != null && primaryArray.length() > 0) {
-                            artistName = primaryArray.getJSONObject(0).optString("name", "")
-                        }
-                    }
-                    if (artistName.isBlank()) artistName = "Unknown Artist"
-                    artistName = sanitizeText(artistName)
-
-                    // Extract image link
-                    var artUrl = extractMediaUrl(item.optJSONArray("image"))
-                    if (artUrl.isBlank()) artUrl = item.optString("image", "")
-
-                    // Extract playable stream URL
-                    var playableStream = extractMediaUrl(item.optJSONArray("downloadUrl"))
-                    if (playableStream.isBlank()) {
-                        playableStream = item.optString("media_url", item.optString("url", ""))
-                    }
-
-                    val durationSeconds = item.optLong("duration", 0L)
-                    val durationLabel = formatTime(durationSeconds * 1000)
-
-                    if (trackName.isNotBlank() && playableStream.isNotBlank()) {
-                        resultsList.add(
-                            FullTrackItem(
-                                id = trackId,
-                                title = trackName,
-                                artist = artistName,
-                                audioUrl = playableStream,
-                                artworkUrl = artUrl,
-                                durationFormatted = durationLabel
-                            )
-                        )
-                    }
-                }
-
-                if (resultsList.isNotEmpty()) {
-                    return@withContext Pair(resultsList, null)
-                }
-            }
-        } catch (e: Exception) {
-            lastErrorMessage = e.localizedMessage ?: e.message ?: "Network error"
+        val responseCode = connection.responseCode
+        if (responseCode != HttpURLConnection.HTTP_OK) {
+            return@withContext Pair(emptyList(), "Server response code: $responseCode")
         }
-    }
 
-    Pair(resultsList, lastErrorMessage ?: "No tracks found for \"$query\"")
+        val responseText = connection.inputStream.bufferedReader().use { it.readText() }
+        val root = JSONObject(responseText)
+        val resultsArray = root.optJSONArray("results") ?: return@withContext Pair(emptyList(), "No tracks found for \"$query\"")
+
+        for (i in 0 until resultsArray.length()) {
+            val item = resultsArray.getJSONObject(i)
+            val trackId = item.optString("id", "$i")
+            val rawTitle = when {
+                item.has("title") && item.optString("title").isNotBlank() -> item.optString("title")
+                item.has("song") && item.optString("song").isNotBlank() -> item.optString("song")
+                else -> "Unknown Track"
+            }
+            val trackTitle = sanitizeText(rawTitle)
+
+            val moreInfo = item.optJSONObject("more_info")
+
+            // Artist resolution
+            var artistName = item.optString("subtitle", "")
+            if (artistName.isBlank() && moreInfo != null) {
+                artistName = moreInfo.optString("music", "")
+            }
+            if (artistName.isBlank()) {
+                artistName = item.optString("primary_artists", "Unknown Artist")
+            }
+            artistName = sanitizeText(artistName)
+
+            // High-resolution artwork
+            var artUrl = item.optString("image", "")
+            if (artUrl.isBlank() && moreInfo != null) {
+                artUrl = moreInfo.optString("image", "")
+            }
+            artUrl = artUrl.replace("150x150", "500x500").replace("50x50", "500x500")
+            if (artUrl.startsWith("http://")) {
+                artUrl = artUrl.replaceFirst("http://", "https://")
+            }
+
+            // Audio Stream Decryption
+            val encryptedUrl = when {
+                moreInfo != null && moreInfo.has("encrypted_media_url") -> moreInfo.optString("encrypted_media_url")
+                item.has("encrypted_media_url") -> item.optString("encrypted_media_url")
+                else -> ""
+            }
+            val playableStream = decryptMediaUrl(encryptedUrl)
+
+            // Duration in seconds
+            val durationSeconds = when {
+                moreInfo != null && moreInfo.has("duration") -> moreInfo.optLong("duration", 0L)
+                item.has("duration") -> item.optLong("duration", 0L)
+                else -> 0L
+            }
+            val durationLabel = formatTime(durationSeconds * 1000)
+
+            if (trackTitle.isNotBlank() && playableStream.isNotBlank()) {
+                resultsList.add(
+                    FullTrackItem(
+                        id = trackId,
+                        title = trackTitle,
+                        artist = artistName,
+                        audioUrl = playableStream,
+                        artworkUrl = artUrl,
+                        durationFormatted = durationLabel
+                    )
+                )
+            }
+        }
+        Pair(resultsList, null)
+    } catch (e: Exception) {
+        Pair(resultsList, e.localizedMessage ?: "Network error occurred")
+    }
 }
 
 @Composable
@@ -331,7 +346,7 @@ fun SonoraPlayerScreen() {
                         isSearching = true
                         searchStatusMessage = null
                         coroutineScope.launch {
-                            val (results, errorMsg) = searchFullSongs(searchQuery)
+                            val (results, errorMsg) = searchOfficialSongs(searchQuery)
                             searchResults = results
                             searchStatusMessage = errorMsg
                             isSearching = false
