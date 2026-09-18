@@ -47,7 +47,6 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
-import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
@@ -61,6 +60,8 @@ import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
+import androidx.compose.material3.Tab
+import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.darkColorScheme
@@ -85,7 +86,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -187,6 +187,78 @@ fun sanitizeText(input: String): String {
         .replace("&#039;", "'")
         .replace("&lt;", "<")
         .replace("&gt;", ">")
+}
+
+// Cleans track title by stripping noise, brackets, and version tags
+fun cleanSongTitle(rawTitle: String): String {
+    var clean = rawTitle.lowercase(Locale.ROOT)
+    // Strip parentheses, brackets, braces and their internal contents
+    clean = clean.replace("\\(.*?\\)".toRegex(), " ")
+    clean = clean.replace("\\[.*?\\]".toRegex(), " ")
+    clean = clean.replace("\\{.*?\\}".toRegex(), " ")
+
+    // Remove dash suffix tags (- Slowed, - Remix, - From Movie, etc.)
+    clean = clean.replace("-\\s*(slowed|reverb|remix|acoustic|live|sped up|speed up|lofi|instrumental|edit|deluxe|remastered|version|from|soundtrack|ost).*".toRegex(), " ")
+
+    // Remove common standalone noise descriptors
+    clean = clean.replace("\\b(slowed|reverb|remix|acoustic|live|sped up|speed up|lofi|instrumental|edit|deluxe|remastered|remaster|version|soundtrack|ost|audio|video|lyrics|official)\\b".toRegex(), " ")
+
+    // Remove "feat" or "ft" clauses
+    clean = clean.replace("\\b(feat|ft)\\.?\\s+.*".toRegex(), " ")
+
+    // Retain only letters and numbers
+    clean = clean.replace("[^a-z0-9 ]".toRegex(), " ")
+    return clean.trim().replace("\\s+".toRegex(), " ")
+}
+
+// Extracts and normalizes the primary lead artist
+fun cleanArtist(rawArtist: String): String {
+    val firstArtist = rawArtist.split(",", "&", "feat.", "ft.", "and", "/", ";").firstOrNull() ?: rawArtist
+    return firstArtist.lowercase(Locale.ROOT)
+        .replace("[^a-z0-9 ]".toRegex(), " ")
+        .trim()
+        .replace("\\s+".toRegex(), " ")
+}
+
+// Checks whether candidate song is duplicate or an alternate cut of an existing song
+fun areTracksSimilar(trackA: FullTrackItem, trackB: FullTrackItem): Boolean {
+    if (trackA.id.isNotBlank() && trackA.id == trackB.id) return true
+
+    val titleA = cleanSongTitle(trackA.title)
+    val titleB = cleanSongTitle(trackB.title)
+    if (titleA.isBlank() || titleB.isBlank()) return false
+
+    val artistA = cleanArtist(trackA.artist)
+    val artistB = cleanArtist(trackB.artist)
+    val artistsMatch = artistA.isBlank() || artistB.isBlank() || artistA == artistB ||
+            artistA.contains(artistB) || artistB.contains(artistA)
+
+    // 1. Exact normalized title match (e.g., "Sunflower" vs "Sunflower (Spider-Man OST)")
+    if (titleA == titleB && artistsMatch) return true
+
+    // 2. Substring containment match for substantial titles (e.g., "Montagem Ritmada" vs "Montagem Ritmada Slowed")
+    if (titleA.length >= 5 && titleB.length >= 5) {
+        if ((titleA.contains(titleB) || titleB.contains(titleA)) && artistsMatch) {
+            return true
+        }
+    }
+
+    return false
+}
+
+// Deduplication filter: eliminates duplicate tracks from incoming recommendations
+fun filterSimilarTracks(incoming: List<FullTrackItem>, existingQueue: List<FullTrackItem>): List<FullTrackItem> {
+    val result = mutableListOf<FullTrackItem>()
+    val pool = existingQueue.toMutableList()
+
+    for (candidate in incoming) {
+        val isDuplicate = pool.any { existing -> areTracksSimilar(candidate, existing) }
+        if (!isDuplicate) {
+            result.add(candidate)
+            pool.add(candidate) // Prevents duplicates within the incoming batch itself
+        }
+    }
+    return result
 }
 
 fun decryptMediaUrl(encryptedUrl: String): String {
@@ -501,28 +573,20 @@ fun SonoraPlayerScreen() {
     val allPlaylists by dao.getAllPlaylists().collectAsState(initial = emptyList())
     val downloadedSongs by dao.getAllDownloadedSongs().collectAsState(initial = emptyList())
 
-    // Navigation: 0 = Home, 1 = Search, 2 = Library
     var selectedNavTab by remember { mutableIntStateOf(0) }
-
-    // Library Tab sub-selection (0 = Liked, 1 = Playlists, 2 = Offline)
     var selectedLibrarySubTab by remember { mutableIntStateOf(0) }
     var viewingPlaylist by remember { mutableStateOf<PlaylistEntity?>(null) }
     val activePlaylistSongs by remember(viewingPlaylist?.id) {
         viewingPlaylist?.let { dao.getSongsForPlaylist(it.id) } ?: flowOf(emptyList())
     }.collectAsState(initial = emptyList())
 
-    // Player Controller and playback
     var controller by remember { mutableStateOf<MediaController?>(null) }
     var isPlaying by remember { mutableStateOf(false) }
 
-    // UI View Expansion: Full-screen Now Playing vs Miniplayer
     var isPlayerExpanded by remember { mutableStateOf(false) }
-
-    // Three-dot Options Bottom Sheet state
     var selectedTrackForOptions by remember { mutableStateOf<FullTrackItem?>(null) }
     val bottomSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
-    // Up Next Queue & Endless Radio
     var queueList by remember { mutableStateOf<List<FullTrackItem>>(emptyList()) }
     var currentTrackIndex by remember { mutableIntStateOf(0) }
     var endlessRadioEnabled by remember { mutableStateOf(true) }
@@ -530,20 +594,16 @@ fun SonoraPlayerScreen() {
     var isShuffleEnabled by remember { mutableStateOf(false) }
     var repeatModeState by remember { mutableIntStateOf(Player.REPEAT_MODE_OFF) }
 
-    // Download tracking
     var downloadingSongIds by remember { mutableStateOf<Set<String>>(emptySet()) }
 
-    // Search state
     var searchQuery by remember { mutableStateOf("") }
     var searchResults by remember { mutableStateOf<List<FullTrackItem>>(emptyList()) }
     var isSearching by remember { mutableStateOf(false) }
 
-    // Home Discovery & Moods
     var selectedMoodCategory by remember { mutableStateOf(DiscoveryCategoryList[0]) }
     var moodTracks by remember { mutableStateOf<List<FullTrackItem>>(emptyList()) }
     var isMoodLoading by remember { mutableStateOf(false) }
 
-    // Active track details
     var activeSongId by remember { mutableStateOf("") }
     var activeTitle by remember { mutableStateOf("No Track Playing") }
     var activeArtist by remember { mutableStateOf("Select a song to start listening") }
@@ -559,29 +619,24 @@ fun SonoraPlayerScreen() {
     var isDraggingSlider by remember { mutableStateOf(false) }
     var sliderDragValue by remember { mutableStateOf(0f) }
 
-    // Sleep timer state
     var showSleepTimerDialog by remember { mutableStateOf(false) }
     var sleepTimerRemainingSeconds by remember { mutableLongStateOf(0L) }
     var stopAfterCurrentTrack by remember { mutableStateOf(false) }
     var sleepTimerJob by remember { mutableStateOf<Job?>(null) }
 
-    // Playlist dialogs
     var songToAddToPlaylist by remember { mutableStateOf<FullTrackItem?>(null) }
     var showCreatePlaylistDialog by remember { mutableStateOf(false) }
     var newPlaylistName by remember { mutableStateOf("") }
 
-    // Device system volume slider for the Options Bottom Sheet
     val maxSysVolume = remember { audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC).toFloat() }
     var currentVolumeSlider by remember {
         mutableFloatStateOf(audioManager.getStreamVolume(AudioManager.STREAM_MUSIC).toFloat())
     }
 
-    // Intercept back button when player is full screen
     BackHandler(enabled = isPlayerExpanded) {
         isPlayerExpanded = false
     }
 
-    // Refresh Mood Tracks when category changes
     LaunchedEffect(selectedMoodCategory) {
         isMoodLoading = true
         val (tracks, _) = searchOfficialSongs(selectedMoodCategory.searchQuery)
@@ -641,7 +696,6 @@ fun SonoraPlayerScreen() {
         }
     }
 
-    // Connect to MediaSessionService
     DisposableEffect(context) {
         val sessionToken = SessionToken(context, ComponentName(context, PlaybackService::class.java))
         val controllerFuture = MediaController.Builder(context, sessionToken).buildAsync()
@@ -747,13 +801,16 @@ fun SonoraPlayerScreen() {
                         .putLong(KEY_LAST_POSITION_MS, 0L)
                         .apply()
 
+                    // Endless Radio: Automatically appends filtered similar songs
                     if (endlessRadioEnabled && mediaController.currentMediaItemIndex >= mediaController.mediaItemCount - 2) {
                         coroutineScope.launch {
                             val similar = fetchRelatedSongs(activeSongId, activeArtist)
-                            val existingIds = (0 until mediaController.mediaItemCount).map { idx ->
-                                mediaController.getMediaItemAt(idx).mediaId
-                            }.toSet()
-                            val freshItems = similar.filter { it.id !in existingIds }.map { buildMediaItem(it) }
+                            val currentQueueTracks = (0 until mediaController.mediaItemCount).map { idx ->
+                                mediaItemToTrack(mediaController.getMediaItemAt(idx))
+                            }
+                            // Apply deduplication filter
+                            val filteredSongs = filterSimilarTracks(similar, currentQueueTracks)
+                            val freshItems = filteredSongs.map { buildMediaItem(it) }
                             if (freshItems.isNotEmpty()) {
                                 mediaController.addMediaItems(freshItems)
                                 updateQueueState(mediaController)
@@ -833,10 +890,12 @@ fun SonoraPlayerScreen() {
                 updateQueueState(player)
             }
 
+            // If starting from a single track, filter recommendations against this track
             if (tracks.size == 1 && endlessRadioEnabled) {
                 val related = fetchRelatedSongs(targetTrack.id, targetTrack.artist)
+                val filteredRelated = filterSimilarTracks(related, listOf(targetTrack))
                 controller?.let { player ->
-                    val newItems = related.filter { it.id != targetTrack.id }.map { buildMediaItem(it) }
+                    val newItems = filteredRelated.map { buildMediaItem(it) }
                     if (newItems.isNotEmpty()) {
                         player.addMediaItems(newItems)
                         updateQueueState(player)
@@ -859,9 +918,7 @@ fun SonoraPlayerScreen() {
         }
     }
 
-    // =========================================================================
-    // MODAL BOTTOM SHEET: THREE-DOT TRACK OPTIONS (Image 4)
-    // =========================================================================
+    // --- MODAL BOTTOM SHEET: THREE-DOT TRACK OPTIONS (Image 4) ---
     if (selectedTrackForOptions != null) {
         val song = selectedTrackForOptions!!
         ModalBottomSheet(
@@ -876,7 +933,6 @@ fun SonoraPlayerScreen() {
                     .padding(horizontal = 16.dp, vertical = 8.dp)
                     .navigationBarsPadding()
             ) {
-                // Top Volume Scrubber Capsule
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -905,19 +961,18 @@ fun SonoraPlayerScreen() {
 
                 Spacer(modifier = Modifier.height(14.dp))
 
-                // Three-Tile Quick Action Grid: Start Radio | Add to Playlist | Copy Link
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    // Start Radio
                     Card(
                         modifier = Modifier
                             .weight(1f)
                             .clickable {
                                 coroutineScope.launch {
                                     val related = fetchRelatedSongs(song.id, song.artist)
-                                    val fullQueue = listOf(song) + related
+                                    val filtered = filterSimilarTracks(related, listOf(song))
+                                    val fullQueue = listOf(song) + filtered
                                     playQueue(fullQueue, 0)
                                 }
                                 selectedTrackForOptions = null
@@ -938,7 +993,6 @@ fun SonoraPlayerScreen() {
                         }
                     }
 
-                    // Add to Playlist
                     Card(
                         modifier = Modifier
                             .weight(1f)
@@ -961,7 +1015,6 @@ fun SonoraPlayerScreen() {
                         }
                     }
 
-                    // Copy Link
                     Card(
                         modifier = Modifier
                             .weight(1f)
@@ -990,9 +1043,7 @@ fun SonoraPlayerScreen() {
 
                 Spacer(modifier = Modifier.height(14.dp))
 
-                // Detail and Navigation Rows
                 Column(modifier = Modifier.fillMaxWidth()) {
-                    // View Artist
                     Card(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -1018,7 +1069,6 @@ fun SonoraPlayerScreen() {
                         }
                     }
 
-                    // View Album / Search Related
                     Card(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -1044,7 +1094,6 @@ fun SonoraPlayerScreen() {
                         }
                     }
 
-                    // Add to Favorites / Library
                     Card(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -1078,7 +1127,6 @@ fun SonoraPlayerScreen() {
                         }
                     }
 
-                    // Download Track
                     Card(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -1100,7 +1148,6 @@ fun SonoraPlayerScreen() {
                         }
                     }
 
-                    // Details
                     Card(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -1129,9 +1176,6 @@ fun SonoraPlayerScreen() {
         }
     }
 
-    // =========================================================================
-    // DIALOGS: Sleep Timer, Add Playlist, New Playlist, Queue
-    // =========================================================================
     if (showSleepTimerDialog) {
         AlertDialog(
             onDismissRequest = { showSleepTimerDialog = false },
@@ -1389,19 +1433,14 @@ fun SonoraPlayerScreen() {
         )
     }
 
-    // =========================================================================
-    // MAIN APPLICATION SCAFFOLD
-    // =========================================================================
     Box(modifier = Modifier.fillMaxSize().background(Color(0xFF070B10))) {
         Column(modifier = Modifier.fillMaxSize()) {
-            // Main Screen Content based on Selected Tab
             Box(
                 modifier = Modifier
                     .weight(1f)
                     .fillMaxWidth()
             ) {
                 when (selectedNavTab) {
-                    // TAB 0: HOME / MOODS & GENRES (Image 1)
                     0 -> {
                         Column(
                             modifier = Modifier
@@ -1409,7 +1448,6 @@ fun SonoraPlayerScreen() {
                                 .statusBarsPadding()
                                 .padding(horizontal = 16.dp)
                         ) {
-                            // Header: Home Title + Profile Icons
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -1437,7 +1475,6 @@ fun SonoraPlayerScreen() {
                             }
 
                             LazyColumn(modifier = Modifier.fillMaxSize()) {
-                                // Section: Mood and Genres (Image 1)
                                 item {
                                     Row(
                                         modifier = Modifier.fillMaxWidth().padding(vertical = 10.dp),
@@ -1454,7 +1491,6 @@ fun SonoraPlayerScreen() {
                                     }
                                 }
 
-                                // 2-Column Mood Grid
                                 item {
                                     Column(modifier = Modifier.fillMaxWidth()) {
                                         for (i in DiscoveryCategoryList.indices step 2) {
@@ -1500,7 +1536,6 @@ fun SonoraPlayerScreen() {
                                     }
                                 }
 
-                                // Section: Quick Picks / Heard in Shorts
                                 item {
                                     Row(
                                         modifier = Modifier.fillMaxWidth().padding(top = 22.dp, bottom = 8.dp),
@@ -1562,17 +1597,14 @@ fun SonoraPlayerScreen() {
                                     }
                                 }
 
-                                // Bottom padding so miniplayer does not block items
                                 item { Spacer(modifier = Modifier.height(84.dp)) }
                             }
                         }
                     }
 
-                    // TAB 1: SEARCH SCREEN (Image 3)
                     1 -> {
                         Box(modifier = Modifier.fillMaxSize().statusBarsPadding()) {
                             Column(modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
-                                // Search Bar Row with Back Arrow and Globe
                                 Row(
                                     modifier = Modifier.fillMaxWidth().padding(vertical = 10.dp),
                                     verticalAlignment = Alignment.CenterVertically
@@ -1620,7 +1652,6 @@ fun SonoraPlayerScreen() {
                                         CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
                                     }
                                 } else if (searchQuery.isNotBlank() && searchResults.isNotEmpty()) {
-                                    // Search Results List
                                     LazyColumn(modifier = Modifier.fillMaxSize()) {
                                         itemsIndexed(searchResults) { index, song ->
                                             Row(
@@ -1649,7 +1680,6 @@ fun SonoraPlayerScreen() {
                                         item { Spacer(modifier = Modifier.height(84.dp)) }
                                     }
                                 } else {
-                                    // Search History List (Image 3)
                                     LazyColumn(modifier = Modifier.fillMaxSize()) {
                                         items(recentSearches) { historyItem ->
                                             Row(
@@ -1669,7 +1699,6 @@ fun SonoraPlayerScreen() {
                                                     maxLines = 1,
                                                     overflow = TextOverflow.Ellipsis
                                                 )
-                                                // Delete query
                                                 Text(
                                                     text = "✕",
                                                     color = Color(0xFF94A3B8),
@@ -1680,7 +1709,6 @@ fun SonoraPlayerScreen() {
                                                             coroutineScope.launch { dao.deleteSearchQuery(historyItem.query) }
                                                         }
                                                 )
-                                                // Autofill into search bar
                                                 Text(
                                                     text = "↖",
                                                     color = Color(0xFF94A3B8),
@@ -1694,7 +1722,6 @@ fun SonoraPlayerScreen() {
                                 }
                             }
 
-                            // Floating Mic Button (Image 3)
                             FloatingActionButton(
                                 onClick = { Toast.makeText(context, "Voice Search coming soon", Toast.LENGTH_SHORT).show() },
                                 containerColor = Color(0xFF384353),
@@ -1710,7 +1737,6 @@ fun SonoraPlayerScreen() {
                         }
                     }
 
-                    // TAB 2: LIBRARY (Liked, Playlists, Downloads)
                     2 -> {
                         Column(
                             modifier = Modifier
@@ -1820,9 +1846,6 @@ fun SonoraPlayerScreen() {
                 }
             }
 
-            // =====================================================================
-            // FLOATING MINI PLAYER (Images 1 & 3)
-            // =====================================================================
             if (activeSongId.isNotBlank()) {
                 val progressFraction = if (totalDuration > 0) (currentPosition.toFloat() / totalDuration.toFloat()).coerceIn(0f, 1f) else 0f
 
@@ -1840,7 +1863,6 @@ fun SonoraPlayerScreen() {
                             .padding(horizontal = 8.dp, vertical = 6.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        // Artwork with overlaid Circular Progress Scrubber & Play Triangle (Image 1 & 3)
                         Box(
                             modifier = Modifier
                                 .size(46.dp)
@@ -1864,7 +1886,6 @@ fun SonoraPlayerScreen() {
                                 modifier = Modifier.size(36.dp).clip(CircleShape),
                                 contentScale = ContentScale.Crop
                             )
-                            // Play/Pause icon badge
                             Box(
                                 modifier = Modifier
                                     .size(36.dp)
@@ -1882,7 +1903,6 @@ fun SonoraPlayerScreen() {
 
                         Spacer(modifier = Modifier.width(10.dp))
 
-                        // Title and Artist
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
                                 text = activeTitle,
@@ -1901,7 +1921,6 @@ fun SonoraPlayerScreen() {
                             )
                         }
 
-                        // Right Profile/Details button
                         IconButton(
                             onClick = {
                                 selectedTrackForOptions = FullTrackItem(
@@ -1917,7 +1936,6 @@ fun SonoraPlayerScreen() {
                             Text("👤", fontSize = 16.sp)
                         }
 
-                        // Right Heart/Like button
                         IconButton(
                             onClick = {
                                 coroutineScope.launch {
@@ -1948,9 +1966,6 @@ fun SonoraPlayerScreen() {
                 }
             }
 
-            // =====================================================================
-            // BOTTOM NAVIGATION BAR (Home, Search, Library)
-            // =====================================================================
             NavigationBar(
                 containerColor = Color(0xFF0A0F14),
                 contentColor = Color.White,
@@ -1992,9 +2007,6 @@ fun SonoraPlayerScreen() {
             }
         }
 
-        // =====================================================================
-        // FULL SCREEN NOW PLAYING VIEW (Image 2)
-        // =====================================================================
         AnimatedVisibility(
             visible = isPlayerExpanded,
             enter = slideInVertically(initialOffsetY = { it }),
@@ -2018,7 +2030,6 @@ fun SonoraPlayerScreen() {
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.SpaceBetween
                 ) {
-                    // Header: Down arrow + "Now Playing" Title (Image 2)
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         verticalAlignment = Alignment.CenterVertically
@@ -2048,7 +2059,6 @@ fun SonoraPlayerScreen() {
                         Spacer(modifier = Modifier.width(48.dp))
                     }
 
-                    // Large Arched Album Artwork (Image 2)
                     Box(
                         modifier = Modifier
                             .fillMaxWidth(0.88f)
@@ -2065,7 +2075,6 @@ fun SonoraPlayerScreen() {
                         )
                     }
 
-                    // Track Title, Artists, Share and Like Pill Buttons
                     Column(modifier = Modifier.fillMaxWidth()) {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
@@ -2091,7 +2100,6 @@ fun SonoraPlayerScreen() {
                                 )
                             }
 
-                            // Share and Heart Button Pills (Image 2)
                             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                 Box(
                                     modifier = Modifier
@@ -2142,7 +2150,6 @@ fun SonoraPlayerScreen() {
 
                         Spacer(modifier = Modifier.height(14.dp))
 
-                        // Progress Scrubber and Timestamps (Image 2)
                         val maxDurationFloat = max(1L, totalDuration).toFloat()
                         val currentProgressFloat = if (isDraggingSlider) sliderDragValue else currentPosition.toFloat()
 
@@ -2185,13 +2192,11 @@ fun SonoraPlayerScreen() {
                         }
                     }
 
-                    // Main Playback Controls: Steel-Blue Pills (Image 2)
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.SpaceEvenly
                     ) {
-                        // Previous Track Circle Pill
                         Box(
                             modifier = Modifier
                                 .size(64.dp)
@@ -2211,7 +2216,6 @@ fun SonoraPlayerScreen() {
                             Text("⏮", fontSize = 22.sp, color = Color(0xFF0F1B26))
                         }
 
-                        // Wide Play / Pause Pill (Image 2)
                         Box(
                             modifier = Modifier
                                 .height(64.dp)
@@ -2235,7 +2239,6 @@ fun SonoraPlayerScreen() {
                             }
                         }
 
-                        // Next Track Circle Pill
                         Box(
                             modifier = Modifier
                                 .size(64.dp)
@@ -2254,13 +2257,11 @@ fun SonoraPlayerScreen() {
                         }
                     }
 
-                    // Bottom Action Row: Queue | Timer | Shuffle | Lyrics | Repeat | Three-dot (Image 2)
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        // Queue
                         Box(
                             modifier = Modifier
                                 .size(46.dp)
@@ -2270,7 +2271,6 @@ fun SonoraPlayerScreen() {
                             contentAlignment = Alignment.Center
                         ) { Text("≡", fontSize = 18.sp, color = Color.White) }
 
-                        // Sleep Timer
                         Box(
                             modifier = Modifier
                                 .size(46.dp)
@@ -2280,7 +2280,6 @@ fun SonoraPlayerScreen() {
                             contentAlignment = Alignment.Center
                         ) { Text("🌙", fontSize = 16.sp, color = Color.White) }
 
-                        // Shuffle
                         Box(
                             modifier = Modifier
                                 .size(46.dp)
@@ -2293,7 +2292,6 @@ fun SonoraPlayerScreen() {
                             contentAlignment = Alignment.Center
                         ) { Text("🔀", fontSize = 16.sp, color = Color.White) }
 
-                        // Equalizer / Details
                         Box(
                             modifier = Modifier
                                 .size(46.dp)
@@ -2303,7 +2301,6 @@ fun SonoraPlayerScreen() {
                             contentAlignment = Alignment.Center
                         ) { Text("🎚", fontSize = 16.sp, color = Color.White) }
 
-                        // Repeat Mode
                         Box(
                             modifier = Modifier
                                 .size(46.dp)
@@ -2320,7 +2317,6 @@ fun SonoraPlayerScreen() {
                             contentAlignment = Alignment.Center
                         ) { Text("🔁", fontSize = 16.sp, color = Color.White) }
 
-                        // Three-Dot Menu (Image 2 -> opens Image 4)
                         Box(
                             modifier = Modifier
                                 .size(46.dp)
