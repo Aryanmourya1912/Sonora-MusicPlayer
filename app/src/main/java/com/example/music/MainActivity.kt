@@ -69,11 +69,14 @@ import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
 import coil.compose.AsyncImage
 import com.example.music.data.LikedSongEntity
+import com.example.music.data.PlaylistEntity
+import com.example.music.data.PlaylistSongEntity
 import com.example.music.data.SearchHistoryEntity
 import com.example.music.data.SonoraDatabase
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -253,7 +256,6 @@ suspend fun searchOfficialSongs(query: String): Pair<List<FullTrackItem>, String
     }
 }
 
-// SharedPreferences keys for persistent playback state
 private const val PREFS_SONORA = "sonora_playback_state"
 private const val KEY_LAST_ID = "last_id"
 private const val KEY_LAST_TITLE = "last_title"
@@ -278,8 +280,15 @@ fun SonoraPlayerScreen() {
 
     val recentSearches by dao.getRecentSearches().collectAsState(initial = emptyList())
     val likedSongs by dao.getAllLikedSongs().collectAsState(initial = emptyList())
+    val allPlaylists by dao.getAllPlaylists().collectAsState(initial = emptyList())
 
-    var selectedTab by remember { mutableIntStateOf(0) }
+    var selectedTab by remember { mutableIntStateOf(0) } // 0: Explore, 1: Liked Songs, 2: Playlists
+    var viewingPlaylist by remember { mutableStateOf<PlaylistEntity?>(null) }
+
+    // Collect songs for currently viewed playlist
+    val activePlaylistSongs by remember(viewingPlaylist?.id) {
+        viewingPlaylist?.let { dao.getSongsForPlaylist(it.id) } ?: flowOf(emptyList())
+    }.collectAsState(initial = emptyList())
 
     var controller by remember { mutableStateOf<MediaController?>(null) }
     var isPlaying by remember { mutableStateOf(false) }
@@ -289,7 +298,7 @@ fun SonoraPlayerScreen() {
     var isSearching by remember { mutableStateOf(false) }
     var searchStatusMessage by remember { mutableStateOf<String?>(null) }
 
-    // Active track details
+    // Active playing track metadata
     var activeSongId by remember { mutableStateOf("") }
     var activeTitle by remember { mutableStateOf("No Track Playing") }
     var activeArtist by remember { mutableStateOf("Search and tap any song above") }
@@ -309,6 +318,11 @@ fun SonoraPlayerScreen() {
     var sleepTimerRemainingSeconds by remember { mutableLongStateOf(0L) }
     var stopAfterCurrentTrack by remember { mutableStateOf(false) }
     var sleepTimerJob by remember { mutableStateOf<Job?>(null) }
+
+    // --- Playlist Dialog States ---
+    var songToAddToPlaylist by remember { mutableStateOf<FullTrackItem?>(null) }
+    var showCreatePlaylistDialog by remember { mutableStateOf(false) }
+    var newPlaylistName by remember { mutableStateOf("") }
 
     fun cancelSleepTimer() {
         sleepTimerJob?.cancel()
@@ -330,7 +344,6 @@ fun SonoraPlayerScreen() {
         }
     }
 
-    // Connect to background playback service & restore persisted playback state
     DisposableEffect(context) {
         val sessionToken = SessionToken(context, ComponentName(context, PlaybackService::class.java))
         val controllerFuture = MediaController.Builder(context, sessionToken).buildAsync()
@@ -340,7 +353,6 @@ fun SonoraPlayerScreen() {
             controller = mediaController
             isPlaying = mediaController.isPlaying
 
-            // 1. If background service is already playing, sync state directly
             if (mediaController.mediaItemCount > 0) {
                 val currentItem = mediaController.currentMediaItem
                 activeSongId = currentItem?.mediaId ?: ""
@@ -350,7 +362,6 @@ fun SonoraPlayerScreen() {
                 currentPosition = max(0L, mediaController.currentPosition)
                 totalDuration = if (mediaController.duration > 0) mediaController.duration else 0L
             } else {
-                // 2. Otherwise, restore the last played track & timestamp from SharedPreferences
                 val savedAudioUrl = prefs.getString(KEY_LAST_AUDIO_URL, "") ?: ""
                 if (savedAudioUrl.isNotBlank()) {
                     val savedId = prefs.getString(KEY_LAST_ID, "") ?: ""
@@ -370,7 +381,6 @@ fun SonoraPlayerScreen() {
                     currentPosition = savedPosMs
                     totalDuration = savedDurMs
 
-                    // Preload into ExoPlayer and seek without auto-starting
                     val metadata = MediaMetadata.Builder()
                         .setTitle(savedTitle)
                         .setArtist(savedArtist)
@@ -393,7 +403,6 @@ fun SonoraPlayerScreen() {
             mediaController.addListener(object : Player.Listener {
                 override fun onIsPlayingChanged(playing: Boolean) {
                     isPlaying = playing
-                    // Save position when paused
                     if (!playing && mediaController.currentPosition > 0) {
                         prefs.edit()
                             .putLong(KEY_LAST_POSITION_MS, mediaController.currentPosition)
@@ -435,7 +444,6 @@ fun SonoraPlayerScreen() {
         }
     }
 
-    // Auto-save playback position to SharedPreferences every 1 second while playing
     LaunchedEffect(isPlaying, isDraggingSlider) {
         while (isPlaying && !isDraggingSlider) {
             controller?.let { player ->
@@ -444,7 +452,6 @@ fun SonoraPlayerScreen() {
                 val dur = player.duration
                 if (dur > 0) totalDuration = dur
 
-                // Write to persistence
                 prefs.edit()
                     .putLong(KEY_LAST_POSITION_MS, pos)
                     .putLong(KEY_LAST_DURATION_MS, totalDuration)
@@ -469,7 +476,6 @@ fun SonoraPlayerScreen() {
         activeAudioUrl = audioUrl
         activeDurationFormatted = durationFormatted
 
-        // Persist track metadata immediately
         prefs.edit()
             .putString(KEY_LAST_ID, id)
             .putString(KEY_LAST_TITLE, title)
@@ -514,6 +520,177 @@ fun SonoraPlayerScreen() {
         }
     }
 
+    // --- Dialog 1: Add Track to Playlist Picker ---
+    if (songToAddToPlaylist != null) {
+        AlertDialog(
+            onDismissRequest = { songToAddToPlaylist = null },
+            title = {
+                Text("Add to Playlist", color = Color.White, fontWeight = FontWeight.Bold)
+            },
+            text = {
+                Column {
+                    Text(
+                        text = songToAddToPlaylist?.title ?: "",
+                        color = Color(0xFF94A3B8),
+                        fontSize = 13.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.padding(bottom = 12.dp)
+                    )
+
+                    // Button to create a new playlist on the fly
+                    Button(
+                        onClick = {
+                            showCreatePlaylistDialog = true
+                        },
+                        colors = androidx.compose.material3.ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp)
+                    ) {
+                        Text("+ Create New Playlist", fontWeight = FontWeight.Bold)
+                    }
+
+                    if (allPlaylists.isEmpty()) {
+                        Text(
+                            text = "No playlists created yet. Tap above to create one.",
+                            color = Color.Gray,
+                            fontSize = 13.sp,
+                            modifier = Modifier.padding(vertical = 8.dp)
+                        )
+                    } else {
+                        Text(
+                            text = "Select an existing playlist:",
+                            color = Color.White,
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.padding(vertical = 4.dp)
+                        )
+                        LazyColumn(modifier = Modifier.height(200.dp)) {
+                            items(allPlaylists) { playlist ->
+                                Card(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(vertical = 4.dp)
+                                        .clickable {
+                                            val song = songToAddToPlaylist
+                                            if (song != null) {
+                                                coroutineScope.launch {
+                                                    dao.addSongToPlaylist(
+                                                        PlaylistSongEntity(
+                                                            playlistId = playlist.id,
+                                                            songId = song.id,
+                                                            title = song.title,
+                                                            artist = song.artist,
+                                                            audioUrl = song.audioUrl,
+                                                            artworkUrl = song.artworkUrl,
+                                                            duration = song.durationFormatted
+                                                        )
+                                                    )
+                                                }
+                                            }
+                                            songToAddToPlaylist = null
+                                        },
+                                    colors = CardDefaults.cardColors(containerColor = Color(0xFF1E1E2D)),
+                                    shape = RoundedCornerShape(8.dp)
+                                ) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth().padding(12.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text("📁", fontSize = 16.sp)
+                                        Spacer(modifier = Modifier.width(10.dp))
+                                        Text(
+                                            text = playlist.name,
+                                            color = Color.White,
+                                            fontSize = 14.sp,
+                                            fontWeight = FontWeight.Medium,
+                                            modifier = Modifier.weight(1f)
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = {
+                TextButton(onClick = { songToAddToPlaylist = null }) {
+                    Text("Cancel", color = Color(0xFF94A3B8))
+                }
+            },
+            containerColor = Color(0xFF161622),
+            shape = RoundedCornerShape(16.dp)
+        )
+    }
+
+    // --- Dialog 2: Create New Playlist Dialog ---
+    if (showCreatePlaylistDialog) {
+        AlertDialog(
+            onDismissRequest = {
+                showCreatePlaylistDialog = false
+                newPlaylistName = ""
+            },
+            title = {
+                Text("New Playlist", color = Color.White, fontWeight = FontWeight.Bold)
+            },
+            text = {
+                Column {
+                    OutlinedTextField(
+                        value = newPlaylistName,
+                        onValueChange = { newPlaylistName = it },
+                        label = { Text("Playlist Name") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        if (newPlaylistName.isNotBlank()) {
+                            val trimmedName = newPlaylistName.trim()
+                            coroutineScope.launch {
+                                val newId = dao.createPlaylist(PlaylistEntity(name = trimmedName))
+                                // If triggered from Add-to-Playlist, automatically add the active song
+                                songToAddToPlaylist?.let { song ->
+                                    dao.addSongToPlaylist(
+                                        PlaylistSongEntity(
+                                            playlistId = newId,
+                                            songId = song.id,
+                                            title = song.title,
+                                            artist = song.artist,
+                                            audioUrl = song.audioUrl,
+                                            artworkUrl = song.artworkUrl,
+                                            duration = song.durationFormatted
+                                        )
+                                    )
+                                    songToAddToPlaylist = null
+                                }
+                            }
+                            newPlaylistName = ""
+                            showCreatePlaylistDialog = false
+                        }
+                    },
+                    enabled = newPlaylistName.isNotBlank()
+                ) {
+                    Text("Create")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    showCreatePlaylistDialog = false
+                    newPlaylistName = ""
+                }) {
+                    Text("Cancel", color = Color(0xFF94A3B8))
+                }
+            },
+            containerColor = Color(0xFF161622),
+            shape = RoundedCornerShape(16.dp)
+        )
+    }
+
+    // --- Dialog 3: Sleep Timer Dialog ---
     if (showSleepTimerDialog) {
         AlertDialog(
             onDismissRequest = { showSleepTimerDialog = false },
@@ -625,7 +802,7 @@ fun SonoraPlayerScreen() {
             .fillMaxSize()
             .padding(top = 16.dp, start = 16.dp, end = 16.dp, bottom = 12.dp)
     ) {
-        // App Header
+        // Top App Bar
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -663,7 +840,7 @@ fun SonoraPlayerScreen() {
             }
         }
 
-        // Section Tabs
+        // Three Main Navigation Tabs
         TabRow(
             selectedTabIndex = selectedTab,
             containerColor = Color.Transparent,
@@ -672,27 +849,28 @@ fun SonoraPlayerScreen() {
         ) {
             Tab(
                 selected = selectedTab == 0,
-                onClick = { selectedTab = 0 },
-                text = {
-                    Text(
-                        text = "Explore",
-                        fontWeight = if (selectedTab == 0) FontWeight.Bold else FontWeight.Normal
-                    )
-                }
+                onClick = {
+                    selectedTab = 0
+                    viewingPlaylist = null
+                },
+                text = { Text("Explore", fontWeight = if (selectedTab == 0) FontWeight.Bold else FontWeight.Normal) }
             )
             Tab(
                 selected = selectedTab == 1,
-                onClick = { selectedTab = 1 },
-                text = {
-                    Text(
-                        text = "Liked Songs (${likedSongs.size})",
-                        fontWeight = if (selectedTab == 1) FontWeight.Bold else FontWeight.Normal
-                    )
-                }
+                onClick = {
+                    selectedTab = 1
+                    viewingPlaylist = null
+                },
+                text = { Text("Liked (${likedSongs.size})", fontWeight = if (selectedTab == 1) FontWeight.Bold else FontWeight.Normal) }
+            )
+            Tab(
+                selected = selectedTab == 2,
+                onClick = { selectedTab = 2 },
+                text = { Text("Playlists (${allPlaylists.size})", fontWeight = if (selectedTab == 2) FontWeight.Bold else FontWeight.Normal) }
             )
         }
 
-        // Tab 0: Explore & Search
+        // --- Tab 0: Explore & Search ---
         if (selectedTab == 0) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -825,9 +1003,7 @@ fun SonoraPlayerScreen() {
                                             durationFormatted = song.durationFormatted
                                         )
                                     },
-                                colors = CardDefaults.cardColors(
-                                    containerColor = MaterialTheme.colorScheme.surface
-                                ),
+                                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
                                 shape = RoundedCornerShape(10.dp)
                             ) {
                                 Row(
@@ -866,13 +1042,9 @@ fun SonoraPlayerScreen() {
                                         )
                                     }
 
-                                    if (song.durationFormatted.isNotBlank() && song.durationFormatted != "00:00") {
-                                        Text(
-                                            text = song.durationFormatted,
-                                            color = Color.Gray,
-                                            fontSize = 12.sp,
-                                            modifier = Modifier.padding(start = 6.dp)
-                                        )
+                                    // Add to Playlist Button
+                                    IconButton(onClick = { songToAddToPlaylist = song }) {
+                                        Text("+", color = MaterialTheme.colorScheme.primary, fontSize = 22.sp, fontWeight = FontWeight.Bold)
                                     }
                                 }
                             }
@@ -882,7 +1054,7 @@ fun SonoraPlayerScreen() {
             }
         }
 
-        // Tab 1: Liked Songs Collection
+        // --- Tab 1: Liked Songs ---
         if (selectedTab == 1) {
             Box(
                 modifier = Modifier
@@ -899,12 +1071,6 @@ fun SonoraPlayerScreen() {
                                 color = Color(0xFF94A3B8),
                                 fontSize = 15.sp,
                                 fontWeight = FontWeight.SemiBold
-                            )
-                            Spacer(modifier = Modifier.height(4.dp))
-                            Text(
-                                text = "Tap the heart button on any playing song",
-                                color = Color.Gray,
-                                fontSize = 13.sp
                             )
                         }
                     }
@@ -925,9 +1091,7 @@ fun SonoraPlayerScreen() {
                                             durationFormatted = savedSong.duration
                                         )
                                     },
-                                colors = CardDefaults.cardColors(
-                                    containerColor = MaterialTheme.colorScheme.surface
-                                ),
+                                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
                                 shape = RoundedCornerShape(10.dp)
                             ) {
                                 Row(
@@ -966,6 +1130,23 @@ fun SonoraPlayerScreen() {
                                         )
                                     }
 
+                                    // Add to Playlist Button
+                                    IconButton(
+                                        onClick = {
+                                            songToAddToPlaylist = FullTrackItem(
+                                                id = savedSong.id,
+                                                title = savedSong.title,
+                                                artist = savedSong.artist,
+                                                audioUrl = savedSong.audioUrl,
+                                                artworkUrl = savedSong.artworkUrl,
+                                                durationFormatted = savedSong.duration
+                                            )
+                                        }
+                                    ) {
+                                        Text("+", color = MaterialTheme.colorScheme.primary, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                                    }
+
+                                    // Remove from Favorites Button
                                     IconButton(
                                         onClick = {
                                             coroutineScope.launch {
@@ -983,9 +1164,245 @@ fun SonoraPlayerScreen() {
             }
         }
 
+        // --- Tab 2: Playlists Management ---
+        if (selectedTab == 2) {
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
+            ) {
+                // If user is currently viewing tracks inside a playlist:
+                if (viewingPlaylist != null) {
+                    val currentPlaylist = viewingPlaylist!!
+                    Column(modifier = Modifier.fillMaxSize()) {
+                        // Playlist Header with Back button and Delete Playlist
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 6.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.clickable { viewingPlaylist = null }
+                            ) {
+                                Text("←", fontSize = 20.sp, color = MaterialTheme.colorScheme.primary)
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Column {
+                                    Text(
+                                        text = currentPlaylist.name,
+                                        fontSize = 17.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = Color.White
+                                    )
+                                    Text(
+                                        text = "${activePlaylistSongs.size} tracks",
+                                        fontSize = 12.sp,
+                                        color = Color(0xFF94A3B8)
+                                    )
+                                }
+                            }
+
+                            // Delete whole playlist button
+                            Text(
+                                text = "Delete",
+                                fontSize = 13.sp,
+                                color = Color(0xFFFF5252),
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.clickable {
+                                    coroutineScope.launch {
+                                        dao.deletePlaylist(currentPlaylist.id)
+                                        viewingPlaylist = null
+                                    }
+                                }
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.height(8.dp))
+
+                        if (activePlaylistSongs.isEmpty()) {
+                            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                Text(
+                                    text = "This playlist is empty.\nTap '+' on any song to add it here.",
+                                    color = Color.Gray,
+                                    fontSize = 14.sp
+                                )
+                            }
+                        } else {
+                            LazyColumn(modifier = Modifier.fillMaxSize()) {
+                                items(activePlaylistSongs) { track ->
+                                    Card(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(vertical = 4.dp)
+                                            .clickable {
+                                                playTrack(
+                                                    id = track.songId,
+                                                    title = track.title,
+                                                    artist = track.artist,
+                                                    audioUrl = track.audioUrl,
+                                                    artworkUrl = track.artworkUrl,
+                                                    durationFormatted = track.duration
+                                                )
+                                            },
+                                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                                        shape = RoundedCornerShape(10.dp)
+                                    ) {
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .padding(8.dp),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            AsyncImage(
+                                                model = track.artworkUrl,
+                                                contentDescription = track.title,
+                                                modifier = Modifier
+                                                    .size(50.dp)
+                                                    .clip(RoundedCornerShape(8.dp)),
+                                                contentScale = ContentScale.Crop
+                                            )
+
+                                            Spacer(modifier = Modifier.width(12.dp))
+
+                                            Column(modifier = Modifier.weight(1f)) {
+                                                Text(
+                                                    text = track.title,
+                                                    fontWeight = FontWeight.Bold,
+                                                    fontSize = 15.sp,
+                                                    color = Color.White,
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis
+                                                )
+                                                Text(
+                                                    text = track.artist,
+                                                    color = Color(0xFF94A3B8),
+                                                    fontSize = 13.sp,
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis
+                                                )
+                                            }
+
+                                            // Remove single track from playlist
+                                            IconButton(
+                                                onClick = {
+                                                    coroutineScope.launch {
+                                                        dao.removeSongFromPlaylist(currentPlaylist.id, track.songId)
+                                                    }
+                                                }
+                                            ) {
+                                                Text("✕", color = Color(0xFF94A3B8), fontSize = 14.sp)
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    // List of all user playlists
+                    Column(modifier = Modifier.fillMaxSize()) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 6.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "Your Playlists",
+                                fontSize = 15.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = Color(0xFF94A3B8)
+                            )
+                            Button(
+                                onClick = { showCreatePlaylistDialog = true },
+                                colors = androidx.compose.material3.ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
+                                shape = RoundedCornerShape(8.dp)
+                            ) {
+                                Text("+ New Playlist", fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(8.dp))
+
+                        if (allPlaylists.isEmpty()) {
+                            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                    Text("📁", fontSize = 42.sp)
+                                    Spacer(modifier = Modifier.height(8.dp))
+                                    Text(
+                                        text = "No custom playlists yet",
+                                        color = Color(0xFF94A3B8),
+                                        fontSize = 15.sp,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                    Text(
+                                        text = "Create one to organize your favorites",
+                                        color = Color.Gray,
+                                        fontSize = 13.sp
+                                    )
+                                }
+                            }
+                        } else {
+                            LazyColumn(modifier = Modifier.fillMaxSize()) {
+                                items(allPlaylists) { playlist ->
+                                    Card(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(vertical = 5.dp)
+                                            .clickable { viewingPlaylist = playlist },
+                                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                                        shape = RoundedCornerShape(10.dp)
+                                    ) {
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .padding(14.dp),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Box(
+                                                modifier = Modifier
+                                                    .size(46.dp)
+                                                    .clip(RoundedCornerShape(8.dp))
+                                                    .background(Color(0xFF1E1E2D)),
+                                                contentAlignment = Alignment.Center
+                                            ) {
+                                                Text("🎵", fontSize = 20.sp)
+                                            }
+
+                                            Spacer(modifier = Modifier.width(14.dp))
+
+                                            Column(modifier = Modifier.weight(1f)) {
+                                                Text(
+                                                    text = playlist.name,
+                                                    fontWeight = FontWeight.Bold,
+                                                    fontSize = 16.sp,
+                                                    color = Color.White
+                                                )
+                                                Text(
+                                                    text = "Tap to view tracks",
+                                                    fontSize = 12.sp,
+                                                    color = Color(0xFF94A3B8)
+                                                )
+                                            }
+
+                                            Text("›", fontSize = 22.sp, color = Color(0xFF94A3B8))
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         Spacer(modifier = Modifier.height(12.dp))
 
-        // Floating Bottom Player Bar
+        // --- Persistent Bottom Player Bar ---
         Card(
             modifier = Modifier.fillMaxWidth(),
             colors = CardDefaults.cardColors(
@@ -1031,7 +1448,26 @@ fun SonoraPlayerScreen() {
                         )
                     }
 
-                    // Like Heart Button
+                    // Add active song to playlist button
+                    IconButton(
+                        onClick = {
+                            if (activeSongId.isNotBlank()) {
+                                songToAddToPlaylist = FullTrackItem(
+                                    id = activeSongId,
+                                    title = activeTitle,
+                                    artist = activeArtist,
+                                    audioUrl = activeAudioUrl,
+                                    artworkUrl = activeArtworkUrl,
+                                    durationFormatted = activeDurationFormatted
+                                )
+                            }
+                        },
+                        enabled = activeSongId.isNotBlank()
+                    ) {
+                        Text("+", fontSize = 22.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+                    }
+
+                    // Favorite Heart Button
                     IconButton(
                         onClick = {
                             if (activeSongId.isNotBlank()) {
