@@ -18,6 +18,7 @@ import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -25,10 +26,12 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -38,6 +41,8 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
@@ -125,6 +130,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
@@ -181,10 +187,10 @@ val DiscoveryCategoryList = listOf(
     DiscoveryCategory("Bollywood Hits", "Top Bollywood Songs"),
     DiscoveryCategory("Punjabi Pop", "Trending Punjabi Hits"),
     DiscoveryCategory("Desi Hip Hop", "Desi Hip Hop Rap India"),
-    DiscoveryCategory("Romantic", "Romantic Hindi Love Songs"),
-    DiscoveryCategory("Indie India", "Indian Indie Pop Melodies"),
-    DiscoveryCategory("90s Classics", "90s Evergreen Bollywood Hits"),
-    DiscoveryCategory("Devotional", "Top Bhakti Hindi Songs")
+    DiscoveryCategory("Romantic Hindi", "Romantic Hindi Love Songs"),
+    DiscoveryCategory("Indian Indie", "Indian Indie Pop Melodies"),
+    DiscoveryCategory("Evergreen 90s", "90s Evergreen Bollywood Hits"),
+    DiscoveryCategory("Bhakti", "Top Bhakti Hindi Songs")
 )
 
 private val SonoraThemeColors = darkColorScheme(
@@ -344,7 +350,7 @@ suspend fun searchYouTubeMusic(query: String): Pair<List<FullTrackItem>, String?
                     put("clientName", "WEB_REMIX")
                     put("clientVersion", "1.20231204.01.00")
                     put("hl", "en")
-                    put("gl", "US")
+                    put("gl", "IN")
                 })
             })
         }
@@ -436,7 +442,7 @@ suspend fun fetchYouTubeAutomixRadio(videoId: String): List<FullTrackItem> = wit
                     put("clientName", "WEB_REMIX")
                     put("clientVersion", "1.20231204.01.00")
                     put("hl", "en")
-                    put("gl", "US")
+                    put("gl", "IN")
                 })
             })
         }
@@ -913,12 +919,13 @@ private const val KEY_LAST_DURATION_TXT = "last_duration_txt"
 private const val KEY_LAST_POSITION_MS = "last_position_ms"
 private const val KEY_LAST_DURATION_MS = "last_duration_ms"
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun SonoraPlayerScreen() {
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
     val audioManager = remember { context.getSystemService(Context.AUDIO_SERVICE) as AudioManager }
+    val keyboardController = LocalSoftwareKeyboardController.current
 
     val prefs: SharedPreferences = remember {
         context.getSharedPreferences(PREFS_SONORA, Context.MODE_PRIVATE)
@@ -1045,7 +1052,7 @@ fun SonoraPlayerScreen() {
         currentTrackIndex = player.currentMediaItemIndex
     }
 
-    // Auto-updating Play Next infinite queue system
+    // Auto-updating Infinite Play Next Queue (Adds 10-15 completely new songs when 4-5 songs remain)
     var isAutoQueueFilling by remember { mutableStateOf(false) }
 
     fun ensureInfiniteQueueFilled(player: Player) {
@@ -1054,8 +1061,7 @@ fun SonoraPlayerScreen() {
         val curr = player.currentMediaItemIndex
         val remaining = total - (curr + 1)
 
-        // Refill whenever 3 or fewer songs remain ahead in the queue
-        if (remaining <= 3 && total > 0) {
+        if ((remaining <= 5 || curr >= total - 1) && total > 0) {
             isAutoQueueFilling = true
             coroutineScope.launch {
                 try {
@@ -1064,24 +1070,25 @@ fun SonoraPlayerScreen() {
                     val seedId = seedItem?.mediaId ?: activeSongId
                     val seedArtist = seedItem?.mediaMetadata?.artist?.toString() ?: activeArtist
 
-                    var candidateSongs = fetchYouTubeAutomixRadio(seedId)
-                    if (candidateSongs.isEmpty() && seedArtist.isNotBlank()) {
-                        val (artistTracks, _) = searchYouTubeMusic("$seedArtist hits")
-                        candidateSongs = artistTracks
+                    val candidates = mutableListOf<FullTrackItem>()
+                    candidates.addAll(fetchYouTubeAutomixRadio(seedId))
+                    if (candidates.size < 25) {
+                        val (moreArtist, _) = searchYouTubeMusic("$seedArtist latest hits")
+                        candidates.addAll(moreArtist)
                     }
-                    if (candidateSongs.isEmpty()) {
-                        val (trendingTracks, _) = searchYouTubeMusic("Trending Hindi Bollywood Songs")
-                        candidateSongs = trendingTracks
+                    if (candidates.size < 25) {
+                        val (trending, _) = searchYouTubeMusic("Trending Hindi Bollywood Songs")
+                        candidates.addAll(trending)
                     }
 
                     val currentQueueTracks = (0 until player.mediaItemCount).map { idx ->
                         mediaItemToTrack(player.getMediaItemAt(idx))
                     }
-                    val filtered = filterSimilarTracks(candidateSongs, currentQueueTracks)
+                    val filtered = filterSimilarTracks(candidates, currentQueueTracks)
 
                     var added = 0
                     for (song in filtered) {
-                        if (added >= 5) break
+                        if (added >= 15) break
                         val streamUrl = resolveTrackAudioStream(song)
                         if (streamUrl.isNotBlank()) {
                             song.audioUrl = streamUrl
@@ -1312,8 +1319,38 @@ fun SonoraPlayerScreen() {
                 updateQueueState(player)
             }
 
+            // Populate initial queue with minimum 30 related tracks
             if (endlessRadioEnabled) {
-                controller?.let { ensureInfiniteQueueFilled(it) }
+                coroutineScope.launch {
+                    val candidates = mutableListOf<FullTrackItem>()
+                    candidates.addAll(fetchYouTubeAutomixRadio(targetTrack.id))
+
+                    if (candidates.size < 35) {
+                        val (artistSongs, _) = searchYouTubeMusic("${targetTrack.artist} song")
+                        candidates.addAll(artistSongs)
+                    }
+                    if (candidates.size < 35) {
+                        val (hindiSongs, _) = searchYouTubeMusic("Trending Hindi Bollywood Songs")
+                        candidates.addAll(hindiSongs)
+                    }
+
+                    val currentQueueTracks = (0 until (controller?.mediaItemCount ?: 0)).map { idx ->
+                        mediaItemToTrack(controller!!.getMediaItemAt(idx))
+                    }
+                    val filtered = filterSimilarTracks(candidates, currentQueueTracks)
+
+                    var added = 0
+                    for (song in filtered) {
+                        if ((controller?.mediaItemCount ?: 0) >= 31) break
+                        val sUrl = resolveTrackAudioStream(song)
+                        if (sUrl.isNotBlank()) {
+                            song.audioUrl = sUrl
+                            controller?.addMediaItem(buildMediaItem(song))
+                            added++
+                        }
+                    }
+                    controller?.let { updateQueueState(it) }
+                }
             }
         }
     }
@@ -1435,7 +1472,7 @@ fun SonoraPlayerScreen() {
                                 val clip = ClipData.newPlainText("Song Link", "https://music.youtube.com/watch?v=${song.id}")
                                 clipboard.setPrimaryClip(clip)
                                 selectedTrackForOptions = null
-                                Toast.makeText(context, "Copied link to clipboard", Toast.LENGTH_SHORT).show()
+                                Toast.makeText(context, "Copied YouTube Music link", Toast.LENGTH_SHORT).show()
                             },
                         colors = CardDefaults.cardColors(containerColor = Color(0xFF1A222B)),
                         shape = RoundedCornerShape(16.dp)
@@ -1872,17 +1909,17 @@ fun SonoraPlayerScreen() {
             ) {
                 when (selectedNavTab) {
                     0 -> {
-                        // Home Screen with Indian-style Most Listened Speed Dial & Keep Listening
-                        val speedDialSongs = remember(mostPlayedTracks, moodTracks) {
+                        // Home Screen with 3x3 Swipeable Speed Dial (4 pages = 3 swipes right)
+                        val allSpeedDialSongs = remember(mostPlayedTracks, moodTracks) {
                             val combined = mutableListOf<FullTrackItem>()
                             combined.addAll(mostPlayedTracks)
                             for (t in moodTracks) {
                                 if (combined.none { it.id == t.id }) {
                                     combined.add(t)
                                 }
-                                if (combined.size >= 9) break
+                                if (combined.size >= 36) break
                             }
-                            combined.take(9)
+                            combined
                         }
 
                         val keepListeningSongs = remember(recentlyPlayedTracks, moodTracks) {
@@ -1892,6 +1929,8 @@ fun SonoraPlayerScreen() {
                                 moodTracks.drop(4)
                             }
                         }
+
+                        val speedDialPagerState = rememberPagerState(pageCount = { 4 })
 
                         Column(
                             modifier = Modifier
@@ -1953,7 +1992,6 @@ fun SonoraPlayerScreen() {
                             }
 
                             LazyColumn(modifier = Modifier.fillMaxSize()) {
-                                // Speed Dial Title
                                 item {
                                     Text(
                                         text = "Speed dial",
@@ -1964,52 +2002,58 @@ fun SonoraPlayerScreen() {
                                     )
                                 }
 
-                                // 3x3 Grid of Most Listened Songs
+                                // 3x3 Horizontal Pager (Swipes 3 times to the right)
                                 item {
-                                    if (isMoodLoading && speedDialSongs.isEmpty()) {
+                                    if (isMoodLoading && allSpeedDialSongs.isEmpty()) {
                                         Box(
-                                            modifier = Modifier.fillMaxWidth().height(220.dp),
+                                            modifier = Modifier.fillMaxWidth().height(260.dp),
                                             contentAlignment = Alignment.Center
                                         ) {
                                             CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
                                         }
                                     } else {
-                                        Column(modifier = Modifier.fillMaxWidth()) {
-                                            for (row in 0 until 3) {
-                                                Row(
-                                                    modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp),
-                                                    horizontalArrangement = Arrangement.spacedBy(10.dp)
-                                                ) {
-                                                    for (col in 0 until 3) {
-                                                        val idx = row * 3 + col
-                                                        if (idx < speedDialSongs.size) {
-                                                            val song = speedDialSongs[idx]
-                                                            Column(
-                                                                modifier = Modifier
-                                                                    .weight(1f)
-                                                                    .clickable { playQueue(speedDialSongs, idx) }
-                                                            ) {
-                                                                AsyncImage(
-                                                                    model = song.artworkUrl,
-                                                                    contentDescription = song.title,
+                                        HorizontalPager(
+                                            state = speedDialPagerState,
+                                            modifier = Modifier.fillMaxWidth()
+                                        ) { pageIdx ->
+                                            val pageSongs = allSpeedDialSongs.drop(pageIdx * 9).take(9)
+                                            Column(modifier = Modifier.fillMaxWidth()) {
+                                                for (row in 0 until 3) {
+                                                    Row(
+                                                        modifier = Modifier.fillMaxWidth().padding(bottom = 10.dp),
+                                                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                                    ) {
+                                                        for (col in 0 until 3) {
+                                                            val idx = row * 3 + col
+                                                            if (idx < pageSongs.size) {
+                                                                val song = pageSongs[idx]
+                                                                Column(
                                                                     modifier = Modifier
-                                                                        .fillMaxWidth()
-                                                                        .aspectRatio(1f)
-                                                                        .clip(RoundedCornerShape(8.dp)),
-                                                                    contentScale = ContentScale.Crop
-                                                                )
-                                                                Spacer(modifier = Modifier.height(4.dp))
-                                                                Text(
-                                                                    text = song.title,
-                                                                    color = Color.White,
-                                                                    fontSize = 13.sp,
-                                                                    fontWeight = FontWeight.SemiBold,
-                                                                    maxLines = 1,
-                                                                    overflow = TextOverflow.Ellipsis
-                                                                )
+                                                                        .weight(1f)
+                                                                        .clickable { playQueue(pageSongs, idx) }
+                                                                ) {
+                                                                    AsyncImage(
+                                                                        model = song.artworkUrl,
+                                                                        contentDescription = song.title,
+                                                                        modifier = Modifier
+                                                                            .fillMaxWidth()
+                                                                            .aspectRatio(1f)
+                                                                            .clip(RoundedCornerShape(8.dp)),
+                                                                        contentScale = ContentScale.Crop
+                                                                    )
+                                                                    Spacer(modifier = Modifier.height(4.dp))
+                                                                    Text(
+                                                                        text = song.title,
+                                                                        color = Color.White,
+                                                                        fontSize = 13.sp,
+                                                                        fontWeight = FontWeight.SemiBold,
+                                                                        maxLines = 1,
+                                                                        overflow = TextOverflow.Ellipsis
+                                                                    )
+                                                                }
+                                                            } else {
+                                                                Spacer(modifier = Modifier.weight(1f))
                                                             }
-                                                        } else {
-                                                            Spacer(modifier = Modifier.weight(1f))
                                                         }
                                                     }
                                                 }
@@ -2018,7 +2062,7 @@ fun SonoraPlayerScreen() {
                                     }
                                 }
 
-                                // Pagination dots
+                                // 4 Pagination dots corresponding to the 4 pages
                                 item {
                                     Row(
                                         modifier = Modifier
@@ -2027,26 +2071,16 @@ fun SonoraPlayerScreen() {
                                         horizontalArrangement = Arrangement.Center,
                                         verticalAlignment = Alignment.CenterVertically
                                     ) {
-                                        Box(
-                                            modifier = Modifier
-                                                .size(7.dp)
-                                                .clip(CircleShape)
-                                                .background(Color(0xFFD3E2F8))
-                                        )
-                                        Spacer(modifier = Modifier.width(6.dp))
-                                        Box(
-                                            modifier = Modifier
-                                                .size(6.dp)
-                                                .clip(CircleShape)
-                                                .background(Color(0xFF334155))
-                                        )
-                                        Spacer(modifier = Modifier.width(6.dp))
-                                        Box(
-                                            modifier = Modifier
-                                                .size(6.dp)
-                                                .clip(CircleShape)
-                                                .background(Color(0xFF334155))
-                                        )
+                                        for (p in 0 until 4) {
+                                            val isCurrent = speedDialPagerState.currentPage == p
+                                            Box(
+                                                modifier = Modifier
+                                                    .size(if (isCurrent) 8.dp else 6.dp)
+                                                    .clip(CircleShape)
+                                                    .background(if (isCurrent) Color(0xFFD3E2F8) else Color(0xFF334155))
+                                            )
+                                            if (p < 3) Spacer(modifier = Modifier.width(6.dp))
+                                        }
                                     }
                                 }
 
@@ -2132,6 +2166,7 @@ fun SonoraPlayerScreen() {
                                         keyboardActions = KeyboardActions(
                                             onSearch = {
                                                 if (searchQuery.isNotBlank()) {
+                                                    keyboardController?.hide()
                                                     executeSearch(searchQuery)
                                                 }
                                             }
@@ -2159,6 +2194,7 @@ fun SonoraPlayerScreen() {
 
                                     IconButton(onClick = {
                                         if (searchQuery.isNotBlank()) {
+                                            keyboardController?.hide()
                                             executeSearch(searchQuery)
                                         }
                                     }) {
@@ -2510,19 +2546,19 @@ fun SonoraPlayerScreen() {
                 }
             }
 
-            // Refined Bottom Navigation Bar with Full Navigation Bars Insets (no cutoff)
+            // Fixed Bottom Navigation Bar (No cutoff: windowInsets set cleanly, no duplicate navigationBarsPadding)
             NavigationBar(
                 containerColor = Color(0xFF0A0F14),
                 contentColor = Color.White,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .navigationBarsPadding()
+                windowInsets = WindowInsets.navigationBars,
+                modifier = Modifier.fillMaxWidth()
             ) {
                 NavigationBarItem(
                     selected = selectedNavTab == 0,
                     onClick = { selectedNavTab = 0 },
                     icon = { Icon(imageVector = Icons.Rounded.Home, contentDescription = "Home", modifier = Modifier.size(22.dp)) },
-                    label = { Text("Home", fontSize = 11.sp, fontWeight = FontWeight.Medium) },
+                    label = { Text("Home", fontSize = 11.sp, fontWeight = FontWeight.Medium, maxLines = 1) },
+                    alwaysShowLabel = true,
                     colors = NavigationBarItemDefaults.colors(
                         selectedIconColor = Color.White,
                         unselectedIconColor = Color(0xFF94A3B8),
@@ -2535,7 +2571,8 @@ fun SonoraPlayerScreen() {
                     selected = selectedNavTab == 1,
                     onClick = { selectedNavTab = 1 },
                     icon = { Icon(imageVector = Icons.Rounded.Search, contentDescription = "Search", modifier = Modifier.size(22.dp)) },
-                    label = { Text("Search", fontSize = 11.sp, fontWeight = FontWeight.Medium) },
+                    label = { Text("Search", fontSize = 11.sp, fontWeight = FontWeight.Medium, maxLines = 1) },
+                    alwaysShowLabel = true,
                     colors = NavigationBarItemDefaults.colors(
                         selectedIconColor = Color.White,
                         unselectedIconColor = Color(0xFF94A3B8),
@@ -2548,7 +2585,8 @@ fun SonoraPlayerScreen() {
                     selected = selectedNavTab == 2,
                     onClick = { selectedNavTab = 2 },
                     icon = { Icon(imageVector = Icons.Rounded.LibraryMusic, contentDescription = "Library", modifier = Modifier.size(22.dp)) },
-                    label = { Text("Library", fontSize = 11.sp, fontWeight = FontWeight.Medium) },
+                    label = { Text("Library", fontSize = 11.sp, fontWeight = FontWeight.Medium, maxLines = 1) },
+                    alwaysShowLabel = true,
                     colors = NavigationBarItemDefaults.colors(
                         selectedIconColor = Color.White,
                         unselectedIconColor = Color(0xFF94A3B8),
