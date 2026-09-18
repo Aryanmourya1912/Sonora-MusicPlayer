@@ -210,7 +210,6 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-// Recursively walks arbitrary InnerTube JSON responses to find target renderers
 fun findRenderersRecursive(json: Any?, targetKey: String, sink: MutableList<JSONObject>) {
     when (json) {
         is JSONObject -> {
@@ -233,7 +232,6 @@ fun findRenderersRecursive(json: Any?, targetKey: String, sink: MutableList<JSON
     }
 }
 
-// Robust multi-path videoId extractor for YouTube Music renderers
 fun extractVideoIdFromRenderer(item: JSONObject): String {
     item.optString("videoId").takeIf { it.isNotBlank() }?.let { return it }
 
@@ -463,12 +461,11 @@ fun decryptMediaUrl(encryptedUrl: String): String {
     }
 }
 
-// Multi-Tier Stream Resolver: Direct InnerTube -> Piped Instances -> Clean CDN Fail-Safe
 suspend fun resolveTrackAudioStream(track: FullTrackItem): String = withContext(Dispatchers.IO) {
     val videoId = track.id
 
-    // Tier 1: Direct InnerTube Player API via ANDROID_TESTSUITE (unencrypted direct URLs)
     if (videoId.isNotBlank()) {
+        // Tier 1: Direct InnerTube Player API via ANDROID_TESTSUITE
         try {
             val url = URL("https://www.youtube.com/youtubei/v1/player")
             val conn = url.openConnection() as HttpURLConnection
@@ -540,7 +537,6 @@ suspend fun resolveTrackAudioStream(track: FullTrackItem): String = withContext(
                         put("clientName", "TVHTML5_SIMPLY_EMBEDDED_PLAYER")
                         put("clientVersion", "2.0")
                         put("hl", "en")
-                        put("gl", "US")
                     })
                     put("thirdParty", JSONObject().apply {
                         put("embedUrl", "https://www.youtube.com")
@@ -574,7 +570,7 @@ suspend fun resolveTrackAudioStream(track: FullTrackItem): String = withContext(
             }
         } catch (_: Exception) {}
 
-        // Tier 3: Active Piped Decipher Instances
+        // Tier 3: Active Piped Decipher Mirrors
         val pipedInstances = listOf(
             "https://pipedapi.adminforge.de",
             "https://pipedapi.tokhmi.xyz",
@@ -611,7 +607,7 @@ suspend fun resolveTrackAudioStream(track: FullTrackItem): String = withContext(
         }
     }
 
-    // Tier 4: Instant 320kbps High-Quality Stream Fail-Safe by track title & artist
+    // Tier 4: Instant Audio Stream Fail-Safe by Title and Artist
     try {
         val queryText = URLEncoder.encode("${track.title} ${track.artist}".trim(), "UTF-8")
         val saavnUrl = URL("https://www.jiosaavn.com/api.php?__call=search.getResults&_format=json&_marker=0&api_version=4&ctx=web6dot0&n=3&p=1&q=$queryText")
@@ -1118,7 +1114,6 @@ fun SonoraPlayerScreen() {
                         .putLong(KEY_LAST_POSITION_MS, 0L)
                         .apply()
 
-                    // Continuously append filtered tracks when approaching end of queue
                     if (endlessRadioEnabled && mediaController.currentMediaItemIndex >= mediaController.mediaItemCount - 2) {
                         coroutineScope.launch {
                             val similar = fetchYouTubeAutomixRadio(activeSongId)
@@ -1236,6 +1231,7 @@ fun SonoraPlayerScreen() {
         }
     }
 
+    // Modal Bottom Sheet: Track Options
     if (selectedTrackForOptions != null) {
         val song = selectedTrackForOptions!!
         ModalBottomSheet(
