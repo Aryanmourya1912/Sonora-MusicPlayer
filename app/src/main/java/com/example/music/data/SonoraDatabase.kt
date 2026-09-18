@@ -10,9 +10,10 @@ import androidx.room.RoomDatabase
         LikedSongEntity::class,
         SearchHistoryEntity::class,
         PlaylistEntity::class,
-        PlaylistSongEntity::class
+        PlaylistSongEntity::class,
+        DownloadedSongEntity::class
     ],
-    version = 1,
+    version = 2,
     exportSchema = false
 )
 abstract class SonoraDatabase : RoomDatabase() {

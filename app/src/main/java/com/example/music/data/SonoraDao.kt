@@ -10,7 +10,7 @@ import kotlinx.coroutines.flow.Flow
 @Dao
 interface SonoraDao {
 
-    // --- Liked Songs (Favorites) ---
+    // --- Liked Songs ---
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertLikedSong(song: LikedSongEntity)
 
@@ -58,4 +58,20 @@ interface SonoraDao {
 
     @Query("SELECT * FROM playlist_songs WHERE playlistId = :playlistId ORDER BY id ASC")
     fun getSongsForPlaylist(playlistId: Long): Flow<List<PlaylistSongEntity>>
+
+    // --- Offline Downloaded Tracks ---
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertDownloadedSong(song: DownloadedSongEntity)
+
+    @Query("DELETE FROM downloaded_songs WHERE id = :songId")
+    suspend fun deleteDownloadedSong(songId: String)
+
+    @Query("SELECT * FROM downloaded_songs ORDER BY downloadedAt DESC")
+    fun getAllDownloadedSongs(): Flow<List<DownloadedSongEntity>>
+
+    @Query("SELECT EXISTS(SELECT 1 FROM downloaded_songs WHERE id = :songId)")
+    fun isSongDownloaded(songId: String): Flow<Boolean>
+
+    @Query("SELECT * FROM downloaded_songs WHERE id = :songId LIMIT 1")
+    suspend fun getDownloadedSongById(songId: String): DownloadedSongEntity?
 }

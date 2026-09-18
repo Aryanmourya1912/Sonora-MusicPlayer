@@ -73,6 +73,7 @@ import androidx.media3.common.Timeline
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
 import coil.compose.AsyncImage
+import com.example.music.data.DownloadedSongEntity
 import com.example.music.data.LikedSongEntity
 import com.example.music.data.PlaylistEntity
 import com.example.music.data.PlaylistSongEntity
@@ -86,6 +87,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
@@ -171,7 +173,7 @@ fun decryptMediaUrl(encryptedUrl: String): String {
     }
 }
 
-// Builds an AndroidX MediaItem with embedded metadata and backup stream URI
+// Builds an AndroidX MediaItem supporting both local file URIs and remote HTTP streams
 fun buildMediaItem(track: FullTrackItem): MediaItem {
     val metadata = MediaMetadata.Builder()
         .setTitle(track.title)
@@ -179,19 +181,24 @@ fun buildMediaItem(track: FullTrackItem): MediaItem {
         .setArtworkUri(Uri.parse(track.artworkUrl))
         .build()
 
+    val playbackUri = if (track.audioUrl.startsWith("/")) {
+        Uri.fromFile(File(track.audioUrl))
+    } else {
+        Uri.parse(track.audioUrl)
+    }
+
     return MediaItem.Builder()
         .setMediaId(track.id)
-        .setUri(Uri.parse(track.audioUrl))
+        .setUri(playbackUri)
         .setRequestMetadata(
             MediaItem.RequestMetadata.Builder()
-                .setMediaUri(Uri.parse(track.audioUrl))
+                .setMediaUri(playbackUri)
                 .build()
         )
         .setMediaMetadata(metadata)
         .build()
 }
 
-// Converts a MediaItem from ExoPlayer back to FullTrackItem
 fun mediaItemToTrack(item: MediaItem): FullTrackItem {
     val streamUri = item.requestMetadata.mediaUri?.toString()
         ?: item.localConfiguration?.uri?.toString()
@@ -206,7 +213,41 @@ fun mediaItemToTrack(item: MediaItem): FullTrackItem {
     )
 }
 
-// JioSaavn Search API
+// Background file downloader: streams audio bytes directly into app storage
+suspend fun downloadTrackToStorage(context: Context, track: FullTrackItem): String? = withContext(Dispatchers.IO) {
+    try {
+        val downloadFolder = File(context.filesDir, "sonora_offline").apply { if (!exists()) mkdirs() }
+        val cleanName = "${track.id}_${track.title.replace("[^a-zA-Z0-9]".toRegex(), "_")}.m4a"
+        val targetFile = File(downloadFolder, cleanName)
+
+        if (targetFile.exists() && targetFile.length() > 50_000L) {
+            return@withContext targetFile.absolutePath
+        }
+
+        val url = URL(track.audioUrl)
+        val connection = url.openConnection() as HttpURLConnection
+        connection.requestMethod = "GET"
+        connection.connectTimeout = 12000
+        connection.readTimeout = 25000
+        connection.instanceFollowRedirects = true
+        connection.connect()
+
+        if (connection.responseCode in 200..299) {
+            connection.inputStream.use { input ->
+                targetFile.outputStream().use { output ->
+                    input.copyTo(output)
+                }
+            }
+            if (targetFile.exists() && targetFile.length() > 50_000L) {
+                return@withContext targetFile.absolutePath
+            }
+        }
+    } catch (e: Exception) {
+        e.printStackTrace()
+    }
+    return@withContext null
+}
+
 suspend fun searchOfficialSongs(query: String): Pair<List<FullTrackItem>, String?> = withContext(Dispatchers.IO) {
     val resultsList = mutableListOf<FullTrackItem>()
     try {
@@ -294,7 +335,6 @@ suspend fun searchOfficialSongs(query: String): Pair<List<FullTrackItem>, String
     }
 }
 
-// Smart Auto-Next & Endless Radio: fetches related tracks via reco.getreco
 suspend fun fetchRelatedSongs(songId: String, artist: String): List<FullTrackItem> = withContext(Dispatchers.IO) {
     val resultsList = mutableListOf<FullTrackItem>()
     if (songId.isNotBlank()) {
@@ -385,7 +425,6 @@ suspend fun fetchRelatedSongs(songId: String, artist: String): List<FullTrackIte
         }
     }
 
-    // Fallback: search by artist if recommendation returns empty
     if (resultsList.isEmpty() && artist.isNotBlank() && artist != "Unknown Artist") {
         val (artistSongs, _) = searchOfficialSongs(artist)
         resultsList.addAll(artistSongs.filter { it.id != songId })
@@ -419,7 +458,9 @@ fun SonoraPlayerScreen() {
     val recentSearches by dao.getRecentSearches().collectAsState(initial = emptyList())
     val likedSongs by dao.getAllLikedSongs().collectAsState(initial = emptyList())
     val allPlaylists by dao.getAllPlaylists().collectAsState(initial = emptyList())
+    val downloadedSongs by dao.getAllDownloadedSongs().collectAsState(initial = emptyList())
 
+    // 0: Explore, 1: Liked Songs, 2: Playlists, 3: Downloads
     var selectedTab by remember { mutableIntStateOf(0) }
     var viewingPlaylist by remember { mutableStateOf<PlaylistEntity?>(null) }
 
@@ -430,11 +471,14 @@ fun SonoraPlayerScreen() {
     var controller by remember { mutableStateOf<MediaController?>(null) }
     var isPlaying by remember { mutableStateOf(false) }
 
-    // Up Next Queue state
+    // Queue state
     var queueList by remember { mutableStateOf<List<FullTrackItem>>(emptyList()) }
     var currentTrackIndex by remember { mutableIntStateOf(0) }
     var endlessRadioEnabled by remember { mutableStateOf(true) }
     var showQueueDialog by remember { mutableStateOf(false) }
+
+    // Download in-progress tracker
+    var downloadingSongIds by remember { mutableStateOf<Set<String>>(emptySet()) }
 
     var searchQuery by remember { mutableStateOf("") }
     var searchResults by remember { mutableStateOf<List<FullTrackItem>>(emptyList()) }
@@ -449,6 +493,7 @@ fun SonoraPlayerScreen() {
     var activeDurationFormatted by remember { mutableStateOf("00:00") }
 
     val isCurrentSongLiked by dao.isSongLiked(activeSongId).collectAsState(initial = false)
+    val isCurrentSongDownloaded by dao.isSongDownloaded(activeSongId).collectAsState(initial = false)
 
     var currentPosition by remember { mutableStateOf(0L) }
     var totalDuration by remember { mutableStateOf(0L) }
@@ -484,7 +529,6 @@ fun SonoraPlayerScreen() {
         }
     }
 
-    // Synchronizes the Compose queue state with ExoPlayer's live playlist
     fun updateQueueState(player: Player) {
         val count = player.mediaItemCount
         val items = ArrayList<FullTrackItem>(count)
@@ -493,6 +537,28 @@ fun SonoraPlayerScreen() {
         }
         queueList = items
         currentTrackIndex = player.currentMediaItemIndex
+    }
+
+    // Handles downloading a track and saving to Room
+    fun triggerDownload(track: FullTrackItem) {
+        if (track.id in downloadingSongIds) return
+        downloadingSongIds = downloadingSongIds + track.id
+        coroutineScope.launch {
+            val localPath = downloadTrackToStorage(context, track)
+            if (localPath != null) {
+                dao.insertDownloadedSong(
+                    DownloadedSongEntity(
+                        id = track.id,
+                        title = track.title,
+                        artist = track.artist,
+                        localFilePath = localPath,
+                        artworkUrl = track.artworkUrl,
+                        duration = track.durationFormatted
+                    )
+                )
+            }
+            downloadingSongIds = downloadingSongIds - track.id
+        }
     }
 
     DisposableEffect(context) {
@@ -602,7 +668,6 @@ fun SonoraPlayerScreen() {
                         .putLong(KEY_LAST_POSITION_MS, 0L)
                         .apply()
 
-                    // Endless Radio: Automatically appends related songs when within 2 tracks of queue end
                     if (endlessRadioEnabled && mediaController.currentMediaItemIndex >= mediaController.mediaItemCount - 2) {
                         coroutineScope.launch {
                             val similar = fetchRelatedSongs(activeSongId, activeArtist)
@@ -643,40 +708,55 @@ fun SonoraPlayerScreen() {
         }
     }
 
-    // Loads a list into the player queue and begins playback from startIndex
+    // Smart Queue Starter: checks offline storage first to bypass network if downloaded
     fun playQueue(tracks: List<FullTrackItem>, startIndex: Int) {
         if (tracks.isEmpty()) return
         val safeIndex = startIndex.coerceIn(0, tracks.size - 1)
         val targetTrack = tracks[safeIndex]
 
-        activeSongId = targetTrack.id
-        activeTitle = targetTrack.title
-        activeArtist = targetTrack.artist
-        activeArtworkUrl = targetTrack.artworkUrl
-        activeAudioUrl = targetTrack.audioUrl
-        activeDurationFormatted = targetTrack.durationFormatted
+        coroutineScope.launch {
+            // Check if track is already downloaded locally
+            val downloadedLocal = dao.getDownloadedSongById(targetTrack.id)
+            val effectiveUrl = if (downloadedLocal != null && File(downloadedLocal.localFilePath).exists()) {
+                downloadedLocal.localFilePath
+            } else {
+                targetTrack.audioUrl
+            }
 
-        prefs.edit()
-            .putString(KEY_LAST_ID, targetTrack.id)
-            .putString(KEY_LAST_TITLE, targetTrack.title)
-            .putString(KEY_LAST_ARTIST, targetTrack.artist)
-            .putString(KEY_LAST_AUDIO_URL, targetTrack.audioUrl)
-            .putString(KEY_LAST_ARTWORK_URL, targetTrack.artworkUrl)
-            .putString(KEY_LAST_DURATION_TXT, targetTrack.durationFormatted)
-            .putLong(KEY_LAST_POSITION_MS, 0L)
-            .apply()
+            activeSongId = targetTrack.id
+            activeTitle = targetTrack.title
+            activeArtist = targetTrack.artist
+            activeArtworkUrl = targetTrack.artworkUrl
+            activeAudioUrl = effectiveUrl
+            activeDurationFormatted = targetTrack.durationFormatted
 
-        controller?.let { player ->
-            val mediaItems = tracks.map { buildMediaItem(it) }
-            player.setMediaItems(mediaItems, safeIndex, 0L)
-            player.prepare()
-            player.play()
-            updateQueueState(player)
-        }
+            prefs.edit()
+                .putString(KEY_LAST_ID, targetTrack.id)
+                .putString(KEY_LAST_TITLE, targetTrack.title)
+                .putString(KEY_LAST_ARTIST, targetTrack.artist)
+                .putString(KEY_LAST_AUDIO_URL, effectiveUrl)
+                .putString(KEY_LAST_ARTWORK_URL, targetTrack.artworkUrl)
+                .putString(KEY_LAST_DURATION_TXT, targetTrack.durationFormatted)
+                .putLong(KEY_LAST_POSITION_MS, 0L)
+                .apply()
 
-        // When starting from a single track, proactively seed recommendations for continuous playback
-        if (tracks.size == 1 && endlessRadioEnabled) {
-            coroutineScope.launch {
+            val mediaItems = tracks.map { trk ->
+                val offlineItem = dao.getDownloadedSongById(trk.id)
+                if (offlineItem != null && File(offlineItem.localFilePath).exists()) {
+                    buildMediaItem(trk.copy(audioUrl = offlineItem.localFilePath))
+                } else {
+                    buildMediaItem(trk)
+                }
+            }
+
+            controller?.let { player ->
+                player.setMediaItems(mediaItems, safeIndex, 0L)
+                player.prepare()
+                player.play()
+                updateQueueState(player)
+            }
+
+            if (tracks.size == 1 && endlessRadioEnabled) {
                 val related = fetchRelatedSongs(targetTrack.id, targetTrack.artist)
                 controller?.let { player ->
                     val newItems = related.filter { it.id != targetTrack.id }.map { buildMediaItem(it) }
@@ -744,9 +824,7 @@ fun SonoraPlayerScreen() {
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .padding(vertical = 3.dp)
-                                    .clickable {
-                                        controller?.seekToDefaultPosition(index)
-                                    },
+                                    .clickable { controller?.seekToDefaultPosition(index) },
                                 colors = CardDefaults.cardColors(
                                     containerColor = if (isCurrent) Color(0xFF28243D) else Color(0xFF161622)
                                 ),
@@ -795,7 +873,6 @@ fun SonoraPlayerScreen() {
                                         )
                                     }
 
-                                    // Remove track from queue
                                     if (!isCurrent) {
                                         IconButton(
                                             onClick = {
@@ -823,7 +900,7 @@ fun SonoraPlayerScreen() {
         )
     }
 
-    // --- Add to Playlist Picker Dialog ---
+    // --- Add to Playlist Dialog ---
     if (songToAddToPlaylist != null) {
         AlertDialog(
             onDismissRequest = { songToAddToPlaylist = null },
@@ -922,7 +999,7 @@ fun SonoraPlayerScreen() {
         )
     }
 
-    // --- Create New Playlist Dialog ---
+    // --- Create Playlist Dialog ---
     if (showCreatePlaylistDialog) {
         AlertDialog(
             onDismissRequest = {
@@ -1110,33 +1187,30 @@ fun SonoraPlayerScreen() {
                 color = Color.White
             )
 
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                // Sleep Timer badge
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(if (sleepTimerRemainingSeconds > 0L || stopAfterCurrentTrack) Color(0xFF1E1E2D) else Color.Transparent)
-                        .clickable { showSleepTimerDialog = true }
-                        .padding(horizontal = 8.dp, vertical = 4.dp)
-                ) {
-                    Text(text = "🌙", fontSize = 15.sp)
-                    Spacer(modifier = Modifier.width(5.dp))
-                    Text(
-                        text = when {
-                            sleepTimerRemainingSeconds > 0L -> formatTime(sleepTimerRemainingSeconds * 1000)
-                            stopAfterCurrentTrack -> "Track End"
-                            else -> "Timer"
-                        },
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = if (sleepTimerRemainingSeconds > 0L || stopAfterCurrentTrack) MaterialTheme.colorScheme.primary else Color(0xFF94A3B8)
-                    )
-                }
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(if (sleepTimerRemainingSeconds > 0L || stopAfterCurrentTrack) Color(0xFF1E1E2D) else Color.Transparent)
+                    .clickable { showSleepTimerDialog = true }
+                    .padding(horizontal = 8.dp, vertical = 4.dp)
+            ) {
+                Text(text = "🌙", fontSize = 15.sp)
+                Spacer(modifier = Modifier.width(5.dp))
+                Text(
+                    text = when {
+                        sleepTimerRemainingSeconds > 0L -> formatTime(sleepTimerRemainingSeconds * 1000)
+                        stopAfterCurrentTrack -> "Track End"
+                        else -> "Timer"
+                    },
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = if (sleepTimerRemainingSeconds > 0L || stopAfterCurrentTrack) MaterialTheme.colorScheme.primary else Color(0xFF94A3B8)
+                )
             }
         }
 
-        // Section Tabs
+        // Four Main Navigation Tabs (Explore, Liked, Playlists, Downloads)
         TabRow(
             selectedTabIndex = selectedTab,
             containerColor = Color.Transparent,
@@ -1145,24 +1219,23 @@ fun SonoraPlayerScreen() {
         ) {
             Tab(
                 selected = selectedTab == 0,
-                onClick = {
-                    selectedTab = 0
-                    viewingPlaylist = null
-                },
+                onClick = { selectedTab = 0; viewingPlaylist = null },
                 text = { Text("Explore", fontWeight = if (selectedTab == 0) FontWeight.Bold else FontWeight.Normal) }
             )
             Tab(
                 selected = selectedTab == 1,
-                onClick = {
-                    selectedTab = 1
-                    viewingPlaylist = null
-                },
+                onClick = { selectedTab = 1; viewingPlaylist = null },
                 text = { Text("Liked (${likedSongs.size})", fontWeight = if (selectedTab == 1) FontWeight.Bold else FontWeight.Normal) }
             )
             Tab(
                 selected = selectedTab == 2,
                 onClick = { selectedTab = 2 },
                 text = { Text("Playlists (${allPlaylists.size})", fontWeight = if (selectedTab == 2) FontWeight.Bold else FontWeight.Normal) }
+            )
+            Tab(
+                selected = selectedTab == 3,
+                onClick = { selectedTab = 3; viewingPlaylist = null },
+                text = { Text("Offline (${downloadedSongs.size})", fontWeight = if (selectedTab == 3) FontWeight.Bold else FontWeight.Normal) }
             )
         }
 
@@ -1205,9 +1278,7 @@ fun SonoraPlayerScreen() {
                     if (recentSearches.isNotEmpty()) {
                         Column(modifier = Modifier.fillMaxSize()) {
                             Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(vertical = 6.dp),
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
                                 horizontalArrangement = Arrangement.SpaceBetween,
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
@@ -1285,21 +1356,19 @@ fun SonoraPlayerScreen() {
                 } else {
                     LazyColumn(modifier = Modifier.fillMaxSize()) {
                         itemsIndexed(searchResults) { index, song ->
+                            val isDownloaded = downloadedSongs.any { it.id == song.id }
+                            val isDownloading = song.id in downloadingSongIds
+
                             Card(
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .padding(vertical = 4.dp)
-                                    .clickable {
-                                        // Loads all search results into queue starting at this track
-                                        playQueue(searchResults, index)
-                                    },
+                                    .clickable { playQueue(searchResults, index) },
                                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
                                 shape = RoundedCornerShape(10.dp)
                             ) {
                                 Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(8.dp),
+                                    modifier = Modifier.fillMaxWidth().padding(8.dp),
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
                                     AsyncImage(
@@ -1330,6 +1399,18 @@ fun SonoraPlayerScreen() {
                                             maxLines = 1,
                                             overflow = TextOverflow.Ellipsis
                                         )
+                                    }
+
+                                    // Download Button
+                                    IconButton(
+                                        onClick = { triggerDownload(song) },
+                                        enabled = !isDownloaded && !isDownloading
+                                    ) {
+                                        when {
+                                            isDownloading -> CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp, color = MaterialTheme.colorScheme.primary)
+                                            isDownloaded -> Text("✓", color = Color(0xFF4CAF50), fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                                            else -> Text("⬇", color = Color(0xFF94A3B8), fontSize = 16.sp)
+                                        }
                                     }
 
                                     // Add to Playlist Button
@@ -1370,21 +1451,19 @@ fun SonoraPlayerScreen() {
                     }
                     LazyColumn(modifier = Modifier.fillMaxSize()) {
                         itemsIndexed(convertedLiked) { index, savedSong ->
+                            val isDownloaded = downloadedSongs.any { it.id == savedSong.id }
+                            val isDownloading = savedSong.id in downloadingSongIds
+
                             Card(
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .padding(vertical = 4.dp)
-                                    .clickable {
-                                        // Loads all liked songs into queue starting at this track
-                                        playQueue(convertedLiked, index)
-                                    },
+                                    .clickable { playQueue(convertedLiked, index) },
                                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
                                 shape = RoundedCornerShape(10.dp)
                             ) {
                                 Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(8.dp),
+                                    modifier = Modifier.fillMaxWidth().padding(8.dp),
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
                                     AsyncImage(
@@ -1417,15 +1496,24 @@ fun SonoraPlayerScreen() {
                                         )
                                     }
 
+                                    IconButton(
+                                        onClick = { triggerDownload(savedSong) },
+                                        enabled = !isDownloaded && !isDownloading
+                                    ) {
+                                        when {
+                                            isDownloading -> CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp, color = MaterialTheme.colorScheme.primary)
+                                            isDownloaded -> Text("✓", color = Color(0xFF4CAF50), fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                                            else -> Text("⬇", color = Color(0xFF94A3B8), fontSize = 16.sp)
+                                        }
+                                    }
+
                                     IconButton(onClick = { songToAddToPlaylist = savedSong }) {
                                         Text("+", color = MaterialTheme.colorScheme.primary, fontSize = 20.sp, fontWeight = FontWeight.Bold)
                                     }
 
                                     IconButton(
                                         onClick = {
-                                            coroutineScope.launch {
-                                                dao.deleteLikedSongById(savedSong.id)
-                                            }
+                                            coroutineScope.launch { dao.deleteLikedSongById(savedSong.id) }
                                         }
                                     ) {
                                         Text("♥", color = Color(0xFFFF4081), fontSize = 18.sp)
@@ -1453,9 +1541,7 @@ fun SonoraPlayerScreen() {
 
                     Column(modifier = Modifier.fillMaxSize()) {
                         Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(vertical = 6.dp),
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
@@ -1466,17 +1552,8 @@ fun SonoraPlayerScreen() {
                                 Text("←", fontSize = 20.sp, color = MaterialTheme.colorScheme.primary)
                                 Spacer(modifier = Modifier.width(8.dp))
                                 Column {
-                                    Text(
-                                        text = currentPlaylist.name,
-                                        fontSize = 17.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = Color.White
-                                    )
-                                    Text(
-                                        text = "${activePlaylistSongs.size} tracks",
-                                        fontSize = 12.sp,
-                                        color = Color(0xFF94A3B8)
-                                    )
+                                    Text(text = currentPlaylist.name, fontSize = 17.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                                    Text(text = "${activePlaylistSongs.size} tracks", fontSize = 12.sp, color = Color(0xFF94A3B8))
                                 }
                             }
 
@@ -1498,11 +1575,7 @@ fun SonoraPlayerScreen() {
 
                         if (activePlaylistSongs.isEmpty()) {
                             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                                Text(
-                                    text = "This playlist is empty.\nTap '+' on any song to add it here.",
-                                    color = Color.Gray,
-                                    fontSize = 14.sp
-                                )
+                                Text("This playlist is empty.\nTap '+' on any song to add it here.", color = Color.Gray, fontSize = 14.sp)
                             }
                         } else {
                             LazyColumn(modifier = Modifier.fillMaxSize()) {
@@ -1511,17 +1584,12 @@ fun SonoraPlayerScreen() {
                                         modifier = Modifier
                                             .fillMaxWidth()
                                             .padding(vertical = 4.dp)
-                                            .clickable {
-                                                // Loads playlist into queue starting at this track
-                                                playQueue(convertedPlaylistTracks, index)
-                                            },
+                                            .clickable { playQueue(convertedPlaylistTracks, index) },
                                         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
                                         shape = RoundedCornerShape(10.dp)
                                     ) {
                                         Row(
-                                            modifier = Modifier
-                                                .fillMaxWidth()
-                                                .padding(8.dp),
+                                            modifier = Modifier.fillMaxWidth().padding(8.dp),
                                             verticalAlignment = Alignment.CenterVertically
                                         ) {
                                             AsyncImage(
@@ -1571,18 +1639,11 @@ fun SonoraPlayerScreen() {
                 } else {
                     Column(modifier = Modifier.fillMaxSize()) {
                         Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(vertical = 6.dp),
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Text(
-                                text = "Your Playlists",
-                                fontSize = 15.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                color = Color(0xFF94A3B8)
-                            )
+                            Text(text = "Your Playlists", fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFF94A3B8))
                             Button(
                                 onClick = { showCreatePlaylistDialog = true },
                                 colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
@@ -1599,12 +1660,7 @@ fun SonoraPlayerScreen() {
                                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                                     Text("📁", fontSize = 42.sp)
                                     Spacer(modifier = Modifier.height(8.dp))
-                                    Text(
-                                        text = "No custom playlists yet",
-                                        color = Color(0xFF94A3B8),
-                                        fontSize = 15.sp,
-                                        fontWeight = FontWeight.SemiBold
-                                    )
+                                    Text("No custom playlists yet", color = Color(0xFF94A3B8), fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
                                 }
                             }
                         } else {
@@ -1619,9 +1675,7 @@ fun SonoraPlayerScreen() {
                                         shape = RoundedCornerShape(10.dp)
                                     ) {
                                         Row(
-                                            modifier = Modifier
-                                                .fillMaxWidth()
-                                                .padding(14.dp),
+                                            modifier = Modifier.fillMaxWidth().padding(14.dp),
                                             verticalAlignment = Alignment.CenterVertically
                                         ) {
                                             Box(
@@ -1637,17 +1691,8 @@ fun SonoraPlayerScreen() {
                                             Spacer(modifier = Modifier.width(14.dp))
 
                                             Column(modifier = Modifier.weight(1f)) {
-                                                Text(
-                                                    text = playlist.name,
-                                                    fontWeight = FontWeight.Bold,
-                                                    fontSize = 16.sp,
-                                                    color = Color.White
-                                                )
-                                                Text(
-                                                    text = "Tap to view tracks",
-                                                    fontSize = 12.sp,
-                                                    color = Color(0xFF94A3B8)
-                                                )
+                                                Text(text = playlist.name, fontWeight = FontWeight.Bold, fontSize = 16.sp, color = Color.White)
+                                                Text(text = "Tap to view tracks", fontSize = 12.sp, color = Color(0xFF94A3B8))
                                             }
 
                                             Text("›", fontSize = 22.sp, color = Color(0xFF94A3B8))
@@ -1661,21 +1706,116 @@ fun SonoraPlayerScreen() {
             }
         }
 
+        // --- Tab 3: Offline Downloaded Tracks ---
+        if (selectedTab == 3) {
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
+            ) {
+                if (downloadedSongs.isEmpty()) {
+                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text(text = "⬇", fontSize = 42.sp, color = Color(0xFF262635))
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text(
+                                text = "No downloaded tracks yet",
+                                color = Color(0xFF94A3B8),
+                                fontSize = 15.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = "Tap the '⬇' download icon on any song to save offline",
+                                color = Color.Gray,
+                                fontSize = 13.sp
+                            )
+                        }
+                    }
+                } else {
+                    val convertedDownloads = downloadedSongs.map {
+                        FullTrackItem(it.id, it.title, it.artist, it.localFilePath, it.artworkUrl, it.duration)
+                    }
+                    LazyColumn(modifier = Modifier.fillMaxSize()) {
+                        itemsIndexed(convertedDownloads) { index, downloadedSong ->
+                            Card(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 4.dp)
+                                    .clickable { playQueue(convertedDownloads, index) },
+                                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                                shape = RoundedCornerShape(10.dp)
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth().padding(8.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    AsyncImage(
+                                        model = downloadedSong.artworkUrl,
+                                        contentDescription = downloadedSong.title,
+                                        modifier = Modifier
+                                            .size(54.dp)
+                                            .clip(RoundedCornerShape(8.dp)),
+                                        contentScale = ContentScale.Crop
+                                    )
+
+                                    Spacer(modifier = Modifier.width(12.dp))
+
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = downloadedSong.title,
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 15.sp,
+                                            color = Color.White,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                        Spacer(modifier = Modifier.height(2.dp))
+                                        Text(
+                                            text = downloadedSong.artist,
+                                            color = Color(0xFF94A3B8),
+                                            fontSize = 13.sp,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
+
+                                    // Add to Playlist Button
+                                    IconButton(onClick = { songToAddToPlaylist = downloadedSong }) {
+                                        Text("+", color = MaterialTheme.colorScheme.primary, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                                    }
+
+                                    // Delete download from device
+                                    IconButton(
+                                        onClick = {
+                                            coroutineScope.launch {
+                                                File(downloadedSong.audioUrl).delete()
+                                                dao.deleteDownloadedSong(downloadedSong.id)
+                                            }
+                                        }
+                                    ) {
+                                        Text("🗑", color = Color(0xFFFF5252), fontSize = 16.sp)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         Spacer(modifier = Modifier.height(8.dp))
 
-        // --- Floating Player Bar with Up Next Queue & Complete Media Controls ---
+        // --- Persistent Floating Player Bar ---
         Card(
             modifier = Modifier.fillMaxWidth(),
-            colors = CardDefaults.cardColors(
-                containerColor = MaterialTheme.colorScheme.surfaceVariant
-            ),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
             shape = RoundedCornerShape(16.dp)
         ) {
             Column(
                 modifier = Modifier.padding(12.dp),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                // Top Row: Artwork, Info, Heart, Playlist, Queue
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically
@@ -1710,6 +1850,32 @@ fun SonoraPlayerScreen() {
                         )
                     }
 
+                    // Download active song button
+                    val isCurrentDownloading = activeSongId in downloadingSongIds
+                    IconButton(
+                        onClick = {
+                            if (activeSongId.isNotBlank() && !isCurrentSongDownloaded && !isCurrentDownloading) {
+                                triggerDownload(
+                                    FullTrackItem(
+                                        id = activeSongId,
+                                        title = activeTitle,
+                                        artist = activeArtist,
+                                        audioUrl = activeAudioUrl,
+                                        artworkUrl = activeArtworkUrl,
+                                        durationFormatted = activeDurationFormatted
+                                    )
+                                )
+                            }
+                        },
+                        enabled = activeSongId.isNotBlank() && !isCurrentSongDownloaded && !isCurrentDownloading
+                    ) {
+                        when {
+                            isCurrentDownloading -> CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp, color = MaterialTheme.colorScheme.primary)
+                            isCurrentSongDownloaded -> Text("✓", color = Color(0xFF4CAF50), fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                            else -> Text("⬇", color = Color(0xFF94A3B8), fontSize = 16.sp)
+                        }
+                    }
+
                     // Add to Playlist Button
                     IconButton(
                         onClick = {
@@ -1729,7 +1895,7 @@ fun SonoraPlayerScreen() {
                         Text("+", fontSize = 22.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
                     }
 
-                    // Favorite Heart Button
+                    // Like Button
                     IconButton(
                         onClick = {
                             if (activeSongId.isNotBlank()) {
@@ -1760,7 +1926,7 @@ fun SonoraPlayerScreen() {
                         )
                     }
 
-                    // Up Next Queue Button
+                    // Queue Button
                     IconButton(onClick = { showQueueDialog = true }) {
                         Text("≡", fontSize = 22.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
                     }
@@ -1789,7 +1955,7 @@ fun SonoraPlayerScreen() {
                     modifier = Modifier.fillMaxWidth().height(26.dp)
                 )
 
-                // Timestamps and Playback Control Row
+                // Timestamps and Playback Controls
                 Row(
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp),
                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -1801,12 +1967,10 @@ fun SonoraPlayerScreen() {
                         color = Color(0xFF94A3B8)
                     )
 
-                    // Previous, Play/Pause, Next Controls
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.Center
                     ) {
-                        // Previous Track
                         IconButton(
                             onClick = {
                                 controller?.let { player ->
@@ -1824,7 +1988,6 @@ fun SonoraPlayerScreen() {
 
                         Spacer(modifier = Modifier.width(8.dp))
 
-                        // Play / Pause Toggle
                         Button(
                             onClick = {
                                 controller?.let { player ->
@@ -1840,7 +2003,6 @@ fun SonoraPlayerScreen() {
 
                         Spacer(modifier = Modifier.width(8.dp))
 
-                        // Next Track
                         IconButton(
                             onClick = {
                                 controller?.let { player ->
