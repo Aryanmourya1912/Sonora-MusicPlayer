@@ -1,13 +1,21 @@
 package com.example.music
 
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.ComponentName
 import android.content.Context
 import android.content.SharedPreferences
+import android.media.AudioManager
 import android.net.Uri
 import android.os.Bundle
 import android.util.Base64
+import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -16,11 +24,14 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
@@ -34,23 +45,32 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FloatingActionButton
+import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
-import androidx.compose.material3.Tab
-import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -60,10 +80,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -114,19 +136,21 @@ data class DiscoveryCategory(
 )
 
 val DiscoveryCategoryList = listOf(
-    DiscoveryCategory("Trending", "🔥", "Top Trending Hits"),
-    DiscoveryCategory("Workout", "⚡", "Gym Workout Motivation"),
-    DiscoveryCategory("Chill", "☕", "Lofi Chill Beats"),
-    DiscoveryCategory("Party", "🎉", "Party Dance Hits"),
-    DiscoveryCategory("Focus", "🎧", "Deep Focus Beats"),
+    DiscoveryCategory("Chill", "☕", "Chill Vibes Lofi"),
+    DiscoveryCategory("Focus", "🎧", "Deep Focus Instrumental"),
+    DiscoveryCategory("Commute", "🚗", "Road Trip Hits"),
+    DiscoveryCategory("Gaming", "🎮", "Phonk EDM Gaming"),
+    DiscoveryCategory("Energize", "⚡", "Workout Motivation Gym"),
+    DiscoveryCategory("Party", "🎉", "Club Dance Party Hits"),
+    DiscoveryCategory("Feel good", "✨", "Feel Good Uplifting"),
     DiscoveryCategory("Romance", "💖", "Romantic Love Songs")
 )
 
 private val SonoraThemeColors = darkColorScheme(
     primary = Color(0xFF7C4DFF),
-    background = Color(0xFF0C0C11),
-    surface = Color(0xFF161622),
-    surfaceVariant = Color(0xFF1E1E2D),
+    background = Color(0xFF080C10),
+    surface = Color(0xFF121921),
+    surfaceVariant = Color(0xFF1A232E),
     onPrimary = Color.White,
     onBackground = Color.White,
     onSurface = Color.White,
@@ -150,11 +174,11 @@ class MainActivity : ComponentActivity() {
 }
 
 fun formatTime(millis: Long): String {
-    if (millis <= 0) return "00:00"
+    if (millis <= 0) return "0:00"
     val totalSeconds = millis / 1000
     val minutes = totalSeconds / 60
     val seconds = totalSeconds % 60
-    return String.format(Locale.ROOT, "%02d:%02d", minutes, seconds)
+    return String.format(Locale.ROOT, "%d:%02d", minutes, seconds)
 }
 
 fun sanitizeText(input: String): String {
@@ -458,10 +482,12 @@ private const val KEY_LAST_DURATION_TXT = "last_duration_txt"
 private const val KEY_LAST_POSITION_MS = "last_position_ms"
 private const val KEY_LAST_DURATION_MS = "last_duration_ms"
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SonoraPlayerScreen() {
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
+    val audioManager = remember { context.getSystemService(Context.AUDIO_SERVICE) as AudioManager }
 
     val prefs: SharedPreferences = remember {
         context.getSharedPreferences(PREFS_SONORA, Context.MODE_PRIVATE)
@@ -475,43 +501,55 @@ fun SonoraPlayerScreen() {
     val allPlaylists by dao.getAllPlaylists().collectAsState(initial = emptyList())
     val downloadedSongs by dao.getAllDownloadedSongs().collectAsState(initial = emptyList())
 
-    var selectedTab by remember { mutableIntStateOf(0) }
-    var viewingPlaylist by remember { mutableStateOf<PlaylistEntity?>(null) }
+    // Navigation: 0 = Home, 1 = Search, 2 = Library
+    var selectedNavTab by remember { mutableIntStateOf(0) }
 
+    // Library Tab sub-selection (0 = Liked, 1 = Playlists, 2 = Offline)
+    var selectedLibrarySubTab by remember { mutableIntStateOf(0) }
+    var viewingPlaylist by remember { mutableStateOf<PlaylistEntity?>(null) }
     val activePlaylistSongs by remember(viewingPlaylist?.id) {
         viewingPlaylist?.let { dao.getSongsForPlaylist(it.id) } ?: flowOf(emptyList())
     }.collectAsState(initial = emptyList())
 
+    // Player Controller and playback
     var controller by remember { mutableStateOf<MediaController?>(null) }
     var isPlaying by remember { mutableStateOf(false) }
 
-    // Up Next Queue state
+    // UI View Expansion: Full-screen Now Playing vs Miniplayer
+    var isPlayerExpanded by remember { mutableStateOf(false) }
+
+    // Three-dot Options Bottom Sheet state
+    var selectedTrackForOptions by remember { mutableStateOf<FullTrackItem?>(null) }
+    val bottomSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+
+    // Up Next Queue & Endless Radio
     var queueList by remember { mutableStateOf<List<FullTrackItem>>(emptyList()) }
     var currentTrackIndex by remember { mutableIntStateOf(0) }
     var endlessRadioEnabled by remember { mutableStateOf(true) }
     var showQueueDialog by remember { mutableStateOf(false) }
+    var isShuffleEnabled by remember { mutableStateOf(false) }
+    var repeatModeState by remember { mutableIntStateOf(Player.REPEAT_MODE_OFF) }
 
-    // Download in-progress tracker
+    // Download tracking
     var downloadingSongIds by remember { mutableStateOf<Set<String>>(emptySet()) }
 
-    // Search and Discovery States
+    // Search state
     var searchQuery by remember { mutableStateOf("") }
     var searchResults by remember { mutableStateOf<List<FullTrackItem>>(emptyList()) }
     var isSearching by remember { mutableStateOf(false) }
-    var searchStatusMessage by remember { mutableStateOf<String?>(null) }
 
-    // Home Speed Dial Discovery States
-    var selectedCategory by remember { mutableStateOf(DiscoveryCategoryList[0]) }
-    var speedDialSongs by remember { mutableStateOf<List<FullTrackItem>>(emptyList()) }
-    var isSpeedDialLoading by remember { mutableStateOf(false) }
+    // Home Discovery & Moods
+    var selectedMoodCategory by remember { mutableStateOf(DiscoveryCategoryList[0]) }
+    var moodTracks by remember { mutableStateOf<List<FullTrackItem>>(emptyList()) }
+    var isMoodLoading by remember { mutableStateOf(false) }
 
-    // Active track state
+    // Active track details
     var activeSongId by remember { mutableStateOf("") }
     var activeTitle by remember { mutableStateOf("No Track Playing") }
-    var activeArtist by remember { mutableStateOf("Search or pick a song below") }
+    var activeArtist by remember { mutableStateOf("Select a song to start listening") }
     var activeArtworkUrl by remember { mutableStateOf("") }
     var activeAudioUrl by remember { mutableStateOf("") }
-    var activeDurationFormatted by remember { mutableStateOf("00:00") }
+    var activeDurationFormatted by remember { mutableStateOf("0:00") }
 
     val isCurrentSongLiked by dao.isSongLiked(activeSongId).collectAsState(initial = false)
     val isCurrentSongDownloaded by dao.isSongDownloaded(activeSongId).collectAsState(initial = false)
@@ -521,23 +559,34 @@ fun SonoraPlayerScreen() {
     var isDraggingSlider by remember { mutableStateOf(false) }
     var sliderDragValue by remember { mutableStateOf(0f) }
 
+    // Sleep timer state
     var showSleepTimerDialog by remember { mutableStateOf(false) }
     var sleepTimerRemainingSeconds by remember { mutableLongStateOf(0L) }
     var stopAfterCurrentTrack by remember { mutableStateOf(false) }
     var sleepTimerJob by remember { mutableStateOf<Job?>(null) }
 
+    // Playlist dialogs
     var songToAddToPlaylist by remember { mutableStateOf<FullTrackItem?>(null) }
     var showCreatePlaylistDialog by remember { mutableStateOf(false) }
     var newPlaylistName by remember { mutableStateOf("") }
 
-    // Loads Speed Dial songs whenever the selected category changes
-    LaunchedEffect(selectedCategory) {
-        if (searchQuery.isBlank()) {
-            isSpeedDialLoading = true
-            val (tracks, _) = searchOfficialSongs(selectedCategory.searchQuery)
-            speedDialSongs = tracks
-            isSpeedDialLoading = false
-        }
+    // Device system volume slider for the Options Bottom Sheet
+    val maxSysVolume = remember { audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC).toFloat() }
+    var currentVolumeSlider by remember {
+        mutableFloatStateOf(audioManager.getStreamVolume(AudioManager.STREAM_MUSIC).toFloat())
+    }
+
+    // Intercept back button when player is full screen
+    BackHandler(enabled = isPlayerExpanded) {
+        isPlayerExpanded = false
+    }
+
+    // Refresh Mood Tracks when category changes
+    LaunchedEffect(selectedMoodCategory) {
+        isMoodLoading = true
+        val (tracks, _) = searchOfficialSongs(selectedMoodCategory.searchQuery)
+        moodTracks = tracks
+        isMoodLoading = false
     }
 
     fun cancelSleepTimer() {
@@ -586,11 +635,13 @@ fun SonoraPlayerScreen() {
                         duration = track.durationFormatted
                     )
                 )
+                Toast.makeText(context, "Downloaded \"${track.title}\"", Toast.LENGTH_SHORT).show()
             }
             downloadingSongIds = downloadingSongIds - track.id
         }
     }
 
+    // Connect to MediaSessionService
     DisposableEffect(context) {
         val sessionToken = SessionToken(context, ComponentName(context, PlaybackService::class.java))
         val controllerFuture = MediaController.Builder(context, sessionToken).buildAsync()
@@ -616,7 +667,7 @@ fun SonoraPlayerScreen() {
                     val savedTitle = prefs.getString(KEY_LAST_TITLE, "Last Played Track") ?: ""
                     val savedArtist = prefs.getString(KEY_LAST_ARTIST, "Tap play to resume") ?: ""
                     val savedArtworkUrl = prefs.getString(KEY_LAST_ARTWORK_URL, "") ?: ""
-                    val savedDurationTxt = prefs.getString(KEY_LAST_DURATION_TXT, "00:00") ?: ""
+                    val savedDurationTxt = prefs.getString(KEY_LAST_DURATION_TXT, "0:00") ?: ""
                     val savedPosMs = prefs.getLong(KEY_LAST_POSITION_MS, 0L)
                     val savedDurMs = prefs.getLong(KEY_LAST_DURATION_MS, 0L)
 
@@ -650,9 +701,7 @@ fun SonoraPlayerScreen() {
                 override fun onIsPlayingChanged(playing: Boolean) {
                     isPlaying = playing
                     if (!playing && mediaController.currentPosition > 0) {
-                        prefs.edit()
-                            .putLong(KEY_LAST_POSITION_MS, mediaController.currentPosition)
-                            .apply()
+                        prefs.edit().putLong(KEY_LAST_POSITION_MS, mediaController.currentPosition).apply()
                     }
                 }
 
@@ -801,149 +850,358 @@ fun SonoraPlayerScreen() {
         if (queryToSearch.isNotBlank()) {
             searchQuery = queryToSearch
             isSearching = true
-            searchStatusMessage = null
             coroutineScope.launch {
                 dao.insertSearchQuery(SearchHistoryEntity(query = queryToSearch.trim()))
-                val (results, errorMsg) = searchOfficialSongs(queryToSearch)
+                val (results, _) = searchOfficialSongs(queryToSearch)
                 searchResults = results
-                searchStatusMessage = errorMsg
                 isSearching = false
             }
         }
     }
 
-    // --- Up Next Queue Dialog ---
-    if (showQueueDialog) {
-        AlertDialog(
-            onDismissRequest = { showQueueDialog = false },
-            title = {
+    // =========================================================================
+    // MODAL BOTTOM SHEET: THREE-DOT TRACK OPTIONS (Image 4)
+    // =========================================================================
+    if (selectedTrackForOptions != null) {
+        val song = selectedTrackForOptions!!
+        ModalBottomSheet(
+            onDismissRequest = { selectedTrackForOptions = null },
+            sheetState = bottomSheetState,
+            containerColor = Color(0xFF0F151C),
+            shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp)
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 8.dp)
+                    .navigationBarsPadding()
+            ) {
+                // Top Volume Scrubber Capsule
                 Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(18.dp))
+                        .background(Color(0xFF1B232D))
+                        .padding(horizontal = 14.dp, vertical = 6.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Column {
-                        Text("Up Next Queue", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 18.sp)
-                        Text("${queueList.size} tracks", color = Color(0xFF94A3B8), fontSize = 12.sp)
+                    Text("🔊", fontSize = 16.sp)
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Slider(
+                        value = currentVolumeSlider,
+                        onValueChange = { newVol ->
+                            currentVolumeSlider = newVol
+                            audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, newVol.toInt(), 0)
+                        },
+                        valueRange = 0f..maxSysVolume,
+                        colors = SliderDefaults.colors(
+                            thumbColor = Color(0xFFD3E2F8),
+                            activeTrackColor = Color(0xFFD3E2F8),
+                            inactiveTrackColor = Color(0xFF2A3644)
+                        ),
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(14.dp))
+
+                // Three-Tile Quick Action Grid: Start Radio | Add to Playlist | Copy Link
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    // Start Radio
+                    Card(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clickable {
+                                coroutineScope.launch {
+                                    val related = fetchRelatedSongs(song.id, song.artist)
+                                    val fullQueue = listOf(song) + related
+                                    playQueue(fullQueue, 0)
+                                }
+                                selectedTrackForOptions = null
+                                Toast.makeText(context, "Started radio for ${song.title}", Toast.LENGTH_SHORT).show()
+                            },
+                        colors = CardDefaults.cardColors(containerColor = Color(0xFF1A222B)),
+                        shape = RoundedCornerShape(16.dp)
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 14.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Text("((•))", fontSize = 20.sp, color = Color.White)
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Text("Start radio", fontSize = 12.sp, color = Color.White, fontWeight = FontWeight.Medium)
+                        }
                     }
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text("Endless Radio", color = Color(0xFF94A3B8), fontSize = 11.sp, modifier = Modifier.padding(end = 6.dp))
-                        Switch(
-                            checked = endlessRadioEnabled,
-                            onCheckedChange = { endlessRadioEnabled = it },
-                            colors = SwitchDefaults.colors(
-                                checkedThumbColor = Color.White,
-                                checkedTrackColor = MaterialTheme.colorScheme.primary
-                            )
-                        )
+
+                    // Add to Playlist
+                    Card(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clickable {
+                                songToAddToPlaylist = song
+                                selectedTrackForOptions = null
+                            },
+                        colors = CardDefaults.cardColors(containerColor = Color(0xFF1A222B)),
+                        shape = RoundedCornerShape(16.dp)
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 14.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Text("≡+", fontSize = 20.sp, color = Color.White)
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Text("Add to playl", fontSize = 12.sp, color = Color.White, fontWeight = FontWeight.Medium)
+                        }
+                    }
+
+                    // Copy Link
+                    Card(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clickable {
+                                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                                val clip = ClipData.newPlainText("Song Link", song.audioUrl)
+                                clipboard.setPrimaryClip(clip)
+                                selectedTrackForOptions = null
+                                Toast.makeText(context, "Copied link to clipboard", Toast.LENGTH_SHORT).show()
+                            },
+                        colors = CardDefaults.cardColors(containerColor = Color(0xFF1A222B)),
+                        shape = RoundedCornerShape(16.dp)
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 14.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Text("🔗", fontSize = 20.sp, color = Color.White)
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Text("Copy link", fontSize = 12.sp, color = Color.White, fontWeight = FontWeight.Medium)
+                        }
                     }
                 }
-            },
-            text = {
-                if (queueList.isEmpty()) {
-                    Box(modifier = Modifier.fillMaxWidth().height(140.dp), contentAlignment = Alignment.Center) {
-                        Text("Queue is empty. Tap any song to start playback.", color = Color.Gray, fontSize = 14.sp)
-                    }
-                } else {
-                    LazyColumn(modifier = Modifier.fillMaxWidth().height(380.dp)) {
-                        itemsIndexed(queueList) { index, track ->
-                            val isCurrent = index == currentTrackIndex
-                            Card(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(vertical = 3.dp)
-                                    .clickable { controller?.seekToDefaultPosition(index) },
-                                colors = CardDefaults.cardColors(
-                                    containerColor = if (isCurrent) Color(0xFF28243D) else Color(0xFF161622)
-                                ),
-                                shape = RoundedCornerShape(8.dp)
-                            ) {
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(horizontal = 8.dp, vertical = 6.dp),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Text(
-                                        text = if (isCurrent) "▶" else "${index + 1}",
-                                        color = if (isCurrent) MaterialTheme.colorScheme.primary else Color(0xFF64748B),
-                                        fontSize = 12.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        modifier = Modifier.width(24.dp)
-                                    )
 
-                                    AsyncImage(
-                                        model = track.artworkUrl,
-                                        contentDescription = track.title,
-                                        modifier = Modifier
-                                            .size(42.dp)
-                                            .clip(RoundedCornerShape(6.dp)),
-                                        contentScale = ContentScale.Crop
-                                    )
+                Spacer(modifier = Modifier.height(14.dp))
 
-                                    Spacer(modifier = Modifier.width(10.dp))
-
-                                    Column(modifier = Modifier.weight(1f)) {
-                                        Text(
-                                            text = track.title,
-                                            fontWeight = if (isCurrent) FontWeight.Bold else FontWeight.SemiBold,
-                                            fontSize = 14.sp,
-                                            color = if (isCurrent) MaterialTheme.colorScheme.primary else Color.White,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis
-                                        )
-                                        Text(
-                                            text = track.artist,
-                                            color = Color(0xFF94A3B8),
-                                            fontSize = 12.sp,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis
-                                        )
-                                    }
-
-                                    if (!isCurrent) {
-                                        IconButton(
-                                            onClick = {
-                                                controller?.removeMediaItem(index)
-                                                controller?.let { updateQueueState(it) }
-                                            }
-                                        ) {
-                                            Text("✕", color = Color(0xFF64748B), fontSize = 13.sp)
-                                        }
-                                    }
-                                }
+                // Detail and Navigation Rows
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    // View Artist
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 3.dp)
+                            .clickable {
+                                selectedNavTab = 1
+                                executeSearch(song.artist)
+                                selectedTrackForOptions = null
+                            },
+                        colors = CardDefaults.cardColors(containerColor = Color(0xFF141C24)),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(14.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text("👤", fontSize = 18.sp)
+                            Spacer(modifier = Modifier.width(14.dp))
+                            Column {
+                                Text("View artist", fontSize = 14.sp, color = Color.White, fontWeight = FontWeight.SemiBold)
+                                Text(song.artist, fontSize = 12.sp, color = Color(0xFF94A3B8))
                             }
+                        }
+                    }
+
+                    // View Album / Search Related
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 3.dp)
+                            .clickable {
+                                selectedNavTab = 1
+                                executeSearch(song.title)
+                                selectedTrackForOptions = null
+                            },
+                        colors = CardDefaults.cardColors(containerColor = Color(0xFF141C24)),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(14.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text("💿", fontSize = 18.sp)
+                            Spacer(modifier = Modifier.width(14.dp))
+                            Column {
+                                Text("View album", fontSize = 14.sp, color = Color.White, fontWeight = FontWeight.SemiBold)
+                                Text(song.title, fontSize = 12.sp, color = Color(0xFF94A3B8))
+                            }
+                        }
+                    }
+
+                    // Add to Favorites / Library
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 3.dp)
+                            .clickable {
+                                coroutineScope.launch {
+                                    dao.insertLikedSong(
+                                        LikedSongEntity(
+                                            id = song.id,
+                                            title = song.title,
+                                            artist = song.artist,
+                                            audioUrl = song.audioUrl,
+                                            artworkUrl = song.artworkUrl,
+                                            duration = song.durationFormatted
+                                        )
+                                    )
+                                    Toast.makeText(context, "Added to Liked Songs", Toast.LENGTH_SHORT).show()
+                                }
+                                selectedTrackForOptions = null
+                            },
+                        colors = CardDefaults.cardColors(containerColor = Color(0xFF141C24)),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(14.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text("⊞", fontSize = 18.sp, color = Color.White)
+                            Spacer(modifier = Modifier.width(14.dp))
+                            Text("Add to library", fontSize = 14.sp, color = Color.White, fontWeight = FontWeight.SemiBold)
+                        }
+                    }
+
+                    // Download Track
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 3.dp)
+                            .clickable {
+                                triggerDownload(song)
+                                selectedTrackForOptions = null
+                            },
+                        colors = CardDefaults.cardColors(containerColor = Color(0xFF141C24)),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(14.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text("⬇", fontSize = 18.sp, color = Color.White)
+                            Spacer(modifier = Modifier.width(14.dp))
+                            Text("Download", fontSize = 14.sp, color = Color.White, fontWeight = FontWeight.SemiBold)
+                        }
+                    }
+
+                    // Details
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 3.dp)
+                            .clickable {
+                                Toast.makeText(context, "${song.title} by ${song.artist}", Toast.LENGTH_LONG).show()
+                                selectedTrackForOptions = null
+                            },
+                        colors = CardDefaults.cardColors(containerColor = Color(0xFF141C24)),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(14.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text("ⓘ", fontSize = 18.sp, color = Color.White)
+                            Spacer(modifier = Modifier.width(14.dp))
+                            Column {
+                                Text("Details", fontSize = 14.sp, color = Color.White, fontWeight = FontWeight.SemiBold)
+                                Text("View track format and stream info", fontSize = 12.sp, color = Color(0xFF94A3B8))
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // =========================================================================
+    // DIALOGS: Sleep Timer, Add Playlist, New Playlist, Queue
+    // =========================================================================
+    if (showSleepTimerDialog) {
+        AlertDialog(
+            onDismissRequest = { showSleepTimerDialog = false },
+            title = { Text(text = "Sleep Timer", color = Color.White, fontWeight = FontWeight.Bold) },
+            text = {
+                Column {
+                    listOf("15 Minutes" to 15, "30 Minutes" to 30, "60 Minutes" to 60).forEach { (label, mins) ->
+                        Card(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 4.dp)
+                                .clickable {
+                                    startSleepTimer(mins)
+                                    showSleepTimerDialog = false
+                                },
+                            colors = CardDefaults.cardColors(containerColor = Color(0xFF1E2631)),
+                            shape = RoundedCornerShape(8.dp)
+                        ) {
+                            Text(label, color = Color.White, fontSize = 15.sp, modifier = Modifier.padding(14.dp))
+                        }
+                    }
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 4.dp)
+                            .clickable {
+                                cancelSleepTimer()
+                                stopAfterCurrentTrack = true
+                                showSleepTimerDialog = false
+                            },
+                            colors = CardDefaults.cardColors(containerColor = Color(0xFF1E2631)),
+                            shape = RoundedCornerShape(8.dp)
+                    ) {
+                        Text("End of Current Track", color = Color.White, fontSize = 15.sp, modifier = Modifier.padding(14.dp))
+                    }
+                    if (sleepTimerRemainingSeconds > 0L || stopAfterCurrentTrack) {
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Card(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 4.dp)
+                                .clickable {
+                                    cancelSleepTimer()
+                                    showSleepTimerDialog = false
+                                },
+                            colors = CardDefaults.cardColors(containerColor = Color(0xFF33161F)),
+                            shape = RoundedCornerShape(8.dp)
+                        ) {
+                            Text("Turn Off Timer", color = Color(0xFFFF5252), fontSize = 15.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(14.dp))
                         }
                     }
                 }
             },
             confirmButton = {},
             dismissButton = {
-                TextButton(onClick = { showQueueDialog = false }) {
+                TextButton(onClick = { showSleepTimerDialog = false }) {
                     Text("Close", color = Color(0xFF94A3B8))
                 }
             },
-            containerColor = Color(0xFF1E1E2D),
+            containerColor = Color(0xFF161F29),
             shape = RoundedCornerShape(16.dp)
         )
     }
 
-    // --- Add to Playlist Dialog ---
     if (songToAddToPlaylist != null) {
         AlertDialog(
             onDismissRequest = { songToAddToPlaylist = null },
             title = { Text("Add to Playlist", color = Color.White, fontWeight = FontWeight.Bold) },
             text = {
                 Column {
-                    Text(
-                        text = songToAddToPlaylist?.title ?: "",
-                        color = Color(0xFF94A3B8),
-                        fontSize = 13.sp,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.padding(bottom = 12.dp)
-                    )
-
                     Button(
                         onClick = { showCreatePlaylistDialog = true },
                         colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
@@ -952,65 +1210,35 @@ fun SonoraPlayerScreen() {
                     ) {
                         Text("+ Create New Playlist", fontWeight = FontWeight.Bold)
                     }
-
-                    if (allPlaylists.isEmpty()) {
-                        Text(
-                            text = "No playlists created yet. Tap above to create one.",
-                            color = Color.Gray,
-                            fontSize = 13.sp,
-                            modifier = Modifier.padding(vertical = 8.dp)
-                        )
-                    } else {
-                        Text(
-                            text = "Select an existing playlist:",
-                            color = Color.White,
-                            fontSize = 14.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            modifier = Modifier.padding(vertical = 4.dp)
-                        )
-                        LazyColumn(modifier = Modifier.height(200.dp)) {
-                            items(allPlaylists) { playlist ->
-                                Card(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(vertical = 4.dp)
-                                        .clickable {
-                                            val song = songToAddToPlaylist
-                                            if (song != null) {
-                                                coroutineScope.launch {
-                                                    dao.addSongToPlaylist(
-                                                        PlaylistSongEntity(
-                                                            playlistId = playlist.id,
-                                                            songId = song.id,
-                                                            title = song.title,
-                                                            artist = song.artist,
-                                                            audioUrl = song.audioUrl,
-                                                            artworkUrl = song.artworkUrl,
-                                                            duration = song.durationFormatted
-                                                        )
+                    LazyColumn(modifier = Modifier.height(200.dp)) {
+                        items(allPlaylists) { playlist ->
+                            Card(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 4.dp)
+                                    .clickable {
+                                        val song = songToAddToPlaylist
+                                        if (song != null) {
+                                            coroutineScope.launch {
+                                                dao.addSongToPlaylist(
+                                                    PlaylistSongEntity(
+                                                        playlistId = playlist.id,
+                                                        songId = song.id,
+                                                        title = song.title,
+                                                        artist = song.artist,
+                                                        audioUrl = song.audioUrl,
+                                                        artworkUrl = song.artworkUrl,
+                                                        duration = song.durationFormatted
                                                     )
-                                                }
+                                                )
                                             }
-                                            songToAddToPlaylist = null
-                                        },
-                                    colors = CardDefaults.cardColors(containerColor = Color(0xFF1E1E2D)),
-                                    shape = RoundedCornerShape(8.dp)
-                                ) {
-                                    Row(
-                                        modifier = Modifier.fillMaxWidth().padding(12.dp),
-                                        verticalAlignment = Alignment.CenterVertically
-                                    ) {
-                                        Text("📁", fontSize = 16.sp)
-                                        Spacer(modifier = Modifier.width(10.dp))
-                                        Text(
-                                            text = playlist.name,
-                                            color = Color.White,
-                                            fontSize = 14.sp,
-                                            fontWeight = FontWeight.Medium,
-                                            modifier = Modifier.weight(1f)
-                                        )
-                                    }
-                                }
+                                        }
+                                        songToAddToPlaylist = null
+                                    },
+                                colors = CardDefaults.cardColors(containerColor = Color(0xFF1E2631)),
+                                shape = RoundedCornerShape(8.dp)
+                            ) {
+                                Text(playlist.name, color = Color.White, modifier = Modifier.padding(12.dp))
                             }
                         }
                     }
@@ -1022,12 +1250,11 @@ fun SonoraPlayerScreen() {
                     Text("Cancel", color = Color(0xFF94A3B8))
                 }
             },
-            containerColor = Color(0xFF161622),
+            containerColor = Color(0xFF161F29),
             shape = RoundedCornerShape(16.dp)
         )
     }
 
-    // --- Create Playlist Dialog ---
     if (showCreatePlaylistDialog) {
         AlertDialog(
             onDismissRequest = {
@@ -1036,15 +1263,13 @@ fun SonoraPlayerScreen() {
             },
             title = { Text("New Playlist", color = Color.White, fontWeight = FontWeight.Bold) },
             text = {
-                Column {
-                    OutlinedTextField(
-                        value = newPlaylistName,
-                        onValueChange = { newPlaylistName = it },
-                        label = { Text("Playlist Name") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                }
+                OutlinedTextField(
+                    value = newPlaylistName,
+                    onValueChange = { newPlaylistName = it },
+                    label = { Text("Playlist Name") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
             },
             confirmButton = {
                 Button(
@@ -1071,892 +1296,522 @@ fun SonoraPlayerScreen() {
                             newPlaylistName = ""
                             showCreatePlaylistDialog = false
                         }
-                    },
-                    enabled = newPlaylistName.isNotBlank()
-                ) {
-                    Text("Create")
-                }
+                    }
+                ) { Text("Create") }
             },
             dismissButton = {
                 TextButton(onClick = {
                     showCreatePlaylistDialog = false
                     newPlaylistName = ""
-                }) {
-                    Text("Cancel", color = Color(0xFF94A3B8))
-                }
+                }) { Text("Cancel", color = Color(0xFF94A3B8)) }
             },
-            containerColor = Color(0xFF161622),
+            containerColor = Color(0xFF161F29),
             shape = RoundedCornerShape(16.dp)
         )
     }
 
-    // --- Sleep Timer Dialog ---
-    if (showSleepTimerDialog) {
+    if (showQueueDialog) {
         AlertDialog(
-            onDismissRequest = { showSleepTimerDialog = false },
-            title = { Text(text = "Sleep Timer", color = Color.White, fontWeight = FontWeight.Bold) },
+            onDismissRequest = { showQueueDialog = false },
+            title = {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Up Next Queue", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("Radio", color = Color(0xFF94A3B8), fontSize = 11.sp, modifier = Modifier.padding(end = 4.dp))
+                        Switch(
+                            checked = endlessRadioEnabled,
+                            onCheckedChange = { endlessRadioEnabled = it },
+                            colors = SwitchDefaults.colors(
+                                checkedThumbColor = Color.White,
+                                checkedTrackColor = MaterialTheme.colorScheme.primary
+                            )
+                        )
+                    }
+                }
+            },
             text = {
-                Column {
-                    val isTimerActive = sleepTimerRemainingSeconds > 0L || stopAfterCurrentTrack
-                    if (isTimerActive) {
-                        val statusText = if (stopAfterCurrentTrack) {
-                            "Stopping after current track"
-                        } else {
-                            "Stopping in ${formatTime(sleepTimerRemainingSeconds * 1000)}"
-                        }
-                        Text(
-                            text = "Status: $statusText",
-                            color = MaterialTheme.colorScheme.primary,
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            modifier = Modifier.padding(bottom = 12.dp)
-                        )
-                    }
-
-                    val minuteOptions = listOf(
-                        "15 Minutes" to 15,
-                        "30 Minutes" to 30,
-                        "60 Minutes" to 60
-                    )
-
-                    minuteOptions.forEach { (label, mins) ->
+                LazyColumn(modifier = Modifier.fillMaxWidth().height(360.dp)) {
+                    itemsIndexed(queueList) { index, track ->
+                        val isCurrent = index == currentTrackIndex
                         Card(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .padding(vertical = 4.dp)
-                                .clickable {
-                                    startSleepTimer(mins)
-                                    showSleepTimerDialog = false
-                                },
-                            colors = CardDefaults.cardColors(containerColor = Color(0xFF1E1E2D)),
+                                .padding(vertical = 3.dp)
+                                .clickable { controller?.seekToDefaultPosition(index) },
+                            colors = CardDefaults.cardColors(
+                                containerColor = if (isCurrent) Color(0xFF263242) else Color(0xFF141C24)
+                            ),
                             shape = RoundedCornerShape(8.dp)
                         ) {
-                            Text(
-                                text = label,
-                                color = Color.White,
-                                fontSize = 15.sp,
-                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)
-                            )
-                        }
-                    }
-
-                    Card(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 4.dp)
-                            .clickable {
-                                cancelSleepTimer()
-                                stopAfterCurrentTrack = true
-                                showSleepTimerDialog = false
-                            },
-                        colors = CardDefaults.cardColors(containerColor = Color(0xFF1E1E2D)),
-                        shape = RoundedCornerShape(8.dp)
-                    ) {
-                        Text(
-                            text = "End of Current Track",
-                            color = Color.White,
-                            fontSize = 15.sp,
-                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)
-                        )
-                    }
-
-                    if (isTimerActive) {
-                        Spacer(modifier = Modifier.height(6.dp))
-                        Card(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(vertical = 4.dp)
-                                .clickable {
-                                    cancelSleepTimer()
-                                    showSleepTimerDialog = false
-                                },
-                            colors = CardDefaults.cardColors(containerColor = Color(0xFF33161F)),
-                            shape = RoundedCornerShape(8.dp)
-                        ) {
-                            Text(
-                                text = "Turn Off Timer",
-                                color = Color(0xFFFF5252),
-                                fontSize = 15.sp,
-                                fontWeight = FontWeight.Bold,
-                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)
-                            )
+                            Row(
+                                modifier = Modifier.fillMaxWidth().padding(8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = if (isCurrent) "▶" else "${index + 1}",
+                                    color = if (isCurrent) Color(0xFFD3E2F8) else Color(0xFF64748B),
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier.width(24.dp)
+                                )
+                                AsyncImage(
+                                    model = track.artworkUrl,
+                                    contentDescription = track.title,
+                                    modifier = Modifier.size(40.dp).clip(RoundedCornerShape(6.dp)),
+                                    contentScale = ContentScale.Crop
+                                )
+                                Spacer(modifier = Modifier.width(10.dp))
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = track.title,
+                                        fontWeight = if (isCurrent) FontWeight.Bold else FontWeight.SemiBold,
+                                        fontSize = 14.sp,
+                                        color = Color.White,
+                                        maxLines = 1
+                                    )
+                                    Text(track.artist, color = Color(0xFF94A3B8), fontSize = 12.sp, maxLines = 1)
+                                }
+                            }
                         }
                     }
                 }
             },
             confirmButton = {},
             dismissButton = {
-                TextButton(onClick = { showSleepTimerDialog = false }) {
-                    Text("Close", color = Color(0xFF94A3B8))
-                }
+                TextButton(onClick = { showQueueDialog = false }) { Text("Close", color = Color(0xFF94A3B8)) }
             },
-            containerColor = Color(0xFF161622),
+            containerColor = Color(0xFF161F29),
             shape = RoundedCornerShape(16.dp)
         )
     }
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(top = 16.dp, start = 16.dp, end = 16.dp, bottom = 8.dp)
-    ) {
-        // App Header
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(bottom = 8.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(
-                text = "Sonora",
-                fontSize = 24.sp,
-                fontWeight = FontWeight.Bold,
-                color = Color.White
-            )
-
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier
-                    .clip(RoundedCornerShape(8.dp))
-                    .background(if (sleepTimerRemainingSeconds > 0L || stopAfterCurrentTrack) Color(0xFF1E1E2D) else Color.Transparent)
-                    .clickable { showSleepTimerDialog = true }
-                    .padding(horizontal = 8.dp, vertical = 4.dp)
-            ) {
-                Text(text = "🌙", fontSize = 15.sp)
-                Spacer(modifier = Modifier.width(5.dp))
-                Text(
-                    text = when {
-                        sleepTimerRemainingSeconds > 0L -> formatTime(sleepTimerRemainingSeconds * 1000)
-                        stopAfterCurrentTrack -> "Track End"
-                        else -> "Timer"
-                    },
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = if (sleepTimerRemainingSeconds > 0L || stopAfterCurrentTrack) MaterialTheme.colorScheme.primary else Color(0xFF94A3B8)
-                )
-            }
-        }
-
-        // Navigation Tabs (Explore, Liked, Playlists, Downloads)
-        TabRow(
-            selectedTabIndex = selectedTab,
-            containerColor = Color.Transparent,
-            contentColor = MaterialTheme.colorScheme.primary,
-            modifier = Modifier.padding(bottom = 12.dp)
-        ) {
-            Tab(
-                selected = selectedTab == 0,
-                onClick = { selectedTab = 0; viewingPlaylist = null },
-                text = { Text("Explore", fontWeight = if (selectedTab == 0) FontWeight.Bold else FontWeight.Normal) }
-            )
-            Tab(
-                selected = selectedTab == 1,
-                onClick = { selectedTab = 1; viewingPlaylist = null },
-                text = { Text("Liked (${likedSongs.size})", fontWeight = if (selectedTab == 1) FontWeight.Bold else FontWeight.Normal) }
-            )
-            Tab(
-                selected = selectedTab == 2,
-                onClick = { selectedTab = 2 },
-                text = { Text("Playlists (${allPlaylists.size})", fontWeight = if (selectedTab == 2) FontWeight.Bold else FontWeight.Normal) }
-            )
-            Tab(
-                selected = selectedTab == 3,
-                onClick = { selectedTab = 3; viewingPlaylist = null },
-                text = { Text("Offline (${downloadedSongs.size})", fontWeight = if (selectedTab == 3) FontWeight.Bold else FontWeight.Normal) }
-            )
-        }
-
-        // --- Tab 0: Explore, Discovery Chips & Speed Dial ---
-        if (selectedTab == 0) {
-            // Search Bar Row
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                OutlinedTextField(
-                    value = searchQuery,
-                    onValueChange = { searchQuery = it },
-                    label = { Text("Search songs or artists...") },
-                    singleLine = true,
-                    modifier = Modifier.weight(1f)
-                )
-
-                Spacer(modifier = Modifier.width(8.dp))
-
-                Button(
-                    onClick = { executeSearch(searchQuery) },
-                    enabled = !isSearching && searchQuery.isNotBlank()
-                ) {
-                    Text("Search")
-                }
-            }
-
-            Spacer(modifier = Modifier.height(10.dp))
-
-            // Dynamic Category Chips Row (Speed Dial Selector)
-            LazyRow(
-                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                items(DiscoveryCategoryList) { category ->
-                    val isSelected = selectedCategory == category
-                    Box(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(20.dp))
-                            .background(if (isSelected) MaterialTheme.colorScheme.primary else Color(0xFF161622))
-                            .border(
-                                width = 1.dp,
-                                color = if (isSelected) MaterialTheme.colorScheme.primary else Color(0xFF2E2E42),
-                                shape = RoundedCornerShape(20.dp)
-                            )
-                            .clickable {
-                                selectedCategory = category
-                                searchQuery = "" // Clear search to reveal speed dial
-                            }
-                            .padding(horizontal = 14.dp, vertical = 7.dp)
-                    ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text(text = category.icon, fontSize = 13.sp)
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text(
-                                text = category.label,
-                                color = Color.White,
-                                fontSize = 13.sp,
-                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
-                            )
-                        }
-                    }
-                }
-            }
-
-            Spacer(modifier = Modifier.height(8.dp))
-
+    // =========================================================================
+    // MAIN APPLICATION SCAFFOLD
+    // =========================================================================
+    Box(modifier = Modifier.fillMaxSize().background(Color(0xFF070B10))) {
+        Column(modifier = Modifier.fillMaxSize()) {
+            // Main Screen Content based on Selected Tab
             Box(
                 modifier = Modifier
                     .weight(1f)
                     .fillMaxWidth()
             ) {
-                if (isSearching) {
-                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                        CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
-                    }
-                } else if (searchQuery.isNotBlank() && searchResults.isNotEmpty()) {
-                    // Search Results List
-                    LazyColumn(modifier = Modifier.fillMaxSize()) {
-                        itemsIndexed(searchResults) { index, song ->
-                            val isDownloaded = downloadedSongs.any { it.id == song.id }
-                            val isDownloading = song.id in downloadingSongIds
-
-                            Card(
+                when (selectedNavTab) {
+                    // TAB 0: HOME / MOODS & GENRES (Image 1)
+                    0 -> {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .statusBarsPadding()
+                                .padding(horizontal = 16.dp)
+                        ) {
+                            // Header: Home Title + Profile Icons
+                            Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .padding(vertical = 4.dp)
-                                    .clickable { playQueue(searchResults, index) },
-                                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                                shape = RoundedCornerShape(10.dp)
-                            ) {
-                                Row(
-                                    modifier = Modifier.fillMaxWidth().padding(8.dp),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    AsyncImage(
-                                        model = song.artworkUrl,
-                                        contentDescription = song.title,
-                                        modifier = Modifier
-                                            .size(54.dp)
-                                            .clip(RoundedCornerShape(8.dp)),
-                                        contentScale = ContentScale.Crop
-                                    )
-
-                                    Spacer(modifier = Modifier.width(12.dp))
-
-                                    Column(modifier = Modifier.weight(1f)) {
-                                        Text(
-                                            text = song.title,
-                                            fontWeight = FontWeight.Bold,
-                                            fontSize = 15.sp,
-                                            color = Color.White,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis
-                                        )
-                                        Spacer(modifier = Modifier.height(2.dp))
-                                        Text(
-                                            text = song.artist,
-                                            color = Color(0xFF94A3B8),
-                                            fontSize = 13.sp,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis
-                                        )
-                                    }
-
-                                    IconButton(
-                                        onClick = { triggerDownload(song) },
-                                        enabled = !isDownloaded && !isDownloading
-                                    ) {
-                                        when {
-                                            isDownloading -> CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp, color = MaterialTheme.colorScheme.primary)
-                                            isDownloaded -> Text("✓", color = Color(0xFF4CAF50), fontSize = 16.sp, fontWeight = FontWeight.Bold)
-                                            else -> Text("⬇", color = Color(0xFF94A3B8), fontSize = 16.sp)
-                                        }
-                                    }
-
-                                    IconButton(onClick = { songToAddToPlaylist = song }) {
-                                        Text("+", color = MaterialTheme.colorScheme.primary, fontSize = 22.sp, fontWeight = FontWeight.Bold)
-                                    }
-                                }
-                            }
-                        }
-                    }
-                } else {
-                    // Home Discovery & Speed Dial View
-                    LazyColumn(modifier = Modifier.fillMaxSize()) {
-                        // Section 1: Recent Searches (if any)
-                        if (recentSearches.isNotEmpty()) {
-                            item {
-                                Row(
-                                    modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Text(
-                                        text = "Recent Searches",
-                                        fontSize = 13.sp,
-                                        fontWeight = FontWeight.SemiBold,
-                                        color = Color(0xFF94A3B8)
-                                    )
-                                    Text(
-                                        text = "Clear All",
-                                        fontSize = 11.sp,
-                                        color = MaterialTheme.colorScheme.primary,
-                                        modifier = Modifier.clickable {
-                                            coroutineScope.launch { dao.clearSearchHistory() }
-                                        }
-                                    )
-                                }
-                            }
-
-                            // Show top 3 recent searches horizontally
-                            item {
-                                LazyRow(
-                                    modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp),
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                                ) {
-                                    items(recentSearches.take(4)) { historyItem ->
-                                        Box(
-                                            modifier = Modifier
-                                                .clip(RoundedCornerShape(12.dp))
-                                                .background(Color(0xFF161622))
-                                                .clickable { executeSearch(historyItem.query) }
-                                                .padding(horizontal = 12.dp, vertical = 8.dp)
-                                        ) {
-                                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                                Text("🕒", fontSize = 11.sp)
-                                                Spacer(modifier = Modifier.width(6.dp))
-                                                Text(
-                                                    text = historyItem.query,
-                                                    color = Color.White,
-                                                    fontSize = 13.sp,
-                                                    maxLines = 1
-                                                )
-                                                Spacer(modifier = Modifier.width(6.dp))
-                                                Text(
-                                                    text = "✕",
-                                                    color = Color(0xFF94A3B8),
-                                                    fontSize = 11.sp,
-                                                    modifier = Modifier.clickable {
-                                                        coroutineScope.launch {
-                                                            dao.deleteSearchQuery(historyItem.query)
-                                                        }
-                                                    }
-                                                )
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        // Section 2: Quick Picks / Speed Dial Feed
-                        item {
-                            Row(
-                                modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
+                                    .padding(vertical = 12.dp),
                                 horizontalArrangement = Arrangement.SpaceBetween,
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Column {
-                                    Text(
-                                        text = "Quick Picks",
-                                        fontSize = 18.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = Color.White
-                                    )
-                                    Text(
-                                        text = "${selectedCategory.icon} ${selectedCategory.label} playlist",
-                                        fontSize = 12.sp,
-                                        color = Color(0xFF94A3B8)
-                                    )
-                                }
-
-                                if (speedDialSongs.isNotEmpty()) {
-                                    Text(
-                                        text = "Play All ▶",
-                                        fontSize = 13.sp,
-                                        color = MaterialTheme.colorScheme.primary,
-                                        fontWeight = FontWeight.Bold,
-                                        modifier = Modifier.clickable { playQueue(speedDialSongs, 0) }
-                                    )
+                                Text(
+                                    text = "Home",
+                                    fontSize = 26.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color.White
+                                )
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    IconButton(onClick = { showSleepTimerDialog = true }) {
+                                        Text("🌙", fontSize = 18.sp)
+                                    }
+                                    IconButton(onClick = { showQueueDialog = true }) {
+                                        Text("📈", fontSize = 18.sp)
+                                    }
+                                    IconButton(onClick = {}) {
+                                        Text("👤", fontSize = 18.sp)
+                                    }
                                 }
                             }
-                        }
 
-                        if (isSpeedDialLoading) {
-                            item {
-                                Box(
-                                    modifier = Modifier.fillMaxWidth().height(200.dp),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
-                                }
-                            }
-                        } else {
-                            itemsIndexed(speedDialSongs) { index, song ->
-                                val isDownloaded = downloadedSongs.any { it.id == song.id }
-                                val isDownloading = song.id in downloadingSongIds
-
-                                Card(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(vertical = 4.dp)
-                                        .clickable { playQueue(speedDialSongs, index) },
-                                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                                    shape = RoundedCornerShape(10.dp)
-                                ) {
+                            LazyColumn(modifier = Modifier.fillMaxSize()) {
+                                // Section: Mood and Genres (Image 1)
+                                item {
                                     Row(
-                                        modifier = Modifier.fillMaxWidth().padding(8.dp),
+                                        modifier = Modifier.fillMaxWidth().padding(vertical = 10.dp),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
                                         verticalAlignment = Alignment.CenterVertically
                                     ) {
-                                        AsyncImage(
-                                            model = song.artworkUrl,
-                                            contentDescription = song.title,
-                                            modifier = Modifier
-                                                .size(52.dp)
-                                                .clip(RoundedCornerShape(8.dp)),
-                                            contentScale = ContentScale.Crop
+                                        Text(
+                                            text = "Mood and Genres",
+                                            fontSize = 20.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = Color.White
                                         )
+                                        Text("→", fontSize = 20.sp, color = Color.White)
+                                    }
+                                }
 
-                                        Spacer(modifier = Modifier.width(12.dp))
+                                // 2-Column Mood Grid
+                                item {
+                                    Column(modifier = Modifier.fillMaxWidth()) {
+                                        for (i in DiscoveryCategoryList.indices step 2) {
+                                            Row(
+                                                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                            ) {
+                                                val firstCat = DiscoveryCategoryList[i]
+                                                Card(
+                                                    modifier = Modifier
+                                                        .weight(1f)
+                                                        .height(52.dp)
+                                                        .clickable { selectedMoodCategory = firstCat },
+                                                    colors = CardDefaults.cardColors(
+                                                        containerColor = if (selectedMoodCategory == firstCat) Color(0xFF2A3644) else Color(0xFF141C24)
+                                                    ),
+                                                    shape = RoundedCornerShape(8.dp)
+                                                ) {
+                                                    Box(modifier = Modifier.fillMaxSize().padding(horizontal = 14.dp), contentAlignment = Alignment.CenterStart) {
+                                                        Text(firstCat.label, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                                                    }
+                                                }
 
-                                        Column(modifier = Modifier.weight(1f)) {
-                                            Text(
-                                                text = song.title,
-                                                fontWeight = FontWeight.Bold,
-                                                fontSize = 15.sp,
-                                                color = Color.White,
-                                                maxLines = 1,
-                                                overflow = TextOverflow.Ellipsis
-                                            )
-                                            Spacer(modifier = Modifier.height(2.dp))
-                                            Text(
-                                                text = song.artist,
-                                                color = Color(0xFF94A3B8),
-                                                fontSize = 13.sp,
-                                                maxLines = 1,
-                                                overflow = TextOverflow.Ellipsis
-                                            )
-                                        }
-
-                                        IconButton(
-                                            onClick = { triggerDownload(song) },
-                                            enabled = !isDownloaded && !isDownloading
-                                        ) {
-                                            when {
-                                                isDownloading -> CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp, color = MaterialTheme.colorScheme.primary)
-                                                isDownloaded -> Text("✓", color = Color(0xFF4CAF50), fontSize = 16.sp, fontWeight = FontWeight.Bold)
-                                                else -> Text("⬇", color = Color(0xFF94A3B8), fontSize = 16.sp)
+                                                if (i + 1 < DiscoveryCategoryList.size) {
+                                                    val secondCat = DiscoveryCategoryList[i + 1]
+                                                    Card(
+                                                        modifier = Modifier
+                                                            .weight(1f)
+                                                            .height(52.dp)
+                                                            .clickable { selectedMoodCategory = secondCat },
+                                                        colors = CardDefaults.cardColors(
+                                                            containerColor = if (selectedMoodCategory == secondCat) Color(0xFF2A3644) else Color(0xFF141C24)
+                                                        ),
+                                                        shape = RoundedCornerShape(8.dp)
+                                                    ) {
+                                                        Box(modifier = Modifier.fillMaxSize().padding(horizontal = 14.dp), contentAlignment = Alignment.CenterStart) {
+                                                            Text(secondCat.label, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                                                        }
+                                                    }
+                                                }
                                             }
                                         }
-
-                                        IconButton(onClick = { songToAddToPlaylist = song }) {
-                                            Text("+", color = MaterialTheme.colorScheme.primary, fontSize = 22.sp, fontWeight = FontWeight.Bold)
-                                        }
                                     }
                                 }
-                            }
-                        }
-                    }
-                }
-            }
-        }
 
-        // --- Tab 1: Liked Songs ---
-        if (selectedTab == 1) {
-            Box(
-                modifier = Modifier
-                    .weight(1f)
-                    .fillMaxWidth()
-            ) {
-                if (likedSongs.isEmpty()) {
-                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            Text(text = "♥", fontSize = 42.sp, color = Color(0xFF262635))
-                            Spacer(modifier = Modifier.height(8.dp))
-                            Text(
-                                text = "No liked songs yet",
-                                color = Color(0xFF94A3B8),
-                                fontSize = 15.sp,
-                                fontWeight = FontWeight.SemiBold
-                            )
-                        }
-                    }
-                } else {
-                    val convertedLiked = likedSongs.map {
-                        FullTrackItem(it.id, it.title, it.artist, it.audioUrl, it.artworkUrl, it.duration)
-                    }
-                    LazyColumn(modifier = Modifier.fillMaxSize()) {
-                        itemsIndexed(convertedLiked) { index, savedSong ->
-                            val isDownloaded = downloadedSongs.any { it.id == savedSong.id }
-                            val isDownloading = savedSong.id in downloadingSongIds
-
-                            Card(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(vertical = 4.dp)
-                                    .clickable { playQueue(convertedLiked, index) },
-                                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                                shape = RoundedCornerShape(10.dp)
-                            ) {
-                                Row(
-                                    modifier = Modifier.fillMaxWidth().padding(8.dp),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    AsyncImage(
-                                        model = savedSong.artworkUrl,
-                                        contentDescription = savedSong.title,
-                                        modifier = Modifier
-                                            .size(54.dp)
-                                            .clip(RoundedCornerShape(8.dp)),
-                                        contentScale = ContentScale.Crop
-                                    )
-
-                                    Spacer(modifier = Modifier.width(12.dp))
-
-                                    Column(modifier = Modifier.weight(1f)) {
+                                // Section: Quick Picks / Heard in Shorts
+                                item {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth().padding(top = 22.dp, bottom = 8.dp),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
                                         Text(
-                                            text = savedSong.title,
+                                            text = "Heard in Shorts",
+                                            fontSize = 20.sp,
                                             fontWeight = FontWeight.Bold,
-                                            fontSize = 15.sp,
-                                            color = Color.White,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis
+                                            color = Color.White
                                         )
-                                        Spacer(modifier = Modifier.height(2.dp))
-                                        Text(
-                                            text = savedSong.artist,
-                                            color = Color(0xFF94A3B8),
-                                            fontSize = 13.sp,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis
-                                        )
-                                    }
-
-                                    IconButton(
-                                        onClick = { triggerDownload(savedSong) },
-                                        enabled = !isDownloaded && !isDownloading
-                                    ) {
-                                        when {
-                                            isDownloading -> CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp, color = MaterialTheme.colorScheme.primary)
-                                            isDownloaded -> Text("✓", color = Color(0xFF4CAF50), fontSize = 16.sp, fontWeight = FontWeight.Bold)
-                                            else -> Text("⬇", color = Color(0xFF94A3B8), fontSize = 16.sp)
+                                        Card(
+                                            shape = RoundedCornerShape(16.dp),
+                                            colors = CardDefaults.cardColors(containerColor = Color(0xFF1A222B)),
+                                            modifier = Modifier.clickable { playQueue(moodTracks, 0) }
+                                        ) {
+                                            Text(
+                                                text = "Play all",
+                                                color = Color.White,
+                                                fontSize = 12.sp,
+                                                fontWeight = FontWeight.SemiBold,
+                                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
+                                            )
                                         }
                                     }
+                                }
 
-                                    IconButton(onClick = { songToAddToPlaylist = savedSong }) {
-                                        Text("+", color = MaterialTheme.colorScheme.primary, fontSize = 20.sp, fontWeight = FontWeight.Bold)
-                                    }
-
-                                    IconButton(
-                                        onClick = {
-                                            coroutineScope.launch { dao.deleteLikedSongById(savedSong.id) }
+                                if (isMoodLoading) {
+                                    item {
+                                        Box(modifier = Modifier.fillMaxWidth().height(120.dp), contentAlignment = Alignment.Center) {
+                                            CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
                                         }
-                                    ) {
-                                        Text("♥", color = Color(0xFFFF4081), fontSize = 18.sp)
                                     }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // --- Tab 2: Playlists Management ---
-        if (selectedTab == 2) {
-            Box(
-                modifier = Modifier
-                    .weight(1f)
-                    .fillMaxWidth()
-            ) {
-                if (viewingPlaylist != null) {
-                    val currentPlaylist = viewingPlaylist!!
-                    val convertedPlaylistTracks = activePlaylistSongs.map {
-                        FullTrackItem(it.songId, it.title, it.artist, it.audioUrl, it.artworkUrl, it.duration)
-                    }
-
-                    Column(modifier = Modifier.fillMaxSize()) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                modifier = Modifier.clickable { viewingPlaylist = null }
-                            ) {
-                                Text("←", fontSize = 20.sp, color = MaterialTheme.colorScheme.primary)
-                                Spacer(modifier = Modifier.width(8.dp))
-                                Column {
-                                    Text(text = currentPlaylist.name, fontSize = 17.sp, fontWeight = FontWeight.Bold, color = Color.White)
-                                    Text(text = "${activePlaylistSongs.size} tracks", fontSize = 12.sp, color = Color(0xFF94A3B8))
-                                }
-                            }
-
-                            Text(
-                                text = "Delete",
-                                fontSize = 13.sp,
-                                color = Color(0xFFFF5252),
-                                fontWeight = FontWeight.Bold,
-                                modifier = Modifier.clickable {
-                                    coroutineScope.launch {
-                                        dao.deletePlaylist(currentPlaylist.id)
-                                        viewingPlaylist = null
-                                    }
-                                }
-                            )
-                        }
-
-                        Spacer(modifier = Modifier.height(8.dp))
-
-                        if (activePlaylistSongs.isEmpty()) {
-                            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                                Text("This playlist is empty.\nTap '+' on any song to add it here.", color = Color.Gray, fontSize = 14.sp)
-                            }
-                        } else {
-                            LazyColumn(modifier = Modifier.fillMaxSize()) {
-                                itemsIndexed(convertedPlaylistTracks) { index, track ->
-                                    Card(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .padding(vertical = 4.dp)
-                                            .clickable { playQueue(convertedPlaylistTracks, index) },
-                                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                                        shape = RoundedCornerShape(10.dp)
-                                    ) {
+                                } else {
+                                    itemsIndexed(moodTracks) { index, song ->
                                         Row(
-                                            modifier = Modifier.fillMaxWidth().padding(8.dp),
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .padding(vertical = 6.dp)
+                                                .clickable { playQueue(moodTracks, index) },
                                             verticalAlignment = Alignment.CenterVertically
                                         ) {
                                             AsyncImage(
-                                                model = track.artworkUrl,
-                                                contentDescription = track.title,
-                                                modifier = Modifier
-                                                    .size(50.dp)
-                                                    .clip(RoundedCornerShape(8.dp)),
+                                                model = song.artworkUrl,
+                                                contentDescription = song.title,
+                                                modifier = Modifier.size(52.dp).clip(RoundedCornerShape(6.dp)),
                                                 contentScale = ContentScale.Crop
                                             )
-
                                             Spacer(modifier = Modifier.width(12.dp))
-
                                             Column(modifier = Modifier.weight(1f)) {
-                                                Text(
-                                                    text = track.title,
-                                                    fontWeight = FontWeight.Bold,
-                                                    fontSize = 15.sp,
-                                                    color = Color.White,
-                                                    maxLines = 1,
-                                                    overflow = TextOverflow.Ellipsis
-                                                )
-                                                Text(
-                                                    text = track.artist,
-                                                    color = Color(0xFF94A3B8),
-                                                    fontSize = 13.sp,
-                                                    maxLines = 1,
-                                                    overflow = TextOverflow.Ellipsis
-                                                )
+                                                Text(song.title, fontWeight = FontWeight.Bold, fontSize = 15.sp, color = Color.White, maxLines = 1)
+                                                Text(song.artist, color = Color(0xFF94A3B8), fontSize = 13.sp, maxLines = 1)
                                             }
-
-                                            IconButton(
-                                                onClick = {
-                                                    coroutineScope.launch {
-                                                        dao.removeSongFromPlaylist(currentPlaylist.id, track.id)
-                                                    }
-                                                }
-                                            ) {
-                                                Text("✕", color = Color(0xFF94A3B8), fontSize = 14.sp)
+                                            IconButton(onClick = { selectedTrackForOptions = song }) {
+                                                Text("⋮", color = Color.White, fontSize = 20.sp)
                                             }
                                         }
                                     }
                                 }
+
+                                // Bottom padding so miniplayer does not block items
+                                item { Spacer(modifier = Modifier.height(84.dp)) }
                             }
                         }
                     }
-                } else {
-                    Column(modifier = Modifier.fillMaxSize()) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(text = "Your Playlists", fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFF94A3B8))
-                            Button(
-                                onClick = { showCreatePlaylistDialog = true },
-                                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
-                                shape = RoundedCornerShape(8.dp)
-                            ) {
-                                Text("+ New Playlist", fontSize = 13.sp, fontWeight = FontWeight.Bold)
-                            }
-                        }
 
-                        Spacer(modifier = Modifier.height(8.dp))
-
-                        if (allPlaylists.isEmpty()) {
-                            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                    Text("📁", fontSize = 42.sp)
-                                    Spacer(modifier = Modifier.height(8.dp))
-                                    Text("No custom playlists yet", color = Color(0xFF94A3B8), fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
-                                }
-                            }
-                        } else {
-                            LazyColumn(modifier = Modifier.fillMaxSize()) {
-                                items(allPlaylists) { playlist ->
-                                    Card(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .padding(vertical = 5.dp)
-                                            .clickable { viewingPlaylist = playlist },
-                                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                                        shape = RoundedCornerShape(10.dp)
-                                    ) {
-                                        Row(
-                                            modifier = Modifier.fillMaxWidth().padding(14.dp),
-                                            verticalAlignment = Alignment.CenterVertically
-                                        ) {
-                                            Box(
-                                                modifier = Modifier
-                                                    .size(46.dp)
-                                                    .clip(RoundedCornerShape(8.dp))
-                                                    .background(Color(0xFF1E1E2D)),
-                                                contentAlignment = Alignment.Center
-                                            ) {
-                                                Text("🎵", fontSize = 20.sp)
-                                            }
-
-                                            Spacer(modifier = Modifier.width(14.dp))
-
-                                            Column(modifier = Modifier.weight(1f)) {
-                                                Text(text = playlist.name, fontWeight = FontWeight.Bold, fontSize = 16.sp, color = Color.White)
-                                                Text(text = "Tap to view tracks", fontSize = 12.sp, color = Color(0xFF94A3B8))
-                                            }
-
-                                            Text("›", fontSize = 22.sp, color = Color(0xFF94A3B8))
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // --- Tab 3: Offline Downloaded Tracks ---
-        if (selectedTab == 3) {
-            Box(
-                modifier = Modifier
-                    .weight(1f)
-                    .fillMaxWidth()
-            ) {
-                if (downloadedSongs.isEmpty()) {
-                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            Text(text = "⬇", fontSize = 42.sp, color = Color(0xFF262635))
-                            Spacer(modifier = Modifier.height(8.dp))
-                            Text(
-                                text = "No downloaded tracks yet",
-                                color = Color(0xFF94A3B8),
-                                fontSize = 15.sp,
-                                fontWeight = FontWeight.SemiBold
-                            )
-                            Spacer(modifier = Modifier.height(4.dp))
-                            Text(
-                                text = "Tap the '⬇' download icon on any song to save offline",
-                                color = Color.Gray,
-                                fontSize = 13.sp
-                            )
-                        }
-                    }
-                } else {
-                    val convertedDownloads = downloadedSongs.map {
-                        FullTrackItem(it.id, it.title, it.artist, it.localFilePath, it.artworkUrl, it.duration)
-                    }
-                    LazyColumn(modifier = Modifier.fillMaxSize()) {
-                        itemsIndexed(convertedDownloads) { index, downloadedSong ->
-                            Card(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(vertical = 4.dp)
-                                    .clickable { playQueue(convertedDownloads, index) },
-                                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                                shape = RoundedCornerShape(10.dp)
-                            ) {
+                    // TAB 1: SEARCH SCREEN (Image 3)
+                    1 -> {
+                        Box(modifier = Modifier.fillMaxSize().statusBarsPadding()) {
+                            Column(modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
+                                // Search Bar Row with Back Arrow and Globe
                                 Row(
-                                    modifier = Modifier.fillMaxWidth().padding(8.dp),
+                                    modifier = Modifier.fillMaxWidth().padding(vertical = 10.dp),
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
-                                    AsyncImage(
-                                        model = downloadedSong.artworkUrl,
-                                        contentDescription = downloadedSong.title,
-                                        modifier = Modifier
-                                            .size(54.dp)
-                                            .clip(RoundedCornerShape(8.dp)),
-                                        contentScale = ContentScale.Crop
+                                    IconButton(onClick = {
+                                        searchQuery = ""
+                                        selectedNavTab = 0
+                                    }) {
+                                        Text("←", color = Color.White, fontSize = 22.sp)
+                                    }
+
+                                    OutlinedTextField(
+                                        value = searchQuery,
+                                        onValueChange = { searchQuery = it },
+                                        placeholder = { Text("Search YouTube Music...", color = Color(0xFF6B7280)) },
+                                        singleLine = true,
+                                        shape = RoundedCornerShape(24.dp),
+                                        colors = OutlinedTextFieldDefaults.colors(
+                                            focusedContainerColor = Color(0xFF141C24),
+                                            unfocusedContainerColor = Color(0xFF141C24),
+                                            focusedTextColor = Color.White,
+                                            unfocusedTextColor = Color.White,
+                                            focusedBorderColor = Color.Transparent,
+                                            unfocusedBorderColor = Color.Transparent
+                                        ),
+                                        trailingIcon = {
+                                            if (searchQuery.isNotBlank()) {
+                                                Text(
+                                                    text = "✕",
+                                                    color = Color(0xFF94A3B8),
+                                                    modifier = Modifier.clickable { searchQuery = "" }
+                                                )
+                                            }
+                                        },
+                                        modifier = Modifier.weight(1f)
                                     )
 
-                                    Spacer(modifier = Modifier.width(12.dp))
-
-                                    Column(modifier = Modifier.weight(1f)) {
-                                        Text(
-                                            text = downloadedSong.title,
-                                            fontWeight = FontWeight.Bold,
-                                            fontSize = 15.sp,
-                                            color = Color.White,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis
-                                        )
-                                        Spacer(modifier = Modifier.height(2.dp))
-                                        Text(
-                                            text = downloadedSong.artist,
-                                            color = Color(0xFF94A3B8),
-                                            fontSize = 13.sp,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis
-                                        )
+                                    IconButton(onClick = { executeSearch(searchQuery) }) {
+                                        Text("🌐", fontSize = 20.sp)
                                     }
+                                }
 
-                                    IconButton(onClick = { songToAddToPlaylist = downloadedSong }) {
-                                        Text("+", color = MaterialTheme.colorScheme.primary, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                                if (isSearching) {
+                                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                        CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
                                     }
-
-                                    IconButton(
-                                        onClick = {
-                                            coroutineScope.launch {
-                                                File(downloadedSong.audioUrl).delete()
-                                                dao.deleteDownloadedSong(downloadedSong.id)
+                                } else if (searchQuery.isNotBlank() && searchResults.isNotEmpty()) {
+                                    // Search Results List
+                                    LazyColumn(modifier = Modifier.fillMaxSize()) {
+                                        itemsIndexed(searchResults) { index, song ->
+                                            Row(
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .padding(vertical = 6.dp)
+                                                    .clickable { playQueue(searchResults, index) },
+                                                verticalAlignment = Alignment.CenterVertically
+                                            ) {
+                                                AsyncImage(
+                                                    model = song.artworkUrl,
+                                                    contentDescription = song.title,
+                                                    modifier = Modifier.size(50.dp).clip(RoundedCornerShape(6.dp)),
+                                                    contentScale = ContentScale.Crop
+                                                )
+                                                Spacer(modifier = Modifier.width(12.dp))
+                                                Column(modifier = Modifier.weight(1f)) {
+                                                    Text(song.title, fontWeight = FontWeight.Bold, fontSize = 15.sp, color = Color.White, maxLines = 1)
+                                                    Text(song.artist, color = Color(0xFF94A3B8), fontSize = 13.sp, maxLines = 1)
+                                                }
+                                                IconButton(onClick = { selectedTrackForOptions = song }) {
+                                                    Text("⋮", color = Color.White, fontSize = 20.sp)
+                                                }
                                             }
                                         }
+                                        item { Spacer(modifier = Modifier.height(84.dp)) }
+                                    }
+                                } else {
+                                    // Search History List (Image 3)
+                                    LazyColumn(modifier = Modifier.fillMaxSize()) {
+                                        items(recentSearches) { historyItem ->
+                                            Row(
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .padding(vertical = 12.dp)
+                                                    .clickable { executeSearch(historyItem.query) },
+                                                verticalAlignment = Alignment.CenterVertically
+                                            ) {
+                                                Text("🕒", fontSize = 16.sp, color = Color(0xFF94A3B8))
+                                                Spacer(modifier = Modifier.width(16.dp))
+                                                Text(
+                                                    text = historyItem.query,
+                                                    color = Color.White,
+                                                    fontSize = 16.sp,
+                                                    modifier = Modifier.weight(1f),
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis
+                                                )
+                                                // Delete query
+                                                Text(
+                                                    text = "✕",
+                                                    color = Color(0xFF94A3B8),
+                                                    fontSize = 15.sp,
+                                                    modifier = Modifier
+                                                        .padding(horizontal = 10.dp)
+                                                        .clickable {
+                                                            coroutineScope.launch { dao.deleteSearchQuery(historyItem.query) }
+                                                        }
+                                                )
+                                                // Autofill into search bar
+                                                Text(
+                                                    text = "↖",
+                                                    color = Color(0xFF94A3B8),
+                                                    fontSize = 18.sp,
+                                                    modifier = Modifier.clickable { searchQuery = historyItem.query }
+                                                )
+                                            }
+                                        }
+                                        item { Spacer(modifier = Modifier.height(84.dp)) }
+                                    }
+                                }
+                            }
+
+                            // Floating Mic Button (Image 3)
+                            FloatingActionButton(
+                                onClick = { Toast.makeText(context, "Voice Search coming soon", Toast.LENGTH_SHORT).show() },
+                                containerColor = Color(0xFF384353),
+                                contentColor = Color.White,
+                                shape = RoundedCornerShape(16.dp),
+                                modifier = Modifier
+                                    .align(Alignment.BottomEnd)
+                                    .padding(end = 16.dp, bottom = 90.dp)
+                                    .size(54.dp)
+                            ) {
+                                Text("🎙", fontSize = 20.sp)
+                            }
+                        }
+                    }
+
+                    // TAB 2: LIBRARY (Liked, Playlists, Downloads)
+                    2 -> {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .statusBarsPadding()
+                                .padding(horizontal = 16.dp)
+                        ) {
+                            Text(
+                                text = "Library",
+                                fontSize = 26.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color.White,
+                                modifier = Modifier.padding(vertical = 12.dp)
+                            )
+
+                            Row(
+                                modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                listOf("Liked (${likedSongs.size})" to 0, "Playlists (${allPlaylists.size})" to 1, "Offline (${downloadedSongs.size})" to 2).forEach { (label, idx) ->
+                                    val isSubSel = selectedLibrarySubTab == idx
+                                    Card(
+                                        shape = RoundedCornerShape(16.dp),
+                                        colors = CardDefaults.cardColors(
+                                            containerColor = if (isSubSel) Color(0xFF283444) else Color(0xFF141C24)
+                                        ),
+                                        modifier = Modifier.clickable { selectedLibrarySubTab = idx }
                                     ) {
-                                        Text("🗑", color = Color(0xFFFF5252), fontSize = 16.sp)
+                                        Text(label, color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp))
+                                    }
+                                }
+                            }
+
+                            when (selectedLibrarySubTab) {
+                                0 -> {
+                                    val convertedLiked = likedSongs.map { FullTrackItem(it.id, it.title, it.artist, it.audioUrl, it.artworkUrl, it.duration) }
+                                    LazyColumn(modifier = Modifier.fillMaxSize()) {
+                                        itemsIndexed(convertedLiked) { index, savedSong ->
+                                            Row(
+                                                modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp).clickable { playQueue(convertedLiked, index) },
+                                                verticalAlignment = Alignment.CenterVertically
+                                            ) {
+                                                AsyncImage(model = savedSong.artworkUrl, contentDescription = savedSong.title, modifier = Modifier.size(50.dp).clip(RoundedCornerShape(6.dp)), contentScale = ContentScale.Crop)
+                                                Spacer(modifier = Modifier.width(12.dp))
+                                                Column(modifier = Modifier.weight(1f)) {
+                                                    Text(savedSong.title, fontWeight = FontWeight.Bold, fontSize = 15.sp, color = Color.White, maxLines = 1)
+                                                    Text(savedSong.artist, color = Color(0xFF94A3B8), fontSize = 13.sp, maxLines = 1)
+                                                }
+                                                IconButton(onClick = { selectedTrackForOptions = savedSong }) {
+                                                    Text("⋮", color = Color.White, fontSize = 20.sp)
+                                                }
+                                            }
+                                        }
+                                        item { Spacer(modifier = Modifier.height(84.dp)) }
+                                    }
+                                }
+                                1 -> {
+                                    LazyColumn(modifier = Modifier.fillMaxSize()) {
+                                        item {
+                                            Button(
+                                                onClick = { showCreatePlaylistDialog = true },
+                                                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
+                                                shape = RoundedCornerShape(8.dp),
+                                                modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp)
+                                            ) { Text("+ New Playlist") }
+                                        }
+                                        items(allPlaylists) { playlist ->
+                                            Card(
+                                                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp).clickable { viewingPlaylist = playlist },
+                                                colors = CardDefaults.cardColors(containerColor = Color(0xFF141C24))
+                                            ) {
+                                                Row(modifier = Modifier.fillMaxWidth().padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
+                                                    Text("📁", fontSize = 20.sp)
+                                                    Spacer(modifier = Modifier.width(12.dp))
+                                                    Text(playlist.name, color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                                                }
+                                            }
+                                        }
+                                        item { Spacer(modifier = Modifier.height(84.dp)) }
+                                    }
+                                }
+                                2 -> {
+                                    val convertedDownloads = downloadedSongs.map { FullTrackItem(it.id, it.title, it.artist, it.localFilePath, it.artworkUrl, it.duration) }
+                                    LazyColumn(modifier = Modifier.fillMaxSize()) {
+                                        itemsIndexed(convertedDownloads) { index, song ->
+                                            Row(
+                                                modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp).clickable { playQueue(convertedDownloads, index) },
+                                                verticalAlignment = Alignment.CenterVertically
+                                            ) {
+                                                AsyncImage(model = song.artworkUrl, contentDescription = song.title, modifier = Modifier.size(50.dp).clip(RoundedCornerShape(6.dp)), contentScale = ContentScale.Crop)
+                                                Spacer(modifier = Modifier.width(12.dp))
+                                                Column(modifier = Modifier.weight(1f)) {
+                                                    Text(song.title, fontWeight = FontWeight.Bold, fontSize = 15.sp, color = Color.White, maxLines = 1)
+                                                    Text(song.artist, color = Color(0xFF94A3B8), fontSize = 13.sp, maxLines = 1)
+                                                }
+                                                IconButton(onClick = { selectedTrackForOptions = song }) {
+                                                    Text("⋮", color = Color.White, fontSize = 20.sp)
+                                                }
+                                            }
+                                        }
+                                        item { Spacer(modifier = Modifier.height(84.dp)) }
                                     }
                                 }
                             }
@@ -1964,83 +1819,92 @@ fun SonoraPlayerScreen() {
                     }
                 }
             }
-        }
 
-        Spacer(modifier = Modifier.height(8.dp))
+            // =====================================================================
+            // FLOATING MINI PLAYER (Images 1 & 3)
+            // =====================================================================
+            if (activeSongId.isNotBlank()) {
+                val progressFraction = if (totalDuration > 0) (currentPosition.toFloat() / totalDuration.toFloat()).coerceIn(0f, 1f) else 0f
 
-        // --- Persistent Floating Player Bar ---
-        Card(
-            modifier = Modifier.fillMaxWidth(),
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
-            shape = RoundedCornerShape(16.dp)
-        ) {
-            Column(
-                modifier = Modifier.padding(12.dp),
-                horizontalAlignment = Alignment.CenterHorizontally
-            ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 4.dp)
+                        .clickable { isPlayerExpanded = true },
+                    shape = RoundedCornerShape(28.dp),
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFF131F2A))
                 ) {
-                    if (activeArtworkUrl.isNotBlank()) {
-                        AsyncImage(
-                            model = activeArtworkUrl,
-                            contentDescription = activeTitle,
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 8.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        // Artwork with overlaid Circular Progress Scrubber & Play Triangle (Image 1 & 3)
+                        Box(
                             modifier = Modifier
                                 .size(46.dp)
-                                .clip(RoundedCornerShape(8.dp)),
-                            contentScale = ContentScale.Crop
-                        )
-                        Spacer(modifier = Modifier.width(10.dp))
-                    }
-
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = activeTitle,
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 14.sp,
-                            color = Color.White,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                        Text(
-                            text = activeArtist,
-                            fontSize = 12.sp,
-                            color = Color(0xFF94A3B8),
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
-
-                    val isCurrentDownloading = activeSongId in downloadingSongIds
-                    IconButton(
-                        onClick = {
-                            if (activeSongId.isNotBlank() && !isCurrentSongDownloaded && !isCurrentDownloading) {
-                                triggerDownload(
-                                    FullTrackItem(
-                                        id = activeSongId,
-                                        title = activeTitle,
-                                        artist = activeArtist,
-                                        audioUrl = activeAudioUrl,
-                                        artworkUrl = activeArtworkUrl,
-                                        durationFormatted = activeDurationFormatted
-                                    )
+                                .clickable {
+                                    controller?.let { player ->
+                                        if (player.isPlaying) player.pause() else player.play()
+                                    }
+                                },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            CircularProgressIndicator(
+                                progress = { progressFraction },
+                                modifier = Modifier.fillMaxSize(),
+                                strokeWidth = 2.5.dp,
+                                color = Color(0xFFD3E2F8),
+                                trackColor = Color(0x33FFFFFF)
+                            )
+                            AsyncImage(
+                                model = activeArtworkUrl,
+                                contentDescription = activeTitle,
+                                modifier = Modifier.size(36.dp).clip(CircleShape),
+                                contentScale = ContentScale.Crop
+                            )
+                            // Play/Pause icon badge
+                            Box(
+                                modifier = Modifier
+                                    .size(36.dp)
+                                    .clip(CircleShape)
+                                    .background(Color(0x55000000)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = if (isPlaying) "⏸" else "▶",
+                                    fontSize = 11.sp,
+                                    color = Color.White
                                 )
                             }
-                        },
-                        enabled = activeSongId.isNotBlank() && !isCurrentSongDownloaded && !isCurrentDownloading
-                    ) {
-                        when {
-                            isCurrentDownloading -> CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp, color = MaterialTheme.colorScheme.primary)
-                            isCurrentSongDownloaded -> Text("✓", color = Color(0xFF4CAF50), fontSize = 16.sp, fontWeight = FontWeight.Bold)
-                            else -> Text("⬇", color = Color(0xFF94A3B8), fontSize = 16.sp)
                         }
-                    }
 
-                    IconButton(
-                        onClick = {
-                            if (activeSongId.isNotBlank()) {
-                                songToAddToPlaylist = FullTrackItem(
+                        Spacer(modifier = Modifier.width(10.dp))
+
+                        // Title and Artist
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = activeTitle,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 14.sp,
+                                color = Color.White,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Text(
+                                text = activeArtist,
+                                fontSize = 12.sp,
+                                color = Color(0xFF94A3B8),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+
+                        // Right Profile/Details button
+                        IconButton(
+                            onClick = {
+                                selectedTrackForOptions = FullTrackItem(
                                     id = activeSongId,
                                     title = activeTitle,
                                     artist = activeArtist,
@@ -2049,15 +1913,13 @@ fun SonoraPlayerScreen() {
                                     durationFormatted = activeDurationFormatted
                                 )
                             }
-                        },
-                        enabled = activeSongId.isNotBlank()
-                    ) {
-                        Text("+", fontSize = 22.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
-                    }
+                        ) {
+                            Text("👤", fontSize = 16.sp)
+                        }
 
-                    IconButton(
-                        onClick = {
-                            if (activeSongId.isNotBlank()) {
+                        // Right Heart/Like button
+                        IconButton(
+                            onClick = {
                                 coroutineScope.launch {
                                     if (isCurrentSongLiked) {
                                         dao.deleteLikedSongById(activeSongId)
@@ -2075,109 +1937,408 @@ fun SonoraPlayerScreen() {
                                     }
                                 }
                             }
-                        },
-                        enabled = activeSongId.isNotBlank()
+                        ) {
+                            Text(
+                                text = if (isCurrentSongLiked) "♥" else "♡",
+                                fontSize = 19.sp,
+                                color = if (isCurrentSongLiked) Color(0xFFFF4081) else Color.White
+                            )
+                        }
+                    }
+                }
+            }
+
+            // =====================================================================
+            // BOTTOM NAVIGATION BAR (Home, Search, Library)
+            // =====================================================================
+            NavigationBar(
+                containerColor = Color(0xFF0A0F14),
+                contentColor = Color.White,
+                modifier = Modifier.height(64.dp)
+            ) {
+                NavigationBarItem(
+                    selected = selectedNavTab == 0,
+                    onClick = { selectedNavTab = 0 },
+                    icon = { Text("🏠", fontSize = 18.sp) },
+                    label = { Text("Home", fontSize = 11.sp) },
+                    colors = NavigationBarItemDefaults.colors(
+                        selectedIconColor = Color.White,
+                        selectedTextColor = Color.White,
+                        indicatorColor = Color(0xFF283444)
+                    )
+                )
+                NavigationBarItem(
+                    selected = selectedNavTab == 1,
+                    onClick = { selectedNavTab = 1 },
+                    icon = { Text("🔍", fontSize = 18.sp) },
+                    label = { Text("Search", fontSize = 11.sp) },
+                    colors = NavigationBarItemDefaults.colors(
+                        selectedIconColor = Color.White,
+                        selectedTextColor = Color.White,
+                        indicatorColor = Color(0xFF283444)
+                    )
+                )
+                NavigationBarItem(
+                    selected = selectedNavTab == 2,
+                    onClick = { selectedNavTab = 2 },
+                    icon = { Text("📚", fontSize = 18.sp) },
+                    label = { Text("Library", fontSize = 11.sp) },
+                    colors = NavigationBarItemDefaults.colors(
+                        selectedIconColor = Color.White,
+                        selectedTextColor = Color.White,
+                        indicatorColor = Color(0xFF283444)
+                    )
+                )
+            }
+        }
+
+        // =====================================================================
+        // FULL SCREEN NOW PLAYING VIEW (Image 2)
+        // =====================================================================
+        AnimatedVisibility(
+            visible = isPlayerExpanded,
+            enter = slideInVertically(initialOffsetY = { it }),
+            exit = slideOutVertically(targetOffsetY = { it })
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(
+                        Brush.verticalGradient(
+                            colors = listOf(Color(0xFF0F2231), Color(0xFF070B10))
+                        )
+                    )
+                    .statusBarsPadding()
+                    .navigationBarsPadding()
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(horizontal = 22.dp, vertical = 12.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.SpaceBetween
+                ) {
+                    // Header: Down arrow + "Now Playing" Title (Image 2)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Text(
-                            text = if (isCurrentSongLiked) "♥" else "♡",
-                            fontSize = 20.sp,
-                            color = if (isCurrentSongLiked) Color(0xFFFF4081) else Color(0xFF94A3B8)
+                        IconButton(onClick = { isPlayerExpanded = false }) {
+                            Text("⌵", color = Color.White, fontSize = 24.sp, fontWeight = FontWeight.Bold)
+                        }
+                        Column(
+                            modifier = Modifier.weight(1f),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Text(
+                                text = "Now Playing",
+                                fontSize = 13.sp,
+                                color = Color(0xFF94A3B8),
+                                fontWeight = FontWeight.Medium
+                            )
+                            Text(
+                                text = activeTitle,
+                                fontSize = 14.sp,
+                                color = Color.White,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(48.dp))
+                    }
+
+                    // Large Arched Album Artwork (Image 2)
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth(0.88f)
+                            .aspectRatio(1f)
+                            .clip(RoundedCornerShape(20.dp))
+                            .background(Color(0xFF141C24)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        AsyncImage(
+                            model = activeArtworkUrl,
+                            contentDescription = activeTitle,
+                            modifier = Modifier.fillMaxSize(),
+                            contentScale = ContentScale.Crop
                         )
                     }
 
-                    IconButton(onClick = { showQueueDialog = true }) {
-                        Text("≡", fontSize = 22.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+                    // Track Title, Artists, Share and Like Pill Buttons
+                    Column(modifier = Modifier.fillMaxWidth()) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = activeTitle,
+                                    fontSize = 20.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color.White,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                Spacer(modifier = Modifier.height(3.dp))
+                                Text(
+                                    text = activeArtist,
+                                    fontSize = 14.sp,
+                                    color = Color(0xFF94A3B8),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+
+                            // Share and Heart Button Pills (Image 2)
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Box(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(18.dp))
+                                        .background(Color(0xFF283444))
+                                        .clickable {
+                                            val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                                            clipboard.setPrimaryClip(ClipData.newPlainText("Track", activeAudioUrl))
+                                            Toast.makeText(context, "Copied track link", Toast.LENGTH_SHORT).show()
+                                        }
+                                        .padding(horizontal = 14.dp, vertical = 10.dp)
+                                ) {
+                                    Text("↗", color = Color.White, fontSize = 16.sp)
+                                }
+
+                                Box(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(18.dp))
+                                        .background(Color(0xFF283444))
+                                        .clickable {
+                                            coroutineScope.launch {
+                                                if (isCurrentSongLiked) {
+                                                    dao.deleteLikedSongById(activeSongId)
+                                                } else {
+                                                    dao.insertLikedSong(
+                                                        LikedSongEntity(
+                                                            id = activeSongId,
+                                                            title = activeTitle,
+                                                            artist = activeArtist,
+                                                            audioUrl = activeAudioUrl,
+                                                            artworkUrl = activeArtworkUrl,
+                                                            duration = activeDurationFormatted
+                                                        )
+                                                    )
+                                                }
+                                            }
+                                        }
+                                        .padding(horizontal = 14.dp, vertical = 10.dp)
+                                ) {
+                                    Text(
+                                        text = if (isCurrentSongLiked) "♥" else "♡",
+                                        color = if (isCurrentSongLiked) Color(0xFFFF4081) else Color.White,
+                                        fontSize = 16.sp
+                                    )
+                                }
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(14.dp))
+
+                        // Progress Scrubber and Timestamps (Image 2)
+                        val maxDurationFloat = max(1L, totalDuration).toFloat()
+                        val currentProgressFloat = if (isDraggingSlider) sliderDragValue else currentPosition.toFloat()
+
+                        Slider(
+                            value = currentProgressFloat.coerceIn(0f, maxDurationFloat),
+                            onValueChange = {
+                                isDraggingSlider = true
+                                sliderDragValue = it
+                            },
+                            onValueChangeFinished = {
+                                val seekPos = sliderDragValue.toLong()
+                                controller?.seekTo(seekPos)
+                                currentPosition = seekPos
+                                isDraggingSlider = false
+                                prefs.edit().putLong(KEY_LAST_POSITION_MS, seekPos).apply()
+                            },
+                            valueRange = 0f..maxDurationFloat,
+                            colors = SliderDefaults.colors(
+                                thumbColor = Color.White,
+                                activeTrackColor = Color.White,
+                                inactiveTrackColor = Color(0xFF2A3644)
+                            ),
+                            modifier = Modifier.fillMaxWidth().height(20.dp)
+                        )
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(
+                                text = formatTime(if (isDraggingSlider) sliderDragValue.toLong() else currentPosition),
+                                fontSize = 12.sp,
+                                color = Color(0xFF94A3B8)
+                            )
+                            Text(
+                                text = formatTime(totalDuration),
+                                fontSize = 12.sp,
+                                color = Color(0xFF94A3B8)
+                            )
+                        }
                     }
-                }
 
-                Spacer(modifier = Modifier.height(2.dp))
-
-                val maxDurationFloat = max(1L, totalDuration).toFloat()
-                val currentProgressFloat = if (isDraggingSlider) sliderDragValue else currentPosition.toFloat()
-
-                Slider(
-                    value = currentProgressFloat.coerceIn(0f, maxDurationFloat),
-                    onValueChange = { newPos ->
-                        isDraggingSlider = true
-                        sliderDragValue = newPos
-                    },
-                    onValueChangeFinished = {
-                        val seekPos = sliderDragValue.toLong()
-                        controller?.seekTo(seekPos)
-                        currentPosition = seekPos
-                        isDraggingSlider = false
-                        prefs.edit().putLong(KEY_LAST_POSITION_MS, seekPos).apply()
-                    },
-                    valueRange = 0f..maxDurationFloat,
-                    modifier = Modifier.fillMaxWidth().height(26.dp)
-                )
-
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = formatTime(if (isDraggingSlider) sliderDragValue.toLong() else currentPosition),
-                        fontSize = 11.sp,
-                        color = Color(0xFF94A3B8)
-                    )
-
+                    // Main Playback Controls: Steel-Blue Pills (Image 2)
                     Row(
+                        modifier = Modifier.fillMaxWidth(),
                         verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.Center
+                        horizontalArrangement = Arrangement.SpaceEvenly
                     ) {
-                        IconButton(
-                            onClick = {
-                                controller?.let { player ->
-                                    if (player.currentPosition > 3000L) {
-                                        player.seekTo(0L)
-                                    } else if (player.hasPreviousMediaItem()) {
-                                        player.seekToPreviousMediaItem()
+                        // Previous Track Circle Pill
+                        Box(
+                            modifier = Modifier
+                                .size(64.dp)
+                                .clip(CircleShape)
+                                .background(Color(0xFF8FA2B5))
+                                .clickable {
+                                    controller?.let { player ->
+                                        if (player.currentPosition > 3000L) {
+                                            player.seekTo(0L)
+                                        } else if (player.hasPreviousMediaItem()) {
+                                            player.seekToPreviousMediaItem()
+                                        }
                                     }
-                                }
-                            },
-                            enabled = controller != null && controller?.mediaItemCount != 0
+                                },
+                            contentAlignment = Alignment.Center
                         ) {
-                            Text("⏮", fontSize = 20.sp, color = Color.White)
+                            Text("⏮", fontSize = 22.sp, color = Color(0xFF0F1B26))
                         }
 
-                        Spacer(modifier = Modifier.width(8.dp))
-
-                        Button(
-                            onClick = {
-                                controller?.let { player ->
-                                    if (player.isPlaying) player.pause() else player.play()
-                                }
-                            },
-                            enabled = controller != null && controller?.mediaItemCount != 0,
-                            shape = CircleShape,
-                            modifier = Modifier.size(44.dp)
-                        ) {
-                            Text(if (isPlaying) "⏸" else "▶", fontSize = 16.sp)
-                        }
-
-                        Spacer(modifier = Modifier.width(8.dp))
-
-                        IconButton(
-                            onClick = {
-                                controller?.let { player ->
-                                    if (player.hasNextMediaItem()) {
-                                        player.seekToNextMediaItem()
+                        // Wide Play / Pause Pill (Image 2)
+                        Box(
+                            modifier = Modifier
+                                .height(64.dp)
+                                .clip(RoundedCornerShape(32.dp))
+                                .background(Color(0xFFD3E2F8))
+                                .clickable {
+                                    controller?.let { player ->
+                                        if (player.isPlaying) player.pause() else player.play()
                                     }
                                 }
-                            },
-                            enabled = controller != null && controller?.hasNextMediaItem() == true
+                                .padding(horizontal = 36.dp),
+                            contentAlignment = Alignment.Center
                         ) {
-                            Text("⏭", fontSize = 20.sp, color = Color.White)
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(
+                                    text = if (isPlaying) "⏸ Pause" else "▷ Play",
+                                    fontSize = 18.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color(0xFF0C141C)
+                                )
+                            }
+                        }
+
+                        // Next Track Circle Pill
+                        Box(
+                            modifier = Modifier
+                                .size(64.dp)
+                                .clip(CircleShape)
+                                .background(Color(0xFF8FA2B5))
+                                .clickable {
+                                    controller?.let { player ->
+                                        if (player.hasNextMediaItem()) {
+                                            player.seekToNextMediaItem()
+                                        }
+                                    }
+                                },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text("⏭", fontSize = 22.sp, color = Color(0xFF0F1B26))
                         }
                     }
 
-                    Text(
-                        text = formatTime(totalDuration),
-                        fontSize = 11.sp,
-                        color = Color(0xFF94A3B8)
-                    )
+                    // Bottom Action Row: Queue | Timer | Shuffle | Lyrics | Repeat | Three-dot (Image 2)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        // Queue
+                        Box(
+                            modifier = Modifier
+                                .size(46.dp)
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(Color(0xFF141C24))
+                                .clickable { showQueueDialog = true },
+                            contentAlignment = Alignment.Center
+                        ) { Text("≡", fontSize = 18.sp, color = Color.White) }
+
+                        // Sleep Timer
+                        Box(
+                            modifier = Modifier
+                                .size(46.dp)
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(Color(0xFF141C24))
+                                .clickable { showSleepTimerDialog = true },
+                            contentAlignment = Alignment.Center
+                        ) { Text("🌙", fontSize = 16.sp, color = Color.White) }
+
+                        // Shuffle
+                        Box(
+                            modifier = Modifier
+                                .size(46.dp)
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(if (isShuffleEnabled) Color(0xFF2E3D4F) else Color(0xFF141C24))
+                                .clickable {
+                                    isShuffleEnabled = !isShuffleEnabled
+                                    controller?.shuffleModeEnabled = isShuffleEnabled
+                                },
+                            contentAlignment = Alignment.Center
+                        ) { Text("🔀", fontSize = 16.sp, color = Color.White) }
+
+                        // Equalizer / Details
+                        Box(
+                            modifier = Modifier
+                                .size(46.dp)
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(Color(0xFF141C24))
+                                .clickable { Toast.makeText(context, "Equalizer coming soon", Toast.LENGTH_SHORT).show() },
+                            contentAlignment = Alignment.Center
+                        ) { Text("🎚", fontSize = 16.sp, color = Color.White) }
+
+                        // Repeat Mode
+                        Box(
+                            modifier = Modifier
+                                .size(46.dp)
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(if (repeatModeState != Player.REPEAT_MODE_OFF) Color(0xFF2E3D4F) else Color(0xFF141C24))
+                                .clickable {
+                                    repeatModeState = when (repeatModeState) {
+                                        Player.REPEAT_MODE_OFF -> Player.REPEAT_MODE_ALL
+                                        Player.REPEAT_MODE_ALL -> Player.REPEAT_MODE_ONE
+                                        else -> Player.REPEAT_MODE_OFF
+                                    }
+                                    controller?.repeatMode = repeatModeState
+                                },
+                            contentAlignment = Alignment.Center
+                        ) { Text("🔁", fontSize = 16.sp, color = Color.White) }
+
+                        // Three-Dot Menu (Image 2 -> opens Image 4)
+                        Box(
+                            modifier = Modifier
+                                .size(46.dp)
+                                .clip(CircleShape)
+                                .background(Color(0xFFD3E2F8))
+                                .clickable {
+                                    selectedTrackForOptions = FullTrackItem(
+                                        id = activeSongId,
+                                        title = activeTitle,
+                                        artist = activeArtist,
+                                        audioUrl = activeAudioUrl,
+                                        artworkUrl = activeArtworkUrl,
+                                        durationFormatted = activeDurationFormatted
+                                    )
+                                },
+                            contentAlignment = Alignment.Center
+                        ) { Text("⋮", fontSize = 20.sp, color = Color(0xFF0F1B26), fontWeight = FontWeight.Bold) }
+                    }
                 }
             }
         }
