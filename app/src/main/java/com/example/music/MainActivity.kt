@@ -55,6 +55,8 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Album
 import androidx.compose.material.icons.rounded.ArrowBack
+import androidx.compose.material.icons.rounded.ArrowDownward
+import androidx.compose.material.icons.rounded.ArrowUpward
 import androidx.compose.material.icons.rounded.Bedtime
 import androidx.compose.material.icons.rounded.BookmarkAdd
 import androidx.compose.material.icons.rounded.Check
@@ -287,7 +289,7 @@ suspend fun fetchTrackLyrics(songTitle: String, artistName: String): List<String
             val items = root.optJSONArray("items")
             if (items != null && items.length() > 0) {
                 return@withContext listOf(
-                    "I'm might be outta my mind",
+                    "I might be outta my mind",
                     "Or I might be the reason you came in here tonight",
                     "It ain't no fun if you don't know what to say",
                     "Living in the fast lane every single day",
@@ -1053,8 +1055,13 @@ fun SonoraPlayerScreen(
     var currentTrackIndex by remember { mutableIntStateOf(0) }
     var endlessRadioEnabled by remember { mutableStateOf(true) }
     var showQueueDialog by remember { mutableStateOf(false) }
-    var isShuffleEnabled by remember { mutableStateOf(false) }
+    
+    // Action Buttons Interactive States
+    var isShuffleActive by remember { mutableStateOf(false) }
+    var isRepeatActive by remember { mutableStateOf(false) }
     var repeatModeState by remember { mutableIntStateOf(Player.REPEAT_MODE_OFF) }
+    var sleepTimerActiveMinutes by remember { mutableIntStateOf(0) }
+    var sleepTimerSecondsRemaining by remember { mutableLongStateOf(0L) }
 
     var downloadingSongIds by remember { mutableStateOf<Set<String>>(emptySet()) }
 
@@ -1084,6 +1091,18 @@ fun SonoraPlayerScreen(
     var activeArtworkUrl by remember { mutableStateOf("") }
     var activeAudioUrl by remember { mutableStateOf("") }
     var activeDurationFormatted by remember { mutableStateOf("0:00") }
+
+    // Sleep Timer countdown ticker
+    LaunchedEffect(sleepTimerActiveMinutes, sleepTimerSecondsRemaining) {
+        if (sleepTimerActiveMinutes > 0 && sleepTimerSecondsRemaining > 0) {
+            delay(1000L)
+            sleepTimerSecondsRemaining -= 1
+            if (sleepTimerSecondsRemaining == 0L) {
+                controller?.pause()
+                sleepTimerActiveMinutes = 0
+            }
+        }
+    }
 
     LaunchedEffect(activeSongId, activeTitle, activeArtist) {
         if (activeSongId.isNotBlank()) {
@@ -1127,9 +1146,7 @@ fun SonoraPlayerScreen(
     var sliderDragValue by remember { mutableStateOf(0f) }
 
     var showSleepTimerDialog by remember { mutableStateOf(false) }
-    var sleepTimerRemainingSeconds by remember { mutableLongStateOf(0L) }
     var stopAfterCurrentTrack by remember { mutableStateOf(false) }
-    var sleepTimerJob by remember { mutableStateOf<Job?>(null) }
 
     var songToAddToPlaylist by remember { mutableStateOf<FullTrackItem?>(null) }
     var showCreatePlaylistDialog by remember { mutableStateOf(false) }
@@ -1140,6 +1157,28 @@ fun SonoraPlayerScreen(
         mutableFloatStateOf(audioManager.getStreamVolume(AudioManager.STREAM_MUSIC).toFloat())
     }
 
+    DisposableEffect(audioManager) {
+        val runnable = Runnable {
+            currentVolumeSlider = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC).toFloat()
+        }
+        val thread = Thread {
+            var lastVol = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
+            while (true) {
+                Thread.sleep(300)
+                val currVol = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
+                if (currVol != lastVol) {
+                    lastVol = currVol
+                    android.os.Handler(context.mainLooper).post(runnable)
+                }
+            }
+        }
+        thread.start()
+        onDispose {
+            thread.interrupt()
+        }
+    }
+
+    // BackHandler: allows minimizing/exiting screen views without stopping background playback
     BackHandler(enabled = true) {
         when {
             showLiveLyrics -> {
@@ -1155,7 +1194,8 @@ fun SonoraPlayerScreen(
                 selectedNavTab = 0
             }
             else -> {
-                (context as? ComponentActivity)?.finish()
+                // Move task to back (minimize) instead of killing app, keeping music playing in background
+                (context as? ComponentActivity)?.moveTaskToBack(true)
             }
         }
     }
@@ -1167,24 +1207,9 @@ fun SonoraPlayerScreen(
         isMoodLoading = false
     }
 
-    fun cancelSleepTimer() {
-        sleepTimerJob?.cancel()
-        sleepTimerJob = null
-        sleepTimerRemainingSeconds = 0L
-        stopAfterCurrentTrack = false
-    }
-
     fun startSleepTimer(minutes: Int) {
-        cancelSleepTimer()
-        sleepTimerRemainingSeconds = minutes * 60L
-        sleepTimerJob = coroutineScope.launch {
-            while (sleepTimerRemainingSeconds > 0) {
-                delay(1000L)
-                sleepTimerRemainingSeconds -= 1
-            }
-            controller?.pause()
-            cancelSleepTimer()
-        }
+        sleepTimerActiveMinutes = minutes
+        sleepTimerSecondsRemaining = minutes * 60L
     }
 
     fun updateQueueState(player: Player) {
@@ -1205,7 +1230,6 @@ fun SonoraPlayerScreen(
         val curr = player.currentMediaItemIndex
         val remaining = total - (curr + 1)
 
-        // Refill when 4-5 songs remain in queue
         if ((remaining <= 5 || curr >= total - 1) && total > 0) {
             isAutoQueueFilling = true
             coroutineScope.launch {
@@ -1346,7 +1370,6 @@ fun SonoraPlayerScreen(
                     if (playbackState == Player.STATE_ENDED) {
                         if (stopAfterCurrentTrack) {
                             mediaController.pause()
-                            cancelSleepTimer()
                         } else if (endlessRadioEnabled) {
                             ensureInfiniteQueueFilled(mediaController)
                             mediaController.play()
@@ -1361,7 +1384,6 @@ fun SonoraPlayerScreen(
                 override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
                     if (stopAfterCurrentTrack && reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO) {
                         mediaController.pause()
-                        cancelSleepTimer()
                     }
                     activeSongId = mediaItem?.mediaId ?: ""
                     activeTitle = mediaItem?.mediaMetadata?.title?.toString() ?: "Unknown Track"
@@ -1396,7 +1418,6 @@ fun SonoraPlayerScreen(
         }, ContextCompat.getMainExecutor(context))
 
         onDispose {
-            cancelSleepTimer()
             controller?.release()
         }
     }
@@ -1464,7 +1485,6 @@ fun SonoraPlayerScreen(
                 updateQueueState(player)
             }
 
-            // Seed initial queue with minimum 30 related tracks strictly without duplicates
             if (endlessRadioEnabled) {
                 coroutineScope.launch {
                     val candidates = mutableListOf<FullTrackItem>()
@@ -1796,7 +1816,6 @@ fun SonoraPlayerScreen(
                             .fillMaxWidth()
                             .padding(vertical = 4.dp)
                             .clickable {
-                                cancelSleepTimer()
                                 stopAfterCurrentTrack = true
                                 showSleepTimerDialog = false
                             },
@@ -1805,14 +1824,16 @@ fun SonoraPlayerScreen(
                     ) {
                         Text("End of Current Track", color = Color.White, fontSize = 15.sp, modifier = Modifier.padding(14.dp))
                     }
-                    if (sleepTimerRemainingSeconds > 0L || stopAfterCurrentTrack) {
+                    if (sleepTimerActiveMinutes > 0 || stopAfterCurrentTrack) {
                         Spacer(modifier = Modifier.height(6.dp))
                         Card(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .padding(vertical = 4.dp)
                                 .clickable {
-                                    cancelSleepTimer()
+                                    sleepTimerActiveMinutes = 0
+                                    sleepTimerSecondsRemaining = 0L
+                                    stopAfterCurrentTrack = false
                                     showSleepTimerDialog = false
                                 },
                             colors = CardDefaults.cardColors(containerColor = Color(0xFF33161F)),
@@ -1955,7 +1976,7 @@ fun SonoraPlayerScreen(
         )
     }
 
-    // Up Next Queue Dialog with dedicated drag handle (≡) for reordering and smooth scrolling
+    // Up Next Queue Dialog with Move Up/Down Buttons
     if (showQueueDialog) {
         AlertDialog(
             onDismissRequest = { showQueueDialog = false },
@@ -2000,31 +2021,40 @@ fun SonoraPlayerScreen(
                                     .clickable { controller?.seekToDefaultPosition(index) },
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                // Dedicated Drag-and-drop Handle (≡)
-                                Icon(
-                                    imageVector = Icons.Rounded.DragHandle,
-                                    contentDescription = "Reorder",
-                                    tint = Color(0xFF64748B),
-                                    modifier = Modifier
-                                        .size(24.dp)
-                                        .padding(end = 4.dp)
-                                        .pointerInput(Unit) {
-                                            detectVerticalDragGestures { _, dragAmount ->
-                                                if (dragAmount > 30f && index < localQueue.size - 1) {
-                                                    val mutable = localQueue.toMutableList()
-                                                    val item = mutable.removeAt(index)
-                                                    mutable.add(index + 1, item)
-                                                    localQueue = mutable
-                                                } else if (dragAmount < -30f && index > 0) {
-                                                    val mutable = localQueue.toMutableList()
-                                                    val item = mutable.removeAt(index)
-                                                    mutable.add(index - 1, item)
-                                                    localQueue = mutable
-                                                }
+                                Column {
+                                    IconButton(
+                                        onClick = {
+                                            if (index > 0) {
+                                                val mutable = localQueue.toMutableList()
+                                                val item = mutable.removeAt(index)
+                                                mutable.add(index - 1, item)
+                                                localQueue = mutable
+                                                controller?.moveMediaItem(index, index - 1)
+                                                updateQueueState(controller!!)
                                             }
-                                        }
-                                )
+                                        },
+                                        modifier = Modifier.size(18.dp)
+                                    ) {
+                                        Icon(imageVector = Icons.Rounded.ArrowUpward, contentDescription = "Move Up", tint = Color(0xFF94A3B8), modifier = Modifier.size(14.dp))
+                                    }
+                                    IconButton(
+                                        onClick = {
+                                            if (index < localQueue.size - 1) {
+                                                val mutable = localQueue.toMutableList()
+                                                val item = mutable.removeAt(index)
+                                                mutable.add(index + 1, item)
+                                                localQueue = mutable
+                                                controller?.moveMediaItem(index, index + 1)
+                                                updateQueueState(controller!!)
+                                            }
+                                        },
+                                        modifier = Modifier.size(18.dp)
+                                    ) {
+                                        Icon(imageVector = Icons.Rounded.ArrowDownward, contentDescription = "Move Down", tint = Color(0xFF94A3B8), modifier = Modifier.size(14.dp))
+                                    }
+                                }
 
+                                Spacer(modifier = Modifier.width(4.dp))
                                 if (isCurrent) {
                                     Icon(
                                         imageVector = Icons.Rounded.PlayArrow,
@@ -2810,7 +2840,8 @@ fun SonoraPlayerScreen(
         AnimatedVisibility(
             visible = isPlayerExpanded,
             enter = slideInVertically(initialOffsetY = { it }),
-            exit = slideOutVertically(targetOffsetY = { it })
+            exit = slideOutVertically(targetOffsetY = { it }),
+            modifier = Modifier.fillMaxSize()
         ) {
             Box(
                 modifier = Modifier
@@ -2838,11 +2869,12 @@ fun SonoraPlayerScreen(
                         }
                     }
             ) {
-                // Synchronized Live Karaoke Lyrics Screen Overlay (Matching Image 1 & Image 2)
+                // Synchronized Live Karaoke Lyrics Screen Overlay (Matching Image 3 & Image 4)
                 AnimatedVisibility(
                     visible = showLiveLyrics,
                     enter = slideInHorizontally(initialOffsetX = { it }),
-                    exit = slideOutHorizontally(targetOffsetX = { it })
+                    exit = slideOutHorizontally(targetOffsetX = { it }),
+                    modifier = Modifier.fillMaxSize()
                 ) {
                     Box(
                         modifier = Modifier
@@ -3187,11 +3219,13 @@ fun SonoraPlayerScreen(
                         }
                     }
 
+                    // Bottom Action Bar (Queue, Sleep Timer with mm:ss badge, Shuffle, Equalizer, Repeat, More)
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
+                        // Queue Button
                         Box(
                             modifier = Modifier
                                 .size(46.dp)
@@ -3203,31 +3237,46 @@ fun SonoraPlayerScreen(
                             Icon(imageVector = Icons.Rounded.QueueMusic, contentDescription = "Queue", tint = Color.White, modifier = Modifier.size(20.dp))
                         }
 
+                        // Sleep Timer Button with Live mm:ss Countdown Badge
                         Box(
                             modifier = Modifier
                                 .size(46.dp)
                                 .clip(RoundedCornerShape(12.dp))
-                                .background(Color(0x30FFFFFF))
+                                .background(if (sleepTimerActiveMinutes > 0) Color(0xFF7C4DFF) else Color(0x30FFFFFF))
                                 .clickable { showSleepTimerDialog = true },
                             contentAlignment = Alignment.Center
                         ) {
-                            Icon(imageVector = Icons.Rounded.Bedtime, contentDescription = "Timer", tint = Color.White, modifier = Modifier.size(18.dp))
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Icon(imageVector = Icons.Rounded.Bedtime, contentDescription = "Timer", tint = Color.White, modifier = Modifier.size(16.dp))
+                                if (sleepTimerActiveMinutes > 0 && sleepTimerSecondsRemaining > 0) {
+                                    val mins = sleepTimerSecondsRemaining / 60
+                                    val secs = sleepTimerSecondsRemaining % 60
+                                    Text(
+                                        text = String.format(Locale.ROOT, "%d:%02d", mins, secs),
+                                        fontSize = 8.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = Color.White
+                                    )
+                                }
+                            }
                         }
 
+                        // Shuffle Button with Active State Color Toggle
                         Box(
                             modifier = Modifier
                                 .size(46.dp)
                                 .clip(RoundedCornerShape(12.dp))
-                                .background(if (isShuffleEnabled) Color(0x60FFFFFF) else Color(0x30FFFFFF))
+                                .background(if (isShuffleActive) Color(0xFF7C4DFF) else Color(0x30FFFFFF))
                                 .clickable {
-                                    isShuffleEnabled = !isShuffleEnabled
-                                    controller?.shuffleModeEnabled = isShuffleEnabled
+                                    isShuffleActive = !isShuffleActive
+                                    controller?.shuffleModeEnabled = isShuffleActive
                                 },
                             contentAlignment = Alignment.Center
                         ) {
                             Icon(imageVector = Icons.Rounded.Shuffle, contentDescription = "Shuffle", tint = Color.White, modifier = Modifier.size(18.dp))
                         }
 
+                        // Equalizer Button
                         Box(
                             modifier = Modifier
                                 .size(46.dp)
@@ -3239,17 +3288,15 @@ fun SonoraPlayerScreen(
                             Icon(imageVector = Icons.Rounded.Tune, contentDescription = "Equalizer", tint = Color.White, modifier = Modifier.size(18.dp))
                         }
 
+                        // Repeat Button with Active State Color Toggle
                         Box(
                             modifier = Modifier
                                 .size(46.dp)
                                 .clip(RoundedCornerShape(12.dp))
-                                .background(if (repeatModeState != Player.REPEAT_MODE_OFF) Color(0x60FFFFFF) else Color(0x30FFFFFF))
+                                .background(if (isRepeatActive) Color(0xFF7C4DFF) else Color(0x30FFFFFF))
                                 .clickable {
-                                    repeatModeState = when (repeatModeState) {
-                                        Player.REPEAT_MODE_OFF -> Player.REPEAT_MODE_ALL
-                                        Player.REPEAT_MODE_ALL -> Player.REPEAT_MODE_ONE
-                                        else -> Player.REPEAT_MODE_OFF
-                                    }
+                                    isRepeatActive = !isRepeatActive
+                                    repeatModeState = if (isRepeatActive) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_OFF
                                     controller?.repeatMode = repeatModeState
                                 },
                             contentAlignment = Alignment.Center
@@ -3262,6 +3309,7 @@ fun SonoraPlayerScreen(
                             )
                         }
 
+                        // More Button
                         Box(
                             modifier = Modifier
                                 .size(46.dp)
