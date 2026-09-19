@@ -1,10 +1,10 @@
 package com.example.music
 
-import android.app.Service
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import androidx.core.content.ContextCompat
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
@@ -27,7 +27,6 @@ class PlaybackService : MediaSessionService() {
         val player = ExoPlayer.Builder(this).build()
         mediaSession = MediaSession.Builder(this, player).build()
         
-        // Register receiver for clear all
         ContextCompat.registerReceiver(
             this,
             killReceiver,
