@@ -63,6 +63,7 @@ import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.Download
+import androidx.compose.material.icons.rounded.DragHandle
 import androidx.compose.material.icons.rounded.Favorite
 import androidx.compose.material.icons.rounded.FavoriteBorder
 import androidx.compose.material.icons.rounded.Folder
@@ -1163,11 +1164,19 @@ fun SonoraPlayerScreen(
     var showQueueDialog by remember {
         mutableStateOf(false)
     }
-    var isShuffleEnabled by remember {
+
+    // Action Buttons Interactive States
+    var isShuffleActive by remember {
         mutableStateOf(false)
     }
-    var repeatModeState by remember {
-        mutableIntStateOf(Player.REPEAT_MODE_OFF)
+    var isRepeatActive by remember {
+        mutableStateOf(false)
+    }
+    var sleepTimerActiveMinutes by remember {
+        mutableIntStateOf(0)
+    }
+    var sleepTimerSecondsRemaining by remember {
+        mutableLongStateOf(0L)
     }
 
     var downloadingSongIds by remember {
@@ -1229,30 +1238,15 @@ fun SonoraPlayerScreen(
         mutableStateOf("0:00")
     }
 
-    // Synchronize volume slider with device hardware volume buttons
-    var currentVolumeSlider by remember {
-        mutableFloatStateOf(audioManager.getStreamVolume(AudioManager.STREAM_MUSIC).toFloat())
-    }
-
-    DisposableEffect(audioManager) {
-        val runnable = Runnable {
-            currentVolumeSlider = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC).toFloat()
-        }
-        // Poll volume state changes
-        val thread = Thread {
-            var lastVol = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
-            while (true) {
-                Thread.sleep(300)
-                val currVol = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
-                if (currVol != lastVol) {
-                    lastVol = currVol
-                    android.os.Handler(context.mainLooper).post(runnable)
-                }
+    // Sleep Timer countdown ticker
+    LaunchedEffect(sleepTimerActiveMinutes, sleepTimerSecondsRemaining) {
+        if (sleepTimerActiveMinutes > 0 && sleepTimerSecondsRemaining > 0) {
+            delay(1000L)
+            sleepTimerSecondsRemaining -= 1
+            if (sleepTimerSecondsRemaining == 0L) {
+                controller?.pause()
+                sleepTimerActiveMinutes = 0
             }
-        }
-        thread.start()
-        onDispose {
-            thread.interrupt()
         }
     }
 
@@ -1312,14 +1306,8 @@ fun SonoraPlayerScreen(
     var showSleepTimerDialog by remember {
         mutableStateOf(false)
     }
-    var sleepTimerRemainingSeconds by remember {
-        mutableLongStateOf(0L)
-    }
     var stopAfterCurrentTrack by remember {
         mutableStateOf(false)
-    }
-    var sleepTimerJob by remember {
-        mutableStateOf<Job?>(null)
     }
 
     var songToAddToPlaylist by remember {
@@ -1334,6 +1322,30 @@ fun SonoraPlayerScreen(
 
     val maxSysVolume = remember {
         audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC).toFloat()
+    }
+    var currentVolumeSlider by remember {
+        mutableFloatStateOf(audioManager.getStreamVolume(AudioManager.STREAM_MUSIC).toFloat())
+    }
+
+    DisposableEffect(audioManager) {
+        val runnable = Runnable {
+            currentVolumeSlider = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC).toFloat()
+        }
+        val thread = Thread {
+            var lastVol = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
+            while (true) {
+                Thread.sleep(300)
+                val currVol = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
+                if (currVol != lastVol) {
+                    lastVol = currVol
+                    android.os.Handler(context.mainLooper).post(runnable)
+                }
+            }
+        }
+        thread.start()
+        onDispose {
+            thread.interrupt()
+        }
     }
 
     BackHandler(enabled = true) {
@@ -1362,24 +1374,9 @@ fun SonoraPlayerScreen(
         isMoodLoading = false
     }
 
-    fun cancelSleepTimer() {
-        sleepTimerJob?.cancel()
-        sleepTimerJob = null
-        sleepTimerRemainingSeconds = 0L
-        stopAfterCurrentTrack = false
-    }
-
     fun startSleepTimer(minutes: Int) {
-        cancelSleepTimer()
-        sleepTimerRemainingSeconds = minutes * 60L
-        sleepTimerJob = coroutineScope.launch {
-            while (sleepTimerRemainingSeconds > 0) {
-                delay(1000L)
-                sleepTimerRemainingSeconds -= 1
-            }
-            controller?.pause()
-            cancelSleepTimer()
-        }
+        sleepTimerActiveMinutes = minutes
+        sleepTimerSecondsRemaining = minutes * 60L
     }
 
     fun updateQueueState(player: Player) {
@@ -1543,7 +1540,6 @@ fun SonoraPlayerScreen(
                     if (playbackState == Player.STATE_ENDED) {
                         if (stopAfterCurrentTrack) {
                             mediaController.pause()
-                            cancelSleepTimer()
                         } else if (endlessRadioEnabled) {
                             ensureInfiniteQueueFilled(mediaController)
                             mediaController.play()
@@ -1558,7 +1554,6 @@ fun SonoraPlayerScreen(
                 override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
                     if (stopAfterCurrentTrack && reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO) {
                         mediaController.pause()
-                        cancelSleepTimer()
                     }
                     activeSongId = mediaItem?.mediaId ?: ""
                     activeTitle = mediaItem?.mediaMetadata?.title?.toString() ?: "Unknown Track"
@@ -1593,7 +1588,6 @@ fun SonoraPlayerScreen(
         }, ContextCompat.getMainExecutor(context))
 
         onDispose {
-            cancelSleepTimer()
             controller?.release()
         }
     }
@@ -2005,7 +1999,6 @@ fun SonoraPlayerScreen(
                         .fillMaxWidth()
                         .padding(vertical = 4.dp)
                         .clickable {
-                            cancelSleepTimer()
                             stopAfterCurrentTrack = true
                             showSleepTimerDialog = false
                         },
@@ -2014,14 +2007,16 @@ fun SonoraPlayerScreen(
                     ) {
                         Text("End of Current Track", color = Color.White, fontSize = 15.sp, modifier = Modifier.padding(14.dp))
                     }
-                    if (sleepTimerRemainingSeconds > 0L || stopAfterCurrentTrack) {
+                    if (sleepTimerActiveMinutes > 0 || stopAfterCurrentTrack) {
                         Spacer(modifier = Modifier.height(6.dp))
                         Card(
                             modifier = Modifier
                             .fillMaxWidth()
                             .padding(vertical = 4.dp)
                             .clickable {
-                                cancelSleepTimer()
+                                sleepTimerActiveMinutes = 0
+                                sleepTimerSecondsRemaining = 0L
+                                stopAfterCurrentTrack = false
                                 showSleepTimerDialog = false
                             },
                             colors = CardDefaults.cardColors(containerColor = Color(0xFF33161F)),
@@ -2186,7 +2181,7 @@ fun SonoraPlayerScreen(
         )
     }
 
-    // Up Next Queue Dialog with Move Up (▲) and Move Down (▼) buttons for instant reordering
+    // Up Next Queue Dialog with Move Up/Down Buttons
     if (showQueueDialog) {
         AlertDialog(
             onDismissRequest = {
@@ -2242,7 +2237,6 @@ fun SonoraPlayerScreen(
                                 },
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                // Move Up & Down Reorder Buttons
                                 Column {
                                     IconButton(
                                         onClick = {
@@ -3203,7 +3197,7 @@ fun SonoraPlayerScreen(
                     }
                 }
             ) {
-                // Synchronized Live Karaoke Lyrics Screen Overlay
+                // Synchronized Live Karaoke Lyrics Screen Overlay (Matching Image 3 & Image 4)
                 AnimatedVisibility(
                     visible = showLiveLyrics,
                     enter = slideInHorizontally(initialOffsetX = {
@@ -3567,11 +3561,13 @@ fun SonoraPlayerScreen(
                         }
                     }
 
+                    // Bottom Action Bar (Queue, Sleep Timer with mm:ss badge, Shuffle, Equalizer, Repeat, More)
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
+                        // Queue Button
                         Box(
                             modifier = Modifier
                             .size(46.dp)
@@ -3585,33 +3581,48 @@ fun SonoraPlayerScreen(
                             Icon(imageVector = Icons.Rounded.QueueMusic, contentDescription = "Queue", tint = Color.White, modifier = Modifier.size(20.dp))
                         }
 
+                        // Sleep Timer Button with Live mm:ss Countdown Badge
                         Box(
                             modifier = Modifier
                             .size(46.dp)
                             .clip(RoundedCornerShape(12.dp))
-                            .background(Color(0x30FFFFFF))
+                            .background(if (sleepTimerActiveMinutes > 0) Color(0xFF7C4DFF) else Color(0x30FFFFFF))
                             .clickable {
                                 showSleepTimerDialog = true
                             },
                             contentAlignment = Alignment.Center
                         ) {
-                            Icon(imageVector = Icons.Rounded.Bedtime, contentDescription = "Timer", tint = Color.White, modifier = Modifier.size(18.dp))
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Icon(imageVector = Icons.Rounded.Bedtime, contentDescription = "Timer", tint = Color.White, modifier = Modifier.size(16.dp))
+                                if (sleepTimerActiveMinutes > 0 && sleepTimerSecondsRemaining > 0) {
+                                    val mins = sleepTimerSecondsRemaining / 60
+                                    val secs = sleepTimerSecondsRemaining % 60
+                                    Text(
+                                        text = String.format(Locale.ROOT, "%d:%02d", mins, secs),
+                                        fontSize = 8.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = Color.White
+                                    )
+                                }
+                            }
                         }
 
+                        // Shuffle Button with Active State Color Toggle
                         Box(
                             modifier = Modifier
                             .size(46.dp)
                             .clip(RoundedCornerShape(12.dp))
-                            .background(if (isShuffleEnabled) Color(0x60FFFFFF) else Color(0x30FFFFFF))
+                            .background(if (isShuffleActive) Color(0xFF7C4DFF) else Color(0x30FFFFFF))
                             .clickable {
-                                isShuffleEnabled = !isShuffleEnabled
-                                controller?.shuffleModeEnabled = isShuffleEnabled
+                                isShuffleActive = !isShuffleActive
+                                controller?.shuffleModeEnabled = isShuffleActive
                             },
                             contentAlignment = Alignment.Center
                         ) {
                             Icon(imageVector = Icons.Rounded.Shuffle, contentDescription = "Shuffle", tint = Color.White, modifier = Modifier.size(18.dp))
                         }
 
+                        // Equalizer Button
                         Box(
                             modifier = Modifier
                             .size(46.dp)
@@ -3625,17 +3636,15 @@ fun SonoraPlayerScreen(
                             Icon(imageVector = Icons.Rounded.Tune, contentDescription = "Equalizer", tint = Color.White, modifier = Modifier.size(18.dp))
                         }
 
+                        // Repeat Button with Active State Color Toggle
                         Box(
                             modifier = Modifier
                             .size(46.dp)
                             .clip(RoundedCornerShape(12.dp))
-                            .background(if (repeatModeState != Player.REPEAT_MODE_OFF) Color(0x60FFFFFF) else Color(0x30FFFFFF))
+                            .background(if (isRepeatActive) Color(0xFF7C4DFF) else Color(0x30FFFFFF))
                             .clickable {
-                                repeatModeState = when (repeatModeState) {
-                                    Player.REPEAT_MODE_OFF -> Player.REPEAT_MODE_ALL
-                                    Player.REPEAT_MODE_ALL -> Player.REPEAT_MODE_ONE
-                                    else -> Player.REPEAT_MODE_OFF
-                                }
+                                isRepeatActive = !isRepeatActive
+                                repeatModeState = if (isRepeatActive) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_OFF
                                 controller?.repeatMode = repeatModeState
                             },
                             contentAlignment = Alignment.Center
@@ -3648,6 +3657,7 @@ fun SonoraPlayerScreen(
                             )
                         }
 
+                        // More Button
                         Box(
                             modifier = Modifier
                             .size(46.dp)

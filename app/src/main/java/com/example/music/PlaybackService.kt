@@ -28,10 +28,13 @@ class PlaybackService : MediaSessionService() {
         }
         stopSelf()
         super.onTaskRemoved(rootIntent)
+        android.os.Process.killProcess(android.os.Process.myPid())
     }
 
     override fun onDestroy() {
         mediaSession?.run {
+            player.pause()
+            player.stop()
             player.release()
             release()
         }
