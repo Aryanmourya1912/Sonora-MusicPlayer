@@ -235,8 +235,8 @@ private val SonoraLightColors = lightColorScheme(
     surface = Color(0xFFFFFFFF),
     surfaceVariant = Color(0xFFE2E8F0),
     onPrimary = Color.White,
-    onBackground = Color(0xFF0F172A),
-    onSurface = Color(0xFF0F172A),
+    onBackground = Color.White,
+    onSurface = Color.White,
     onSurfaceVariant = Color(0xFF475569)
 )
 
@@ -256,15 +256,6 @@ class MainActivity : ComponentActivity() {
                     )
                 }
             }
-        }
-    }
-
-    override fun onDestroy() {
-        super.onDestroy()
-        if (isFinishing) {
-            try {
-                sendBroadcast(Intent("com.example.music.ACTION_KILL_SERVICE"))
-            } catch (_: Exception) {}
         }
     }
 }
@@ -315,6 +306,20 @@ fun parseLrcLyrics(lrcString: String): List<SyncedLyricLine> {
     return lines.sortedBy { it.timeMs }
 }
 
+fun convertPlainLyricsToTimed(plainText: String, durationSec: Int): List<SyncedLyricLine> {
+    val cleanLines = plainText.lines()
+        .map { it.trim() }
+        .filter { it.isNotBlank() && !it.startsWith("[") }
+    if (cleanLines.isEmpty()) return emptyList()
+
+    val totalMs = if (durationSec > 10) durationSec * 1000L else cleanLines.size * 3500L
+    val intervalMs = totalMs / cleanLines.size
+
+    return cleanLines.mapIndexed { index, text ->
+        SyncedLyricLine(timeMs = index * intervalMs, text = text)
+    }
+}
+
 suspend fun fetchLyricsFromPriorityProviders(
     songTitle: String,
     artistName: String,
@@ -330,20 +335,23 @@ suspend fun fetchLyricsFromPriorityProviders(
     )
 
     val cleanTitle = cleanSongTitle(songTitle)
-    val cleanArtist = cleanArtist(artistName)
+    val cleanArtist = if (artistName.equals("Song", ignoreCase = true) || artistName.equals("Unknown Artist", ignoreCase = true)) "" else cleanArtist(artistName)
 
     for (provider in providers) {
         try {
-            val lrcText = when (provider) {
-                "LrcLib" -> fetchFromLrcLib(cleanTitle, cleanArtist, durationSeconds)
-                "KuGou" -> fetchFromKuGou(cleanTitle, cleanArtist)
-                else -> null
-            }
-
-            if (!lrcText.isNullOrBlank()) {
-                val parsed = parseLrcLyrics(lrcText)
-                if (parsed.isNotEmpty()) {
-                    return@withContext Pair(provider, parsed)
+            when (provider) {
+                "LrcLib" -> {
+                    val result = fetchFromLrcLib(cleanTitle, cleanArtist, durationSeconds)
+                    if (result.isNotEmpty()) return@withContext Pair("LrcLib", result)
+                }
+                "KuGou" -> {
+                    val result = fetchFromKuGou(cleanTitle, cleanArtist, durationSeconds)
+                    if (result.isNotEmpty()) return@withContext Pair("KuGou", result)
+                }
+                else -> {
+                    // Fallback to searching LrcLib query
+                    val result = fetchFromLrcLib(cleanTitle, "", durationSeconds)
+                    if (result.isNotEmpty()) return@withContext Pair(provider, result)
                 }
             }
         } catch (_: Exception) {}
@@ -352,37 +360,50 @@ suspend fun fetchLyricsFromPriorityProviders(
     Pair("Sonora", emptyList())
 }
 
-private fun fetchFromLrcLib(title: String, artist: String, duration: Int): String? {
-    return try {
-        val qTitle = URLEncoder.encode(title, "UTF-8")
-        val qArtist = URLEncoder.encode(artist, "UTF-8")
-        val endpoint = if (duration > 0) {
-            "https://lrclib.net/api/get?track_name=$qTitle&artist_name=$qArtist&duration=$duration"
-        } else {
-            "https://lrclib.net/api/get?track_name=$qTitle&artist_name=$qArtist"
-        }
+private fun fetchFromLrcLib(title: String, artist: String, duration: Int): List<SyncedLyricLine> {
+    val queries = listOfNotNull(
+        if (artist.isNotBlank()) "$title $artist" else null,
+        title
+    )
 
-        val conn = (URL(endpoint).openConnection() as HttpURLConnection).apply {
-            requestMethod = "GET"
-            connectTimeout = 4000
-            readTimeout = 4000
-            setRequestProperty("User-Agent", "SonoraMusicPlayer/1.0")
-        }
+    for (q in queries) {
+        try {
+            val encodedQuery = URLEncoder.encode(q, "UTF-8")
+            val endpoint = "https://lrclib.net/api/search?q=$encodedQuery"
+            val conn = (URL(endpoint).openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                connectTimeout = 4000
+                readTimeout = 4000
+                setRequestProperty("User-Agent", "SonoraMusicPlayer/1.0")
+            }
 
-        if (conn.responseCode == HttpURLConnection.HTTP_OK) {
-            val resp = conn.inputStream.bufferedReader().use { it.readText() }
-            val json = JSONObject(resp)
-            json.optString("syncedLyrics").takeIf { it.isNotBlank() }
-                ?: json.optString("plainLyrics").takeIf { it.isNotBlank() }
-        } else null
-    } catch (_: Exception) {
-        null
+            if (conn.responseCode == HttpURLConnection.HTTP_OK) {
+                val resp = conn.inputStream.bufferedReader().use { it.readText() }
+                val array = JSONArray(resp)
+                for (i in 0 until array.length()) {
+                    val item = array.getJSONObject(i)
+                    val synced = item.optString("syncedLyrics", "")
+                    if (synced.isNotBlank()) {
+                        val parsed = parseLrcLyrics(synced)
+                        if (parsed.isNotEmpty()) return parsed
+                    }
+                }
+                // If no synced, fallback to plain lyrics from first match
+                if (array.length() > 0) {
+                    val plain = array.getJSONObject(0).optString("plainLyrics", "")
+                    if (plain.isNotBlank()) {
+                        return convertPlainLyricsToTimed(plain, duration)
+                    }
+                }
+            }
+        } catch (_: Exception) {}
     }
+    return emptyList()
 }
 
-private fun fetchFromKuGou(title: String, artist: String): String? {
+private fun fetchFromKuGou(title: String, artist: String, duration: Int): List<SyncedLyricLine> {
     return try {
-        val query = URLEncoder.encode("$title $artist", "UTF-8")
+        val query = URLEncoder.encode("$title $artist".trim(), "UTF-8")
         val searchUrl = "http://lyrics.kugou.com/search?ver=1&man=yes&client=pc&keyword=$query&duration=&hash="
         val conn = (URL(searchUrl).openConnection() as HttpURLConnection).apply {
             requestMethod = "GET"
@@ -402,13 +423,17 @@ private fun fetchFromKuGou(title: String, artist: String): String? {
                     val dlResp = dlConn.inputStream.bufferedReader().use { it.readText() }
                     val b64 = JSONObject(dlResp).optString("content")
                     if (b64.isNotBlank()) {
-                        String(Base64.decode(b64, Base64.DEFAULT), Charsets.UTF_8)
-                    } else null
-                } else null
-            } else null
-        } else null
+                        val lrcText = String(Base64.decode(b64, Base64.DEFAULT), Charsets.UTF_8)
+                        val parsed = parseLrcLyrics(lrcText)
+                        if (parsed.isNotEmpty()) return parsed
+                        return convertPlainLyricsToTimed(lrcText, duration)
+                    }
+                }
+            }
+        }
+        emptyList()
     } catch (_: Exception) {
-        null
+        emptyList()
     }
 }
 
@@ -567,9 +592,12 @@ suspend fun searchYouTubeMusic(query: String): Pair<List<FullTrackItem>, String?
                 ?.optJSONObject("text")?.optJSONArray("runs")
             var artist = "Unknown Artist"
             if (col1Runs != null && col1Runs.length() > 0) {
-                val candidate = col1Runs.optJSONObject(0)?.optString("text", "") ?: ""
-                if (candidate.isNotBlank() && candidate != " • ") {
-                    artist = candidate
+                for (r in 0 until col1Runs.length()) {
+                    val t = col1Runs.optJSONObject(r)?.optString("text", "")?.trim() ?: ""
+                    if (t.isNotBlank() && t != "•" && t != "Song" && t != "Video" && t != "Single" && t != "EP" && t != "Album") {
+                        artist = t
+                        break
+                    }
                 }
             }
             artist = sanitizeText(artist)
@@ -648,11 +676,18 @@ suspend fun fetchYouTubeAutomixRadio(videoId: String): List<FullTrackItem> = wit
                 if (vId.isBlank()) continue
 
                 val title = sanitizeText(item.optJSONObject("title")?.optJSONArray("runs")?.optJSONObject(0)?.optString("text", "Unknown Track") ?: "Unknown Track")
-                val artist = sanitizeText(
-                    item.optJSONObject("longBylineText")?.optJSONArray("runs")?.optJSONObject(0)?.optString("text")
-                        ?: item.optJSONObject("shortBylineText")?.optJSONArray("runs")?.optJSONObject(0)?.optString("text")
-                        ?: "Unknown Artist"
-                )
+                var radioArtist = "Unknown Artist"
+                val bylineRuns = item.optJSONObject("longBylineText")?.optJSONArray("runs")
+                    ?: item.optJSONObject("shortBylineText")?.optJSONArray("runs")
+                if (bylineRuns != null) {
+                    for (r in 0 until bylineRuns.length()) {
+                        val t = bylineRuns.optJSONObject(r)?.optString("text", "")?.trim() ?: ""
+                        if (t.isNotBlank() && t != "•" && t != "Song" && t != "Video") {
+                            radioArtist = t
+                            break
+                        }
+                    }
+                }
                 val duration = item.optJSONObject("lengthText")?.optJSONArray("runs")?.optJSONObject(0)?.optString("text", "") ?: ""
 
                 val thumbArray = item.optJSONObject("thumbnail")?.optJSONArray("thumbnails")
@@ -664,7 +699,7 @@ suspend fun fetchYouTubeAutomixRadio(videoId: String): List<FullTrackItem> = wit
                     FullTrackItem(
                         id = vId,
                         title = title,
-                        artist = artist,
+                        artist = radioArtist,
                         audioUrl = "",
                         artworkUrl = artworkUrl,
                         durationFormatted = duration
@@ -1353,6 +1388,7 @@ fun SonoraPlayerScreen(
         }
     }
 
+    // Refresh lyrics on song change using priority providers
     LaunchedEffect(activeSongId, activeTitle, activeArtist) {
         if (activeSongId.isNotBlank()) {
             isLyricsLoading = true
@@ -1429,6 +1465,7 @@ fun SonoraPlayerScreen(
         }
     }
 
+    // Back gesture: minimize without killing service
     BackHandler(enabled = true) {
         when {
             showLiveLyrics -> {
@@ -1548,7 +1585,28 @@ fun SonoraPlayerScreen(
         }
     }
 
+    fun togglePlayPause() {
+        controller?.let { player ->
+            if (player.isPlaying) {
+                player.pause()
+            } else {
+                val savedPos = prefs.getLong(KEY_LAST_POSITION_MS, 0L)
+                if (player.currentPosition < 1000L && savedPos > 1000L) {
+                    player.seekTo(savedPos)
+                    currentPosition = savedPos
+                }
+                player.play()
+            }
+        }
+    }
+
     DisposableEffect(context) {
+        // Explicitly start service so Android registers it with the task for onTaskRemoved
+        val serviceIntent = Intent(context, PlaybackService::class.java)
+        try {
+            context.startService(serviceIntent)
+        } catch (_: Exception) {}
+
         val sessionToken = SessionToken(context, ComponentName(context, PlaybackService::class.java))
         val controllerFuture = MediaController.Builder(context, sessionToken).buildAsync()
 
@@ -1689,19 +1747,6 @@ fun SonoraPlayerScreen(
                     .apply()
             }
             delay(1000L)
-        }
-    }
-
-    fun togglePlayPause() {
-        controller?.let { player ->
-            if (player.isPlaying) {
-                player.pause()
-            } else {
-                if (player.currentPosition < 1000L && currentPosition > 1000L) {
-                    player.seekTo(currentPosition)
-                }
-                player.play()
-            }
         }
     }
 

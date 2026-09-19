@@ -42,6 +42,7 @@ class PlaybackService : MediaSessionService() {
         return START_NOT_STICKY
     }
 
+    // Triggered reliably when swiping away or tapping "Close" / "Clear All" in Recents
     override fun onTaskRemoved(rootIntent: Intent?) {
         terminatePlayback()
         super.onTaskRemoved(rootIntent)
@@ -50,8 +51,10 @@ class PlaybackService : MediaSessionService() {
     private fun terminatePlayback() {
         try {
             mediaSession?.player?.apply {
+                playWhenReady = false
                 pause()
                 stop()
+                clearMediaItems()
                 release()
             }
             mediaSession?.release()
@@ -68,13 +71,7 @@ class PlaybackService : MediaSessionService() {
             unregisterReceiver(killReceiver)
         } catch (_: Exception) {}
 
-        mediaSession?.run {
-            player.pause()
-            player.stop()
-            player.release()
-            release()
-        }
-        mediaSession = null
+        terminatePlayback()
         super.onDestroy()
     }
 }
