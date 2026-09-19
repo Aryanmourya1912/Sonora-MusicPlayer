@@ -4,15 +4,60 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import androidx.core.content.ContextCompat
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.session.CommandButton
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
+import androidx.media3.session.SessionCommand
+import androidx.media3.session.SessionResult
+import com.google.common.collect.ImmutableList
+import com.google.common.util.concurrent.Futures
+import com.google.common.util.concurrent.ListenableFuture
 
 class PlaybackService : MediaSessionService() {
 
     private var mediaSession: MediaSession? = null
+
+    private val closeCommand = SessionCommand(ACTION_CLOSE_APP, Bundle.EMPTY)
+
+    private val sessionCallback = object : MediaSession.Callback {
+
+        override fun onConnect(
+            session: MediaSession,
+            controller: MediaSession.ControllerInfo
+        ): MediaSession.ConnectionResult {
+            val sessionCommands =
+                MediaSession.ConnectionResult.DEFAULT_SESSION_COMMANDS
+                    .buildUpon()
+                    .add(closeCommand)
+                    .build()
+
+            return MediaSession.ConnectionResult.AcceptedResultBuilder(session)
+                .setAvailableSessionCommands(sessionCommands)
+                .build()
+        }
+
+        override fun onCustomCommand(
+            session: MediaSession,
+            controller: MediaSession.ControllerInfo,
+            customCommand: SessionCommand,
+            args: Bundle
+        ): ListenableFuture<SessionResult> {
+            if (customCommand.customAction == ACTION_CLOSE_APP) {
+                Log.d("Sonora", "Close button tapped in notification")
+                exitApp()
+                return Futures.immediateFuture(
+                    SessionResult(SessionResult.RESULT_SUCCESS)
+                )
+            }
+            return super.onCustomCommand(session, controller, customCommand, args)
+        }
+    }
 
     private val killReceiver = object : BroadcastReceiver() {
 
@@ -31,7 +76,16 @@ class PlaybackService : MediaSessionService() {
 
         val player = ExoPlayer.Builder(this).build()
 
+        // "Close" (X) button shown in the playback notification.
+        val closeButton = CommandButton.Builder()
+            .setDisplayName("Close")
+            .setIconResId(R.drawable.ic_close)
+            .setSessionCommand(closeCommand)
+            .build()
+
         mediaSession = MediaSession.Builder(this, player)
+            .setCallback(sessionCallback)
+            .setCustomLayout(ImmutableList.of(closeButton))
             .build()
 
         ContextCompat.registerReceiver(
@@ -70,16 +124,19 @@ class PlaybackService : MediaSessionService() {
 
     /**
      * Called when the user removes the app's task from Recents
-     * (requires android:stopWithTask="false" in the manifest so the
-     * system always delivers this callback).
+     * (requires android:stopWithTask="false" in the manifest).
      */
     override fun onTaskRemoved(rootIntent: Intent?) {
         Log.d("Sonora", "PlaybackService.onTaskRemoved fired")
+        exitApp()
+    }
 
-        terminatePlayback()
-
-        // The user removed the task, so fully exit the app process.
-        android.os.Process.killProcess(android.os.Process.myPid())
+    /** Stops playback, removes the notification and exits the app process. */
+    private fun exitApp() {
+        Handler(Looper.getMainLooper()).post {
+            terminatePlayback()
+            android.os.Process.killProcess(android.os.Process.myPid())
+        }
     }
 
     private fun terminatePlayback() {
@@ -131,5 +188,8 @@ class PlaybackService : MediaSessionService() {
 
         private const val ACTION_STOP_SERVICE =
             "ACTION_STOP_SERVICE"
+
+        private const val ACTION_CLOSE_APP =
+            "com.example.music.ACTION_CLOSE_APP"
     }
 }
