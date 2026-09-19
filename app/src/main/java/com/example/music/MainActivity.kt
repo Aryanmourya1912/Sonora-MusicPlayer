@@ -4,7 +4,6 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.ComponentName
 import android.content.Context
-import android.content.Intent
 import android.content.SharedPreferences
 import android.graphics.drawable.BitmapDrawable
 import android.media.AudioManager
@@ -248,13 +247,6 @@ class MainActivity : ComponentActivity() {
                     )
                 }
             }
-        }
-    }
-
-    override fun onStop() {
-        super.onStop()
-        if (isFinishing) {
-            sendBroadcast(Intent("com.example.music.ACTION_KILL_SERVICE"))
         }
     }
 }
@@ -1099,7 +1091,6 @@ fun SonoraPlayerScreen(
     var activeAudioUrl by remember { mutableStateOf("") }
     var activeDurationFormatted by remember { mutableStateOf("0:00") }
 
-    // Sleep Timer countdown ticker
     LaunchedEffect(sleepTimerActiveMinutes, sleepTimerSecondsRemaining) {
         if (sleepTimerActiveMinutes > 0 && sleepTimerSecondsRemaining > 0) {
             delay(1000L)
@@ -1304,7 +1295,6 @@ fun SonoraPlayerScreen(
         }
     }
 
-    // MediaController initialization & restoring saved position correctly on State Ready
     DisposableEffect(context) {
         val sessionToken = SessionToken(context, ComponentName(context, PlaybackService::class.java))
         val controllerFuture = MediaController.Builder(context, sessionToken).buildAsync()
@@ -1348,6 +1338,8 @@ fun SonoraPlayerScreen(
                             activeAudioUrl = streamUrl
                             restoredTrack.audioUrl = streamUrl
                             mediaController.setMediaItem(buildMediaItem(restoredTrack))
+                            // Pre-seek before preparing prevents resetting to 0:00
+                            mediaController.seekTo(savedPosMs)
                             mediaController.prepare()
                             mediaController.pause()
                             updateQueueState(mediaController)
@@ -1370,11 +1362,6 @@ fun SonoraPlayerScreen(
                         if (dur > 0) {
                             totalDuration = dur
                             prefs.edit().putLong(KEY_LAST_DURATION_MS, dur).apply()
-                        }
-                        // Resume from exact last stopped timestamp once player is ready
-                        val savedPos = prefs.getLong(KEY_LAST_POSITION_MS, 0L)
-                        if (savedPos > 0 && mediaController.currentPosition < 1000L) {
-                            mediaController.seekTo(savedPos)
                         }
                     }
                     if (playbackState == Player.STATE_ENDED) {
@@ -2657,7 +2644,7 @@ fun SonoraPlayerScreen(
                 }
             }
 
-            // Floating Miniplayer with Artwork-Adaptive Ambient Background & Upward Swipe
+            // Floating Miniplayer
             if (activeSongId.isNotBlank()) {
                 val progressFraction = if (totalDuration > 0) (currentPosition.toFloat() / totalDuration.toFloat()).coerceIn(0f, 1f) else 0f
 
@@ -2846,7 +2833,7 @@ fun SonoraPlayerScreen(
             }
         }
 
-        // Full Screen Now Playing View & Synchronized Karaoke Lyrics Screen with Proper Toggle Animation
+        // Full Screen Now Playing View & Synchronized Karaoke Lyrics Screen
         AnimatedVisibility(
             visible = isPlayerExpanded,
             enter = slideInVertically(initialOffsetY = { it }),
@@ -2870,16 +2857,13 @@ fun SonoraPlayerScreen(
                     .pointerInput(Unit) {
                         detectVerticalDragGestures { _, dragAmount ->
                             if (dragAmount > 60f) {
-                                if (showLiveLyrics) {
-                                    showLiveLyrics = false
-                                } else {
-                                    isPlayerExpanded = false
-                                }
+                                isPlayerExpanded = false
+                                showLiveLyrics = false
                             }
                         }
                     }
             ) {
-                // Synchronized Live Karaoke Lyrics Screen Overlay (Toggled via lyrics button)
+                // Synchronized Live Karaoke Lyrics Screen Overlay
                 AnimatedVisibility(
                     visible = showLiveLyrics,
                     enter = slideInHorizontally(initialOffsetX = { it }),
@@ -2889,14 +2873,6 @@ fun SonoraPlayerScreen(
                     Box(
                         modifier = Modifier
                             .fillMaxSize()
-                            .background(
-                                Brush.verticalGradient(
-                                    colors = listOf(
-                                        animatedDominantColor.copy(alpha = 0.98f),
-                                        Color(0xFF06090E)
-                                    )
-                                )
-                            )
                             .padding(24.dp)
                     ) {
                         Column(

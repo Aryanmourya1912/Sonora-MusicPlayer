@@ -1,39 +1,17 @@
 package com.example.music
 
-import android.content.BroadcastReceiver
-import android.content.Context
 import android.content.Intent
-import android.content.IntentFilter
-import androidx.core.content.ContextCompat
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
 
 class PlaybackService : MediaSessionService() {
     private var mediaSession: MediaSession? = null
-    private val killReceiver = object : BroadcastReceiver() {
-        override fun onReceive(context: Context?, intent: Intent?) {
-            mediaSession?.player?.apply {
-                pause()
-                stop()
-            }
-            stopForeground(STOP_FOREGROUND_REMOVE)
-            stopSelf()
-            android.os.Process.killProcess(android.os.Process.myPid())
-        }
-    }
 
     override fun onCreate() {
         super.onCreate()
         val player = ExoPlayer.Builder(this).build()
         mediaSession = MediaSession.Builder(this, player).build()
-
-        ContextCompat.registerReceiver(
-            this,
-            killReceiver,
-            IntentFilter("com.example.music.ACTION_KILL_SERVICE"),
-            ContextCompat.RECEIVER_NOT_EXPORTED
-        )
     }
 
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession? = mediaSession
@@ -43,6 +21,7 @@ class PlaybackService : MediaSessionService() {
         return START_NOT_STICKY
     }
 
+    // Fires reliably when swiping app away or clicking "Clear All" in Android Recents
     override fun onTaskRemoved(rootIntent: Intent?) {
         mediaSession?.player?.apply {
             pause()
@@ -51,14 +30,12 @@ class PlaybackService : MediaSessionService() {
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
         super.onTaskRemoved(rootIntent)
-        android.os.Process.killProcess(android.os.Process.myPid())
+        
+        // Hard kill the process to bypass manufacturer background restrictions
+        System.exit(0)
     }
 
     override fun onDestroy() {
-        try {
-            unregisterReceiver(killReceiver)
-        } catch (_: Exception) {}
-
         mediaSession?.run {
             player.pause()
             player.stop()
