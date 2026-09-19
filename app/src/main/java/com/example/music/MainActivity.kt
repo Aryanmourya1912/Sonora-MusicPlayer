@@ -1,5 +1,6 @@
 package com.example.music
 
+import android.app.Activity
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.ComponentName
@@ -145,6 +146,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -153,6 +155,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.Player
@@ -241,22 +245,54 @@ private val SonoraLightColors = lightColorScheme(
 )
 
 class MainActivity : ComponentActivity() {
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
         setContent {
             var isDarkTheme by remember { mutableStateOf(true) }
-            MaterialTheme(colorScheme = if (isDarkTheme) SonoraDarkColors else SonoraLightColors) {
+
+            MaterialTheme(
+                colorScheme =
+                    if (isDarkTheme) SonoraDarkColors
+                    else SonoraLightColors
+            ) {
                 Surface(
                     modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colorScheme.background
                 ) {
                     SonoraPlayerScreen(
                         isDarkTheme = isDarkTheme,
-                        onToggleTheme = { isDarkTheme = !isDarkTheme }
+                        onToggleTheme = {
+                            isDarkTheme = !isDarkTheme
+                        }
                     )
                 }
             }
         }
+    }
+
+    override fun onDestroy() {
+
+        /*
+         * If the Activity is actually being finished,
+         * such as when its task is removed from Recents,
+         * tell PlaybackService to terminate playback.
+         *
+         * Don't do this during rotation/configuration changes.
+         */
+        if (isFinishing && !isChangingConfigurations) {
+
+            val intent = Intent(
+                "com.example.music.ACTION_KILL_SERVICE"
+            ).apply {
+                setPackage(packageName)
+            }
+
+            sendBroadcast(intent)
+        }
+
+        super.onDestroy()
     }
 }
 
@@ -1297,6 +1333,7 @@ fun SonoraPlayerScreen(
     onToggleTheme: () -> Unit
 ) {
     val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
     val coroutineScope = rememberCoroutineScope()
     val audioManager = remember { context.getSystemService(Context.AUDIO_SERVICE) as AudioManager }
     val keyboardController = LocalSoftwareKeyboardController.current
@@ -1600,138 +1637,306 @@ fun SonoraPlayerScreen(
         }
     }
 
-    DisposableEffect(context) {
-        // Explicitly start service so Android registers it with the task for onTaskRemoved
-        val serviceIntent = Intent(context, PlaybackService::class.java)
-        try {
-            context.startService(serviceIntent)
-        } catch (_: Exception) {}
+    DisposableEffect(context, lifecycleOwner) {
 
-        val sessionToken = SessionToken(context, ComponentName(context, PlaybackService::class.java))
-        val controllerFuture = MediaController.Builder(context, sessionToken).buildAsync()
+        val activity = context as? Activity
+            var disposed = false
 
-        controllerFuture.addListener({
-            val mediaController = controllerFuture.get()
-            controller = mediaController
-            isPlaying = mediaController.isPlaying
+            // Observe the Activity lifecycle.
+            //
+            // We do NOT stop playback when the user simply presses Home or locks the
+            // screen. We only trigger the service shutdown when the Activity is
+            // actually being destroyed/finished.
+            val lifecycleObserver = LifecycleEventObserver { _, event ->
+                when (event) {
+                    Lifecycle.Event.ON_STOP -> {
+                        // When the task is removed from Recents, Android may mark the
+                        // Activity as finishing. Do not stop playback merely because
+                        // ON_STOP occurs: Home and screen-lock also cause ON_STOP.
+                        if (activity?.isFinishing == true &&
+                            activity.isChangingConfigurations.not()
+                        ) {
+                            // Release the MediaController first so that
+                            // MediaSessionService is no longer held by this Activity.
+                            controller?.release()
+                            controller = null
 
-            val savedId = prefs.getString(KEY_LAST_ID, "") ?: ""
-            val savedPosMs = prefs.getLong(KEY_LAST_POSITION_MS, 0L)
+                            // Tell PlaybackService to terminate playback via an
+                            // explicit application-internal broadcast.
+                            val killIntent = Intent("com.example.music.ACTION_KILL_SERVICE").apply {
+                                setPackage(context.packageName)
+                            }
 
-            if (mediaController.mediaItemCount > 0) {
-                val currentItem = mediaController.currentMediaItem
-                activeSongId = currentItem?.mediaId ?: ""
-                activeTitle = currentItem?.mediaMetadata?.title?.toString() ?: "Unknown Track"
-                activeArtist = currentItem?.mediaMetadata?.artist?.toString() ?: "Unknown Artist"
-                activeArtworkUrl = currentItem?.mediaMetadata?.artworkUri?.toString() ?: ""
-                currentPosition = max(0L, mediaController.currentPosition)
-                totalDuration = if (mediaController.duration > 0) mediaController.duration else 0L
-                updateQueueState(mediaController)
-            } else if (savedId.isNotBlank()) {
-                val savedTitle = prefs.getString(KEY_LAST_TITLE, "Last Played Track") ?: ""
-                val savedArtist = prefs.getString(KEY_LAST_ARTIST, "Tap play to resume") ?: ""
-                val savedArtworkUrl = prefs.getString(KEY_LAST_ARTWORK_URL, "") ?: ""
-                val savedDurationTxt = prefs.getString(KEY_LAST_DURATION_TXT, "0:00") ?: ""
-                val savedDurMs = prefs.getLong(KEY_LAST_DURATION_MS, 0L)
+                            try {
+                                context.sendBroadcast(killIntent)
+                            } catch (_: Exception) {
+                            }
+                        }
+                    }
 
-                activeSongId = savedId
-                activeTitle = savedTitle
-                activeArtist = savedArtist
-                activeArtworkUrl = savedArtworkUrl
-                activeDurationFormatted = savedDurationTxt
-                currentPosition = savedPosMs
-                totalDuration = savedDurMs
+                    Lifecycle.Event.ON_DESTROY -> {
+                        // Extra fallback: some OEM task managers do not make the
+                        // distinction obvious until Activity destruction. Skip this
+                        // during configuration changes such as rotation/recreation.
+                        if (activity?.isChangingConfigurations != true) {
+                            controller?.release()
+                            controller = null
 
-                coroutineScope.launch {
-                    val restoredTrack = FullTrackItem(savedId, savedTitle, savedArtist, "", savedArtworkUrl, savedDurationTxt)
-                    val streamUrl = resolveTrackAudioStream(restoredTrack)
-                    if (streamUrl.isNotBlank()) {
-                        activeAudioUrl = streamUrl
-                        restoredTrack.audioUrl = streamUrl
-                        mediaController.setMediaItem(buildMediaItem(restoredTrack), savedPosMs)
-                        mediaController.prepare()
-                        mediaController.pause()
-                        updateQueueState(mediaController)
+                            // Explicitly tell PlaybackService to stop.
+                            val killIntent = Intent("com.example.music.ACTION_KILL_SERVICE").apply {
+                                setPackage(context.packageName)
+                            }
+
+                            try {
+                                context.sendBroadcast(killIntent)
+                            } catch (_: Exception) {
+                            }
+                        }
+                    }
+
+                    else -> {
+                        // Nothing required for other lifecycle events.
                     }
                 }
             }
 
-            mediaController.addListener(object : Player.Listener {
-                override fun onIsPlayingChanged(playing: Boolean) {
-                    isPlaying = playing
-                    if (!playing && mediaController.currentPosition > 0) {
-                        prefs.edit().putLong(KEY_LAST_POSITION_MS, mediaController.currentPosition).apply()
-                    }
-                }
+            lifecycleOwner.lifecycle.addObserver(lifecycleObserver)
 
-                override fun onPlaybackStateChanged(playbackState: Int) {
-                    if (playbackState == Player.STATE_READY) {
-                        val dur = mediaController.duration
-                        if (dur > 0) {
-                            totalDuration = dur
-                            prefs.edit().putLong(KEY_LAST_DURATION_MS, dur).apply()
+            // IMPORTANT: We do NOT manually call startService() here.
+            // MediaController/MediaSessionService handles the connection.
+            val sessionToken = SessionToken(
+                context,
+                ComponentName(context, PlaybackService::class.java)
+            )
+
+            val controllerFuture = MediaController.Builder(context, sessionToken).buildAsync()
+
+            controllerFuture.addListener({
+                try {
+                    val mediaController = controllerFuture.get()
+
+                    // If the Compose effect was already disposed or the Activity is
+                    // already finishing, don't keep this controller.
+                    if (disposed ||
+                        (activity?.isFinishing == true &&
+                            activity.isChangingConfigurations.not())
+                    ) {
+                        try {
+                            mediaController.release()
+                        } catch (_: Exception) {
                         }
+                        return@addListener
                     }
-                    if (playbackState == Player.STATE_ENDED) {
-                        if (stopAfterCurrentTrack) {
-                            mediaController.pause()
-                        } else if (endlessRadioEnabled) {
-                            ensureInfiniteQueueFilled(mediaController)
-                            mediaController.play()
-                        }
-                    }
-                }
 
-                override fun onTimelineChanged(timeline: Timeline, reason: Int) {
-                    updateQueueState(mediaController)
-                }
+                    controller = mediaController
+                    isPlaying = mediaController.isPlaying
 
-                override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
-                    if (stopAfterCurrentTrack && reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO) {
-                        mediaController.pause()
-                    }
-                    val newId = mediaItem?.mediaId ?: ""
-                    activeSongId = newId
-                    activeTitle = mediaItem?.mediaMetadata?.title?.toString() ?: "Unknown Track"
-                    activeArtist = mediaItem?.mediaMetadata?.artist?.toString() ?: "Unknown Artist"
-                    activeArtworkUrl = mediaItem?.mediaMetadata?.artworkUri?.toString() ?: ""
-                    activeAudioUrl = mediaItem?.requestMetadata?.mediaUri?.toString()
-                        ?: mediaItem?.localConfiguration?.uri?.toString() ?: ""
+                    // Restore saved playback state.
+                    val savedId = prefs.getString(KEY_LAST_ID, "") ?: ""
+                    val savedPosMs = prefs.getLong(KEY_LAST_POSITION_MS, 0L)
 
-                    if (newId != savedId) {
-                        currentPosition = 0L
-                        prefs.edit().putLong(KEY_LAST_POSITION_MS, 0L).apply()
-                    } else {
+                    if (mediaController.mediaItemCount > 0) {
+                        // MediaSession already contains a queue/media item:
+                        // restore UI from the active MediaController state.
+                        val currentItem = mediaController.currentMediaItem
+
+                        activeSongId = currentItem?.mediaId ?: ""
+                        activeTitle = currentItem?.mediaMetadata?.title?.toString()
+                            ?: "Unknown Track"
+                        activeArtist = currentItem?.mediaMetadata?.artist?.toString()
+                            ?: "Unknown Artist"
+                        activeArtworkUrl = currentItem?.mediaMetadata?.artworkUri?.toString()
+                            ?: ""
+
+                        currentPosition = max(0L, mediaController.currentPosition)
+                        totalDuration =
+                            if (mediaController.duration > 0) mediaController.duration else 0L
+
+                        updateQueueState(mediaController)
+                    } else if (savedId.isNotBlank()) {
+                        // No current MediaItem, but we have a previously saved track.
+                        // Restore its UI information.
+                        val savedTitle = prefs.getString(KEY_LAST_TITLE, "Last Played Track") ?: ""
+                        val savedArtist = prefs.getString(KEY_LAST_ARTIST, "Tap play to resume") ?: ""
+                        val savedArtworkUrl = prefs.getString(KEY_LAST_ARTWORK_URL, "") ?: ""
+                        val savedDurationTxt = prefs.getString(KEY_LAST_DURATION_TXT, "0:00") ?: ""
+                        val savedDurMs = prefs.getLong(KEY_LAST_DURATION_MS, 0L)
+
+                        activeSongId = savedId
+                        activeTitle = savedTitle
+                        activeArtist = savedArtist
+                        activeArtworkUrl = savedArtworkUrl
+                        activeDurationFormatted = savedDurationTxt
                         currentPosition = savedPosMs
+                        totalDuration = savedDurMs
+
+                        coroutineScope.launch {
+                            // Don't continue restoration if the Activity has already
+                            // been destroyed.
+                            if (disposed) return@launch
+
+                            val restoredTrack = FullTrackItem(
+                                savedId,
+                                savedTitle,
+                                savedArtist,
+                                "",
+                                savedArtworkUrl,
+                                savedDurationTxt
+                            )
+
+                            val streamUrl = resolveTrackAudioStream(restoredTrack)
+
+                            if (streamUrl.isNotBlank() && !disposed) {
+                                activeAudioUrl = streamUrl
+                                restoredTrack.audioUrl = streamUrl
+
+                                mediaController.setMediaItem(
+                                    buildMediaItem(restoredTrack),
+                                    savedPosMs
+                                )
+                                mediaController.prepare()
+                                mediaController.pause()
+
+                                updateQueueState(mediaController)
+                            }
+                        }
                     }
 
-                    updateQueueState(mediaController)
+                    // Listen to Media3 playback changes.
+                    mediaController.addListener(
+                        object : Player.Listener {
 
-                    if (activeSongId.isNotBlank()) {
-                        recordTrackPlay(
-                            context,
-                            FullTrackItem(activeSongId, activeTitle, activeArtist, activeAudioUrl, activeArtworkUrl, activeDurationFormatted)
-                        )
-                        refreshListeningStats()
-                    }
+                            override fun onIsPlayingChanged(playing: Boolean) {
+                                // Ignore callbacks after this effect was disposed.
+                                if (disposed) return
 
-                    prefs.edit()
-                        .putString(KEY_LAST_ID, activeSongId)
-                        .putString(KEY_LAST_TITLE, activeTitle)
-                        .putString(KEY_LAST_ARTIST, activeArtist)
-                        .putString(KEY_LAST_AUDIO_URL, activeAudioUrl)
-                        .putString(KEY_LAST_ARTWORK_URL, activeArtworkUrl)
-                        .apply()
+                                isPlaying = playing
 
-                    ensureInfiniteQueueFilled(mediaController)
+                                if (!playing && mediaController.currentPosition > 0) {
+                                    prefs.edit()
+                                        .putLong(KEY_LAST_POSITION_MS, mediaController.currentPosition)
+                                        .apply()
+                                }
+                            }
+
+                            override fun onPlaybackStateChanged(playbackState: Int) {
+                                if (disposed) return
+
+                                if (playbackState == Player.STATE_READY) {
+                                    val dur = mediaController.duration
+
+                                    if (dur > 0) {
+                                        totalDuration = dur
+
+                                        prefs.edit()
+                                            .putLong(KEY_LAST_DURATION_MS, dur)
+                                            .apply()
+                                    }
+                                }
+
+                                if (playbackState == Player.STATE_ENDED) {
+                                    if (stopAfterCurrentTrack) {
+                                        mediaController.pause()
+                                    } else if (endlessRadioEnabled) {
+                                        ensureInfiniteQueueFilled(mediaController)
+                                        mediaController.play()
+                                    }
+                                }
+                            }
+
+                            override fun onTimelineChanged(timeline: Timeline, reason: Int) {
+                                if (disposed) return
+
+                                updateQueueState(mediaController)
+                            }
+
+                            override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+                                if (disposed) return
+
+                                if (stopAfterCurrentTrack &&
+                                    reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO
+                                ) {
+                                    mediaController.pause()
+                                }
+
+                                val newId = mediaItem?.mediaId ?: ""
+
+                                activeSongId = newId
+                                activeTitle = mediaItem?.mediaMetadata?.title?.toString()
+                                    ?: "Unknown Track"
+                                activeArtist = mediaItem?.mediaMetadata?.artist?.toString()
+                                    ?: "Unknown Artist"
+                                activeArtworkUrl = mediaItem?.mediaMetadata?.artworkUri?.toString()
+                                    ?: ""
+                                activeAudioUrl = mediaItem?.requestMetadata?.mediaUri?.toString()
+                                    ?: mediaItem?.localConfiguration?.uri?.toString()
+                                    ?: ""
+
+                                if (newId != savedId) {
+                                    currentPosition = 0L
+
+                                    prefs.edit()
+                                        .putLong(KEY_LAST_POSITION_MS, 0L)
+                                        .apply()
+                                } else {
+                                    currentPosition = savedPosMs
+                                }
+
+                                updateQueueState(mediaController)
+
+                                if (activeSongId.isNotBlank()) {
+                                    recordTrackPlay(
+                                        context,
+                                        FullTrackItem(
+                                            activeSongId,
+                                            activeTitle,
+                                            activeArtist,
+                                            activeAudioUrl,
+                                            activeArtworkUrl,
+                                            activeDurationFormatted
+                                        )
+                                    )
+
+                                    refreshListeningStats()
+                                }
+
+                                prefs.edit()
+                                    .putString(KEY_LAST_ID, activeSongId)
+                                    .putString(KEY_LAST_TITLE, activeTitle)
+                                    .putString(KEY_LAST_ARTIST, activeArtist)
+                                    .putString(KEY_LAST_AUDIO_URL, activeAudioUrl)
+                                    .putString(KEY_LAST_ARTWORK_URL, activeArtworkUrl)
+                                    .apply()
+
+                                ensureInfiniteQueueFilled(mediaController)
+                            }
+                        }
+                    )
+                } catch (e: Exception) {
+                    // MediaController creation/connection failed.
+                    e.printStackTrace()
                 }
-            })
-        }, ContextCompat.getMainExecutor(context))
+            }, ContextCompat.getMainExecutor(context))
 
-        onDispose {
-            controller?.release()
+            onDispose {
+                // Mark this effect as dead before releasing the controller. This
+                // prevents a late controllerFuture callback from re-attaching itself
+                // after disposal.
+                disposed = true
+
+                // Stop observing lifecycle events.
+                lifecycleOwner.lifecycle.removeObserver(lifecycleObserver)
+
+                // Release the controller.
+                try {
+                    controller?.release()
+                } catch (_: Exception) {
+                }
+
+                controller = null
+            }
         }
-    }
+
 
     LaunchedEffect(isPlaying, isDraggingSlider) {
         while (isPlaying && !isDraggingSlider) {
