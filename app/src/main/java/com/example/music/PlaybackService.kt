@@ -14,8 +14,12 @@ class PlaybackService : MediaSessionService() {
         mediaSession = MediaSession.Builder(this, player).build()
     }
 
-    // Required by MediaSessionService
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession? = mediaSession
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        super.onStartCommand(intent, flags, startId)
+        return START_NOT_STICKY
+    }
 
     override fun onTaskRemoved(rootIntent: Intent?) {
         mediaSession?.player?.apply {
