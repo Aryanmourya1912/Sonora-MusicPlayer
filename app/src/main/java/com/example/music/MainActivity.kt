@@ -4,6 +4,7 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.ComponentName
 import android.content.Context
+import android.content.Intent
 import android.content.SharedPreferences
 import android.graphics.drawable.BitmapDrawable
 import android.media.AudioManager
@@ -247,6 +248,13 @@ class MainActivity : ComponentActivity() {
                     )
                 }
             }
+        }
+    }
+
+    override fun onStop() {
+        super.onStop()
+        if (isFinishing) {
+            sendBroadcast(Intent("com.example.music.ACTION_KILL_SERVICE"))
         }
     }
 }
@@ -1296,6 +1304,7 @@ fun SonoraPlayerScreen(
         }
     }
 
+    // MediaController initialization & restoring saved position correctly on State Ready
     DisposableEffect(context) {
         val sessionToken = SessionToken(context, ComponentName(context, PlaybackService::class.java))
         val controllerFuture = MediaController.Builder(context, sessionToken).buildAsync()
@@ -1340,7 +1349,6 @@ fun SonoraPlayerScreen(
                             restoredTrack.audioUrl = streamUrl
                             mediaController.setMediaItem(buildMediaItem(restoredTrack))
                             mediaController.prepare()
-                            mediaController.seekTo(savedPosMs)
                             mediaController.pause()
                             updateQueueState(mediaController)
                         }
@@ -1362,6 +1370,11 @@ fun SonoraPlayerScreen(
                         if (dur > 0) {
                             totalDuration = dur
                             prefs.edit().putLong(KEY_LAST_DURATION_MS, dur).apply()
+                        }
+                        // Resume from exact last stopped timestamp once player is ready
+                        val savedPos = prefs.getLong(KEY_LAST_POSITION_MS, 0L)
+                        if (savedPos > 0 && mediaController.currentPosition < 1000L) {
+                            mediaController.seekTo(savedPos)
                         }
                     }
                     if (playbackState == Player.STATE_ENDED) {

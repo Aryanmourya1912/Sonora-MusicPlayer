@@ -19,6 +19,7 @@ class PlaybackService : MediaSessionService() {
             }
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
+            android.os.Process.killProcess(android.os.Process.myPid())
         }
     }
 
@@ -26,7 +27,7 @@ class PlaybackService : MediaSessionService() {
         super.onCreate()
         val player = ExoPlayer.Builder(this).build()
         mediaSession = MediaSession.Builder(this, player).build()
-        
+
         ContextCompat.registerReceiver(
             this,
             killReceiver,
@@ -57,7 +58,7 @@ class PlaybackService : MediaSessionService() {
         try {
             unregisterReceiver(killReceiver)
         } catch (_: Exception) {}
-        
+
         mediaSession?.run {
             player.pause()
             player.stop()
