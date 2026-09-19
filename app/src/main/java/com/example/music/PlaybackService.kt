@@ -4,8 +4,8 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.util.Log
 import androidx.core.content.ContextCompat
-import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
@@ -32,7 +32,7 @@ class PlaybackService : MediaSessionService() {
         val player = ExoPlayer.Builder(this).build()
 
         mediaSession = MediaSession.Builder(this, player)
-        .build()
+            .build()
 
         ContextCompat.registerReceiver(
             this,
@@ -68,31 +68,48 @@ class PlaybackService : MediaSessionService() {
         return START_NOT_STICKY
     }
 
-    @OptIn(UnstableApi::class)
-    override fun onTaskRemoved(
-        rootIntent: Intent?
-    ) {
-        pauseAllPlayersAndStopSelf()
+    /**
+     * Called when the user removes the app's task from Recents
+     * (requires android:stopWithTask="false" in the manifest so the
+     * system always delivers this callback).
+     */
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        Log.d("Sonora", "PlaybackService.onTaskRemoved fired")
+
+        terminatePlayback()
+
+        // The user removed the task, so fully exit the app process.
+        android.os.Process.killProcess(android.os.Process.myPid())
     }
 
     private fun terminatePlayback() {
-        try {
-            mediaSession?.player?.apply {
-                playWhenReady = false
-                stop()
-                clearMediaItems()
-                release()
+        mediaSession?.let { session ->
+            try {
+                session.player.apply {
+                    playWhenReady = false
+                    stop()
+                    clearMediaItems()
+                    release()
+                }
+            } catch (_: Exception) {
+                // Ignore player cleanup errors
             }
 
-            mediaSession?.release()
-            mediaSession = null
-
-            stopForeground(STOP_FOREGROUND_REMOVE)
-            stopSelf()
-
-        } catch (_: Exception) {
-            // Ignore cleanup errors
+            try {
+                session.release()
+            } catch (_: Exception) {
+                // Ignore session cleanup errors
+            }
         }
+        mediaSession = null
+
+        try {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+        } catch (_: Exception) {
+            // Service may not be in the foreground
+        }
+
+        stopSelf()
     }
 
     override fun onDestroy() {
@@ -110,9 +127,9 @@ class PlaybackService : MediaSessionService() {
 
     companion object {
         private const val ACTION_KILL_SERVICE =
-        "com.example.music.ACTION_KILL_SERVICE"
+            "com.example.music.ACTION_KILL_SERVICE"
 
         private const val ACTION_STOP_SERVICE =
-        "ACTION_STOP_SERVICE"
+            "ACTION_STOP_SERVICE"
     }
 }
