@@ -1,15 +1,27 @@
 package com.example.music
 
 import android.content.Intent
+import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
 
 class PlaybackService : MediaSessionService() {
-    // ... your existing session and player initialization ...
+    private var mediaSession: MediaSession? = null
+
+    override fun onCreate() {
+        super.onCreate()
+        val player = ExoPlayer.Builder(this).build()
+        mediaSession = MediaSession.Builder(this, player).build()
+    }
+
+    // Required by MediaSessionService
+    override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession? = mediaSession
 
     override fun onTaskRemoved(rootIntent: Intent?) {
-        val player = mediaSession?.player
-        player?.pause()
-        player?.stop()
+        mediaSession?.player?.apply {
+            pause()
+            stop()
+        }
         stopSelf()
         super.onTaskRemoved(rootIntent)
     }
