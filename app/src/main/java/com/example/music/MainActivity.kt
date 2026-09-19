@@ -1056,7 +1056,6 @@ fun SonoraPlayerScreen(
     var endlessRadioEnabled by remember { mutableStateOf(true) }
     var showQueueDialog by remember { mutableStateOf(false) }
     
-    // Action Buttons Interactive States
     var isShuffleActive by remember { mutableStateOf(false) }
     var isRepeatActive by remember { mutableStateOf(false) }
     var repeatModeState by remember { mutableIntStateOf(Player.REPEAT_MODE_OFF) }
@@ -1178,7 +1177,6 @@ fun SonoraPlayerScreen(
         }
     }
 
-    // BackHandler: allows minimizing/exiting screen views without stopping background playback
     BackHandler(enabled = true) {
         when {
             showLiveLyrics -> {
@@ -1194,7 +1192,6 @@ fun SonoraPlayerScreen(
                 selectedNavTab = 0
             }
             else -> {
-                // Move task to back (minimize) instead of killing app, keeping music playing in background
                 (context as? ComponentActivity)?.moveTaskToBack(true)
             }
         }
@@ -1976,7 +1973,7 @@ fun SonoraPlayerScreen(
         )
     }
 
-    // Up Next Queue Dialog with Move Up/Down Buttons
+    // Up Next Queue Dialog
     if (showQueueDialog) {
         AlertDialog(
             onDismissRequest = { showQueueDialog = false },
@@ -2836,7 +2833,7 @@ fun SonoraPlayerScreen(
             }
         }
 
-        // Gesture-Driven Drag Sheet: Full Screen Now Playing View & Synchronized Karaoke Lyrics Screen
+        // Full Screen Now Playing View & Synchronized Karaoke Lyrics Screen with Proper Toggle Animation
         AnimatedVisibility(
             visible = isPlayerExpanded,
             enter = slideInVertically(initialOffsetY = { it }),
@@ -2869,7 +2866,7 @@ fun SonoraPlayerScreen(
                         }
                     }
             ) {
-                // Synchronized Live Karaoke Lyrics Screen Overlay (Matching Image 3 & Image 4)
+                // Synchronized Live Karaoke Lyrics Screen Overlay (Toggled via lyrics button)
                 AnimatedVisibility(
                     visible = showLiveLyrics,
                     enter = slideInHorizontally(initialOffsetX = { it }),
@@ -2974,360 +2971,362 @@ fun SonoraPlayerScreen(
                     }
                 }
 
-                // Standard Player View
-                Column(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(horizontal = 22.dp, vertical = 12.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.SpaceBetween
+                // Standard Player View (Hides completely when showLiveLyrics is true)
+                AnimatedVisibility(
+                    visible = !showLiveLyrics,
+                    enter = slideInHorizontally(initialOffsetX = { -it }),
+                    exit = slideOutHorizontally(targetOffsetX = { -it }),
+                    modifier = Modifier.fillMaxSize()
                 ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        IconButton(onClick = { isPlayerExpanded = false }) {
-                            Icon(imageVector = Icons.Rounded.KeyboardArrowDown, contentDescription = "Collapse", tint = Color.White, modifier = Modifier.size(28.dp))
-                        }
-                        Column(
-                            modifier = Modifier.weight(1f),
-                            horizontalAlignment = Alignment.CenterHorizontally
-                        ) {
-                            Text(
-                                text = "Now Playing",
-                                fontSize = 13.sp,
-                                color = Color(0xFFD1D5DB),
-                                fontWeight = FontWeight.Medium
-                            )
-                            Text(
-                                text = activeTitle,
-                                fontSize = 14.sp,
-                                color = Color.White,
-                                fontWeight = FontWeight.SemiBold,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                        }
-                        IconButton(onClick = { showLiveLyrics = true }) {
-                            Icon(imageVector = Icons.Rounded.Notes, contentDescription = "Live Lyrics", tint = Color.White, modifier = Modifier.size(24.dp))
-                        }
-                    }
-
-                    Box(
+                    Column(
                         modifier = Modifier
-                            .fillMaxWidth(0.88f)
-                            .aspectRatio(1f)
-                            .clip(RoundedCornerShape(20.dp))
-                            .background(Color(0xFF141C24)),
-                        contentAlignment = Alignment.Center
+                            .fillMaxSize()
+                            .padding(horizontal = 22.dp, vertical = 12.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.SpaceBetween
                     ) {
-                        AsyncImage(
-                            model = activeArtworkUrl,
-                            contentDescription = activeTitle,
-                            modifier = Modifier.fillMaxSize(),
-                            contentScale = ContentScale.Crop
-                        )
-                    }
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            IconButton(onClick = { isPlayerExpanded = false }) {
+                                Icon(imageVector = Icons.Rounded.KeyboardArrowDown, contentDescription = "Collapse", tint = Color.White, modifier = Modifier.size(28.dp))
+                            }
+                            Column(
+                                modifier = Modifier.weight(1f),
+                                horizontalAlignment = Alignment.CenterHorizontally
+                            ) {
+                                Text(
+                                    text = "Now Playing",
+                                    fontSize = 13.sp,
+                                    color = Color(0xFFD1D5DB),
+                                    fontWeight = FontWeight.Medium
+                                )
+                                Text(
+                                    text = activeTitle,
+                                    fontSize = 14.sp,
+                                    color = Color.White,
+                                    fontWeight = FontWeight.SemiBold,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                            // Lyrics Button toggles showLiveLyrics on/off
+                            IconButton(onClick = { showLiveLyrics = !showLiveLyrics }) {
+                                Icon(imageVector = Icons.Rounded.Notes, contentDescription = "Live Lyrics", tint = Color.White, modifier = Modifier.size(24.dp))
+                            }
+                        }
 
-                    Column(modifier = Modifier.fillMaxWidth()) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth(0.88f)
+                                .aspectRatio(1f)
+                                .clip(RoundedCornerShape(20.dp))
+                                .background(Color(0xFF141C24)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            AsyncImage(
+                                model = activeArtworkUrl,
+                                contentDescription = activeTitle,
+                                modifier = Modifier.fillMaxSize(),
+                                contentScale = ContentScale.Crop
+                            )
+                        }
+
+                        Column(modifier = Modifier.fillMaxWidth()) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = activeTitle,
+                                        fontSize = 20.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = Color.White,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    Spacer(modifier = Modifier.height(3.dp))
+                                    Text(
+                                        text = activeArtist,
+                                        fontSize = 14.sp,
+                                        color = Color(0xFFCBD5E1),
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+
+                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    Box(
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(18.dp))
+                                            .background(Color(0x40FFFFFF))
+                                            .clickable {
+                                                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                                                clipboard.setPrimaryClip(ClipData.newPlainText("Track", "https://music.youtube.com/watch?v=$activeSongId"))
+                                                Toast.makeText(context, "Copied track link", Toast.LENGTH_SHORT).show()
+                                            }
+                                            .padding(horizontal = 14.dp, vertical = 10.dp)
+                                    ) {
+                                        Icon(imageVector = Icons.Rounded.Share, contentDescription = "Share", tint = Color.White, modifier = Modifier.size(18.dp))
+                                    }
+
+                                    Box(
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(18.dp))
+                                            .background(Color(0x40FFFFFF))
+                                            .clickable {
+                                                coroutineScope.launch {
+                                                    if (isCurrentSongLiked) {
+                                                        dao.deleteLikedSongById(activeSongId)
+                                                    } else {
+                                                        dao.insertLikedSong(
+                                                            LikedSongEntity(
+                                                                id = activeSongId,
+                                                                title = activeTitle,
+                                                                artist = activeArtist,
+                                                                audioUrl = activeAudioUrl,
+                                                                artworkUrl = activeArtworkUrl,
+                                                                duration = activeDurationFormatted
+                                                            )
+                                                        )
+                                                    }
+                                                }
+                                            }
+                                            .padding(horizontal = 14.dp, vertical = 10.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = if (isCurrentSongLiked) Icons.Rounded.Favorite else Icons.Rounded.FavoriteBorder,
+                                            contentDescription = "Like",
+                                            tint = if (isCurrentSongLiked) Color(0xFFFF3B70) else Color.White,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                    }
+                                }
+                            }
+
+                            Spacer(modifier = Modifier.height(14.dp))
+
+                            val maxDurationFloat = max(1L, totalDuration).toFloat()
+                            val currentProgressFloat = if (isDraggingSlider) sliderDragValue else currentPosition.toFloat()
+
+                            Slider(
+                                value = currentProgressFloat.coerceIn(0f, maxDurationFloat),
+                                onValueChange = {
+                                    isDraggingSlider = true
+                                    sliderDragValue = it
+                                },
+                                onValueChangeFinished = {
+                                    val seekPos = sliderDragValue.toLong()
+                                    controller?.seekTo(seekPos)
+                                    currentPosition = seekPos
+                                    isDraggingSlider = false
+                                    prefs.edit().putLong(KEY_LAST_POSITION_MS, seekPos).apply()
+                                },
+                                valueRange = 0f..maxDurationFloat,
+                                colors = SliderDefaults.colors(
+                                    thumbColor = Color.White,
+                                    activeTrackColor = Color.White,
+                                    inactiveTrackColor = Color(0x40FFFFFF)
+                                ),
+                                modifier = Modifier.fillMaxWidth().height(20.dp)
+                            )
+
+                            Row(
+                                modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text(
+                                    text = formatTime(if (isDraggingSlider) sliderDragValue.toLong() else currentPosition),
+                                    fontSize = 12.sp,
+                                    color = Color(0xFFD1D5DB)
+                                )
+                                Text(
+                                    text = formatTime(totalDuration),
+                                    fontSize = 12.sp,
+                                    color = Color(0xFFD1D5DB)
+                                )
+                            }
+                        }
+
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween
+                            horizontalArrangement = Arrangement.SpaceEvenly
                         ) {
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(
-                                    text = activeTitle,
-                                    fontSize = 20.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = Color.White,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                                Spacer(modifier = Modifier.height(3.dp))
-                                Text(
-                                    text = activeArtist,
-                                    fontSize = 14.sp,
-                                    color = Color(0xFFCBD5E1),
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                            }
-
-                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                Box(
-                                    modifier = Modifier
-                                        .clip(RoundedCornerShape(18.dp))
-                                        .background(Color(0x40FFFFFF))
-                                        .clickable {
-                                            val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                                            clipboard.setPrimaryClip(ClipData.newPlainText("Track", "https://music.youtube.com/watch?v=$activeSongId"))
-                                            Toast.makeText(context, "Copied track link", Toast.LENGTH_SHORT).show()
-                                        }
-                                        .padding(horizontal = 14.dp, vertical = 10.dp)
-                                ) {
-                                    Icon(imageVector = Icons.Rounded.Share, contentDescription = "Share", tint = Color.White, modifier = Modifier.size(18.dp))
-                                }
-
-                                Box(
-                                    modifier = Modifier
-                                        .clip(RoundedCornerShape(18.dp))
-                                        .background(Color(0x40FFFFFF))
-                                        .clickable {
-                                            coroutineScope.launch {
-                                                if (isCurrentSongLiked) {
-                                                    dao.deleteLikedSongById(activeSongId)
-                                                } else {
-                                                    dao.insertLikedSong(
-                                                        LikedSongEntity(
-                                                            id = activeSongId,
-                                                            title = activeTitle,
-                                                            artist = activeArtist,
-                                                            audioUrl = activeAudioUrl,
-                                                            artworkUrl = activeArtworkUrl,
-                                                            duration = activeDurationFormatted
-                                                        )
-                                                    )
-                                                }
+                            Box(
+                                modifier = Modifier
+                                    .size(64.dp)
+                                    .clip(CircleShape)
+                                    .background(Color(0x50FFFFFF))
+                                    .clickable {
+                                        controller?.let { player ->
+                                            if (player.currentPosition > 3000L) {
+                                                player.seekTo(0L)
+                                            } else if (player.hasPreviousMediaItem()) {
+                                                player.seekToPreviousMediaItem()
                                             }
                                         }
-                                        .padding(horizontal = 14.dp, vertical = 10.dp)
-                                ) {
+                                    },
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(imageVector = Icons.Rounded.SkipPrevious, contentDescription = "Prev", tint = Color.White, modifier = Modifier.size(28.dp))
+                            }
+
+                            Box(
+                                modifier = Modifier
+                                    .height(64.dp)
+                                    .clip(RoundedCornerShape(32.dp))
+                                    .background(Color.White)
+                                    .clickable {
+                                        controller?.let { player ->
+                                            if (player.isPlaying) player.pause() else player.play()
+                                        }
+                                    }
+                                    .padding(horizontal = 34.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
                                     Icon(
-                                        imageVector = if (isCurrentSongLiked) Icons.Rounded.Favorite else Icons.Rounded.FavoriteBorder,
-                                        contentDescription = "Like",
-                                        tint = if (isCurrentSongLiked) Color(0xFFFF3B70) else Color.White,
-                                        modifier = Modifier.size(18.dp)
+                                        imageVector = if (isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
+                                        contentDescription = if (isPlaying) "Pause" else "Play",
+                                        tint = Color(0xFF0C141C),
+                                        modifier = Modifier.size(24.dp)
                                     )
-                                }
-                            }
-                        }
-
-                        Spacer(modifier = Modifier.height(14.dp))
-
-                        val maxDurationFloat = max(1L, totalDuration).toFloat()
-                        val currentProgressFloat = if (isDraggingSlider) sliderDragValue else currentPosition.toFloat()
-
-                        Slider(
-                            value = currentProgressFloat.coerceIn(0f, maxDurationFloat),
-                            onValueChange = {
-                                isDraggingSlider = true
-                                sliderDragValue = it
-                            },
-                            onValueChangeFinished = {
-                                val seekPos = sliderDragValue.toLong()
-                                controller?.seekTo(seekPos)
-                                currentPosition = seekPos
-                                isDraggingSlider = false
-                                prefs.edit().putLong(KEY_LAST_POSITION_MS, seekPos).apply()
-                            },
-                            valueRange = 0f..maxDurationFloat,
-                            colors = SliderDefaults.colors(
-                                thumbColor = Color.White,
-                                activeTrackColor = Color.White,
-                                inactiveTrackColor = Color(0x40FFFFFF)
-                            ),
-                            modifier = Modifier.fillMaxWidth().height(20.dp)
-                        )
-
-                        Row(
-                            modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Text(
-                                text = formatTime(if (isDraggingSlider) sliderDragValue.toLong() else currentPosition),
-                                fontSize = 12.sp,
-                                color = Color(0xFFD1D5DB)
-                            )
-                            Text(
-                                text = formatTime(totalDuration),
-                                fontSize = 12.sp,
-                                color = Color(0xFFD1D5DB)
-                            )
-                        }
-                    }
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceEvenly
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .size(64.dp)
-                                .clip(CircleShape)
-                                .background(Color(0x50FFFFFF))
-                                .clickable {
-                                    controller?.let { player ->
-                                        if (player.currentPosition > 3000L) {
-                                            player.seekTo(0L)
-                                        } else if (player.hasPreviousMediaItem()) {
-                                            player.seekToPreviousMediaItem()
-                                        }
-                                    }
-                                },
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Icon(imageVector = Icons.Rounded.SkipPrevious, contentDescription = "Prev", tint = Color.White, modifier = Modifier.size(28.dp))
-                        }
-
-                        Box(
-                            modifier = Modifier
-                                .height(64.dp)
-                                .clip(RoundedCornerShape(32.dp))
-                                .background(Color.White)
-                                .clickable {
-                                    controller?.let { player ->
-                                        if (player.isPlaying) player.pause() else player.play()
-                                    }
-                                }
-                                .padding(horizontal = 34.dp),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Icon(
-                                    imageVector = if (isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
-                                    contentDescription = if (isPlaying) "Pause" else "Play",
-                                    tint = Color(0xFF0C141C),
-                                    modifier = Modifier.size(24.dp)
-                                )
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text(
-                                    text = if (isPlaying) "Pause" else "Play",
-                                    fontSize = 18.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = Color(0xFF0C141C)
-                                )
-                            }
-                        }
-
-                        Box(
-                            modifier = Modifier
-                                .size(64.dp)
-                                .clip(CircleShape)
-                                .background(Color(0x50FFFFFF))
-                                .clickable {
-                                    controller?.let { player ->
-                                        if (player.hasNextMediaItem()) {
-                                            player.seekToNextMediaItem()
-                                        }
-                                    }
-                                },
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Icon(imageVector = Icons.Rounded.SkipNext, contentDescription = "Next", tint = Color.White, modifier = Modifier.size(28.dp))
-                        }
-                    }
-
-                    // Bottom Action Bar (Queue, Sleep Timer with mm:ss badge, Shuffle, Equalizer, Repeat, More)
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        // Queue Button
-                        Box(
-                            modifier = Modifier
-                                .size(46.dp)
-                                .clip(RoundedCornerShape(12.dp))
-                                .background(Color(0x30FFFFFF))
-                                .clickable { showQueueDialog = true },
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Icon(imageVector = Icons.Rounded.QueueMusic, contentDescription = "Queue", tint = Color.White, modifier = Modifier.size(20.dp))
-                        }
-
-                        // Sleep Timer Button with Live mm:ss Countdown Badge
-                        Box(
-                            modifier = Modifier
-                                .size(46.dp)
-                                .clip(RoundedCornerShape(12.dp))
-                                .background(if (sleepTimerActiveMinutes > 0) Color(0xFF7C4DFF) else Color(0x30FFFFFF))
-                                .clickable { showSleepTimerDialog = true },
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                Icon(imageVector = Icons.Rounded.Bedtime, contentDescription = "Timer", tint = Color.White, modifier = Modifier.size(16.dp))
-                                if (sleepTimerActiveMinutes > 0 && sleepTimerSecondsRemaining > 0) {
-                                    val mins = sleepTimerSecondsRemaining / 60
-                                    val secs = sleepTimerSecondsRemaining % 60
+                                    Spacer(modifier = Modifier.width(6.dp))
                                     Text(
-                                        text = String.format(Locale.ROOT, "%d:%02d", mins, secs),
-                                        fontSize = 8.sp,
+                                        text = if (isPlaying) "Pause" else "Play",
+                                        fontSize = 18.sp,
                                         fontWeight = FontWeight.Bold,
-                                        color = Color.White
+                                        color = Color(0xFF0C141C)
                                     )
                                 }
                             }
+
+                            Box(
+                                modifier = Modifier
+                                    .size(64.dp)
+                                    .clip(CircleShape)
+                                    .background(Color(0x50FFFFFF))
+                                    .clickable {
+                                        controller?.let { player ->
+                                            if (player.hasNextMediaItem()) {
+                                                player.seekToNextMediaItem()
+                                            }
+                                        }
+                                    },
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(imageVector = Icons.Rounded.SkipNext, contentDescription = "Next", tint = Color.White, modifier = Modifier.size(28.dp))
+                            }
                         }
 
-                        // Shuffle Button with Active State Color Toggle
-                        Box(
-                            modifier = Modifier
-                                .size(46.dp)
-                                .clip(RoundedCornerShape(12.dp))
-                                .background(if (isShuffleActive) Color(0xFF7C4DFF) else Color(0x30FFFFFF))
-                                .clickable {
-                                    isShuffleActive = !isShuffleActive
-                                    controller?.shuffleModeEnabled = isShuffleActive
-                                },
-                            contentAlignment = Alignment.Center
+                        // Bottom Action Bar
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Icon(imageVector = Icons.Rounded.Shuffle, contentDescription = "Shuffle", tint = Color.White, modifier = Modifier.size(18.dp))
-                        }
+                            Box(
+                                modifier = Modifier
+                                    .size(46.dp)
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(Color(0x30FFFFFF))
+                                    .clickable { showQueueDialog = true },
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(imageVector = Icons.Rounded.QueueMusic, contentDescription = "Queue", tint = Color.White, modifier = Modifier.size(20.dp))
+                            }
 
-                        // Equalizer Button
-                        Box(
-                            modifier = Modifier
-                                .size(46.dp)
-                                .clip(RoundedCornerShape(12.dp))
-                                .background(Color(0x30FFFFFF))
-                                .clickable { Toast.makeText(context, "Equalizer coming soon", Toast.LENGTH_SHORT).show() },
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Icon(imageVector = Icons.Rounded.Tune, contentDescription = "Equalizer", tint = Color.White, modifier = Modifier.size(18.dp))
-                        }
+                            Box(
+                                modifier = Modifier
+                                    .size(46.dp)
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(if (sleepTimerActiveMinutes > 0) Color(0xFF7C4DFF) else Color(0x30FFFFFF))
+                                    .clickable { showSleepTimerDialog = true },
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                    Icon(imageVector = Icons.Rounded.Bedtime, contentDescription = "Timer", tint = Color.White, modifier = Modifier.size(16.dp))
+                                    if (sleepTimerActiveMinutes > 0 && sleepTimerSecondsRemaining > 0) {
+                                        val mins = sleepTimerSecondsRemaining / 60
+                                        val secs = sleepTimerSecondsRemaining % 60
+                                        Text(
+                                            text = String.format(Locale.ROOT, "%d:%02d", mins, secs),
+                                            fontSize = 8.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = Color.White
+                                        )
+                                    }
+                                }
+                            }
 
-                        // Repeat Button with Active State Color Toggle
-                        Box(
-                            modifier = Modifier
-                                .size(46.dp)
-                                .clip(RoundedCornerShape(12.dp))
-                                .background(if (isRepeatActive) Color(0xFF7C4DFF) else Color(0x30FFFFFF))
-                                .clickable {
-                                    isRepeatActive = !isRepeatActive
-                                    repeatModeState = if (isRepeatActive) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_OFF
-                                    controller?.repeatMode = repeatModeState
-                                },
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Icon(
-                                imageVector = if (repeatModeState == Player.REPEAT_MODE_ONE) Icons.Rounded.RepeatOne else Icons.Rounded.Repeat,
-                                contentDescription = "Repeat",
-                                tint = Color.White,
-                                modifier = Modifier.size(18.dp)
-                            )
-                        }
+                            Box(
+                                modifier = Modifier
+                                    .size(46.dp)
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(if (isShuffleActive) Color(0xFF7C4DFF) else Color(0x30FFFFFF))
+                                    .clickable {
+                                        isShuffleActive = !isShuffleActive
+                                        controller?.shuffleModeEnabled = isShuffleActive
+                                    },
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(imageVector = Icons.Rounded.Shuffle, contentDescription = "Shuffle", tint = Color.White, modifier = Modifier.size(18.dp))
+                            }
 
-                        // More Button
-                        Box(
-                            modifier = Modifier
-                                .size(46.dp)
-                                .clip(CircleShape)
-                                .background(Color.White)
-                                .clickable {
-                                    selectedTrackForOptions = FullTrackItem(
-                                        id = activeSongId,
-                                        title = activeTitle,
-                                        artist = activeArtist,
-                                        audioUrl = activeAudioUrl,
-                                        artworkUrl = activeArtworkUrl,
-                                        durationFormatted = activeDurationFormatted
-                                    )
-                                },
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Icon(imageVector = Icons.Rounded.MoreVert, contentDescription = "More", tint = Color(0xFF0F1B26), modifier = Modifier.size(22.dp))
+                            Box(
+                                modifier = Modifier
+                                    .size(46.dp)
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(Color(0x30FFFFFF))
+                                    .clickable { Toast.makeText(context, "Equalizer coming soon", Toast.LENGTH_SHORT).show() },
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(imageVector = Icons.Rounded.Tune, contentDescription = "Equalizer", tint = Color.White, modifier = Modifier.size(18.dp))
+                            }
+
+                            Box(
+                                modifier = Modifier
+                                    .size(46.dp)
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(if (isRepeatActive) Color(0xFF7C4DFF) else Color(0x30FFFFFF))
+                                    .clickable {
+                                        isRepeatActive = !isRepeatActive
+                                        repeatModeState = if (isRepeatActive) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_OFF
+                                        controller?.repeatMode = repeatModeState
+                                    },
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = if (repeatModeState == Player.REPEAT_MODE_ONE) Icons.Rounded.RepeatOne else Icons.Rounded.Repeat,
+                                    contentDescription = "Repeat",
+                                    tint = Color.White,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
+
+                            Box(
+                                modifier = Modifier
+                                    .size(46.dp)
+                                    .clip(CircleShape)
+                                    .background(Color.White)
+                                    .clickable {
+                                        selectedTrackForOptions = FullTrackItem(
+                                            id = activeSongId,
+                                            title = activeTitle,
+                                            artist = activeArtist,
+                                            audioUrl = activeAudioUrl,
+                                            artworkUrl = activeArtworkUrl,
+                                            durationFormatted = activeDurationFormatted
+                                        )
+                                    },
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(imageVector = Icons.Rounded.MoreVert, contentDescription = "More", tint = Color(0xFF0F1B26), modifier = Modifier.size(22.dp))
+                            }
                         }
                     }
                 }

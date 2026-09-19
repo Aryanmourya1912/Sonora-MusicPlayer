@@ -1,17 +1,39 @@
 package com.example.music
 
+import android.app.Service
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
 
 class PlaybackService : MediaSessionService() {
     private var mediaSession: MediaSession? = null
+    private val killReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            mediaSession?.player?.apply {
+                pause()
+                stop()
+            }
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf()
+        }
+    }
 
     override fun onCreate() {
         super.onCreate()
         val player = ExoPlayer.Builder(this).build()
         mediaSession = MediaSession.Builder(this, player).build()
+        
+        // Register receiver for clear all
+        ContextCompat.registerReceiver(
+            this,
+            killReceiver,
+            IntentFilter("com.example.music.ACTION_KILL_SERVICE"),
+            ContextCompat.RECEIVER_NOT_EXPORTED
+        )
     }
 
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession? = mediaSession
@@ -21,7 +43,6 @@ class PlaybackService : MediaSessionService() {
         return START_NOT_STICKY
     }
 
-    // Triggered when swiped away or cleared via Recents "Close / Clear All"
     override fun onTaskRemoved(rootIntent: Intent?) {
         mediaSession?.player?.apply {
             pause()
@@ -34,6 +55,10 @@ class PlaybackService : MediaSessionService() {
     }
 
     override fun onDestroy() {
+        try {
+            unregisterReceiver(killReceiver)
+        } catch (_: Exception) {}
+        
         mediaSession?.run {
             player.pause()
             player.stop()
