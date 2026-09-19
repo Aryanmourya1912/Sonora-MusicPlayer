@@ -1336,7 +1336,10 @@ fun SonoraPlayerScreen(
             }
         }
     }
-
+    
+    var currentPosition by remember { mutableStateOf(0L) }
+    var totalDuration by remember { mutableStateOf(0L) }
+    
     LaunchedEffect(activeSongId, activeTitle, activeArtist) {
         if (activeSongId.isNotBlank()) {
             isLyricsLoading = true
@@ -1380,8 +1383,6 @@ fun SonoraPlayerScreen(
     val isCurrentSongLiked by dao.isSongLiked(activeSongId).collectAsState(initial = false)
     val isCurrentSongDownloaded by dao.isSongDownloaded(activeSongId).collectAsState(initial = false)
 
-    var currentPosition by remember { mutableStateOf(0L) }
-    var totalDuration by remember { mutableStateOf(0L) }
     var isDraggingSlider by remember { mutableStateOf(false) }
     var sliderDragValue by remember { mutableStateOf(0f) }
 
