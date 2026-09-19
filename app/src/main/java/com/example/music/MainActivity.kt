@@ -1164,6 +1164,9 @@ fun SonoraPlayerScreen(
     var showQueueDialog by remember {
         mutableStateOf(false)
     }
+    var isShuffleEnabled by remember {
+        mutableStateOf(false)
+    }
 
     // Action Buttons Interactive States
     var isShuffleActive by remember {
@@ -1172,12 +1175,16 @@ fun SonoraPlayerScreen(
     var isRepeatActive by remember {
         mutableStateOf(false)
     }
+    var repeatModeState by remember {
+        mutableIntStateOf(Player.REPEAT_MODE_OFF)
+    } // <-- Add this state declaration
     var sleepTimerActiveMinutes by remember {
         mutableIntStateOf(0)
     }
     var sleepTimerSecondsRemaining by remember {
         mutableLongStateOf(0L)
     }
+
 
     var downloadingSongIds by remember {
         mutableStateOf<Set<String>>(emptySet())
