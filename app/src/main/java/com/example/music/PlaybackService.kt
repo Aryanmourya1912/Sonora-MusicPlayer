@@ -21,13 +21,19 @@ class PlaybackService : MediaSessionService() {
         return START_NOT_STICKY
     }
 
+<<<<<<< HEAD
     // Triggered when swiped away or cleared via Recents "Close / Clear All"
+=======
+>>>>>>> 43af0804c1d7fdb68456f0225575c0d2606a170e
     override fun onTaskRemoved(rootIntent: Intent?) {
         mediaSession?.player?.apply {
             pause()
             stop()
         }
+<<<<<<< HEAD
         stopForeground(STOP_FOREGROUND_REMOVE)
+=======
+>>>>>>> 43af0804c1d7fdb68456f0225575c0d2606a170e
         stopSelf()
         super.onTaskRemoved(rootIntent)
         android.os.Process.killProcess(android.os.Process.myPid())
