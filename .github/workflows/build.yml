@@ -24,20 +24,26 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v3
 
-      # 🟢 ADDITION 1: Decode Keystore from GitHub Secrets into root directory
+      # Fix Windows CRLF line endings and grant execution rights
+      - name: Grant execute permission for gradlew
+        run: |
+          sed -i 's/\r$//' gradlew
+          chmod +x gradlew
+
+      # Decode permanent keystore from repository secrets
       - name: Decode Keystore
         run: |
           echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 --decode > release-keystore.jks
 
-      # 🟢 ADDITION 2: Inject signing secrets as environment variables
-      - name: Build APK with Gradle
+      # Compile Debug APK using injected signing keys
+      - name: Build with Gradle
         env:
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: ./gradlew assembleDebug --stacktrace
 
-      # Upload the signed APK so you can download it from GitHub
+      # Upload the signed APK
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:

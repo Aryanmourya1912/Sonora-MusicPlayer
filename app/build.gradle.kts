@@ -36,14 +36,16 @@ android {
     buildTypes {
         release {
             isMinifyEnabled = false
-            signingConfig = signingConfigs.getByName("release")
+            val keystoreFile = rootProject.file("release-keystore.jks")
+            if (keystoreFile.exists()) {
+                signingConfig = signingConfigs.getByName("release")
+            }
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
         }
         debug {
-            // Signs debug builds with the same key on GitHub Actions
             val keystoreFile = rootProject.file("release-keystore.jks")
             if (keystoreFile.exists()) {
                 signingConfig = signingConfigs.getByName("release")
