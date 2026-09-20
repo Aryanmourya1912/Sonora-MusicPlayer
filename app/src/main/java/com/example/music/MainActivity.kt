@@ -78,6 +78,7 @@ import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.Favorite
 import androidx.compose.material.icons.rounded.FavoriteBorder
+import androidx.compose.material.icons.rounded.GraphicEq
 import androidx.compose.material.icons.rounded.Folder
 import androidx.compose.material.icons.rounded.History
 import androidx.compose.material.icons.rounded.Home
@@ -145,6 +146,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -1674,6 +1676,9 @@ fun SonoraPlayerScreen(
 
     var mostPlayedTracks by remember { mutableStateOf<List<FullTrackItem>>(emptyList()) }
     var recentlyPlayedTracks by remember { mutableStateOf<List<FullTrackItem>>(emptyList()) }
+    
+    // 0 = Standard Artwork, 1 = Vinyl Record Turntable
+    var playerDisplayMode by rememberSaveable { mutableIntStateOf(0) }
 
     fun refreshListeningStats() {
         mostPlayedTracks = getMostPlayedTracks(context)
@@ -4206,6 +4211,18 @@ fun SonoraPlayerScreen(
                                     fontWeight = FontWeight.SemiBold,
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                            // 🟢 VINYL / STANDARD MODE TOGGLE BUTTON
+                            IconButton(
+                                onClick = { playerDisplayMode = if (playerDisplayMode == 0) 1 else 0 }
+                            ) {
+                                Icon(
+                                    imageVector = if (playerDisplayMode == 1) Icons.Rounded.Album else Icons.Rounded.GraphicEq,
+                                    contentDescription = "Switch Vinyl / Standard Mode",
+                                    tint = if (playerDisplayMode == 1) MaterialTheme.colorScheme.primary else (if (isDarkTheme) Color.White else Color(0xFF0F172A)),
+                                    modifier = Modifier.size(22.dp)
                                 )
                             }
                             IconButton(onClick = { showLiveLyrics = !showLiveLyrics }) {
