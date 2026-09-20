@@ -2,6 +2,7 @@ package com.example.music
 
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -58,6 +59,7 @@ import kotlin.math.roundToInt
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun EqualizerSheet(
+    isDarkTheme: Boolean = true,
     onDismiss: () -> Unit
 ) {
     val context = LocalContext.current
@@ -70,10 +72,15 @@ fun EqualizerSheet(
     val minLevel = EqualizerManager.minLevelMb
     val maxLevel = EqualizerManager.maxLevelMb
 
+    val sheetBgColor = if (isDarkTheme) Color(0xFF0F151C) else Color(0xFFFFFFFF)
+    val cardBgColor = if (isDarkTheme) Color(0xFF141C24) else Color(0xFFF1F5F9)
+    val textPrimaryColor = if (isDarkTheme) Color.White else Color(0xFF0F172A)
+    val textSecondaryColor = if (isDarkTheme) Color(0xFF94A3B8) else Color(0xFF64748B)
+
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
-        containerColor = Color(0xFF0F151C),
+        containerColor = sheetBgColor,
         shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp)
     ) {
         Column(
@@ -93,13 +100,13 @@ fun EqualizerSheet(
                         modifier = Modifier
                             .size(38.dp)
                             .clip(CircleShape)
-                            .background(Color(0xFF1E2836)),
+                            .background(if (isDarkTheme) Color(0xFF1E2836) else Color(0xFFEDE9FE)),
                         contentAlignment = Alignment.Center
                     ) {
                         Icon(
                             imageVector = Icons.Rounded.GraphicEq,
                             contentDescription = null,
-                            tint = if (isEnabled) MaterialTheme.colorScheme.primary else Color(0xFF64748B),
+                            tint = if (isEnabled) MaterialTheme.colorScheme.primary else (if (isDarkTheme) Color(0xFF64748B) else Color(0xFF94A3B8)),
                             modifier = Modifier.size(20.dp)
                         )
                     }
@@ -109,12 +116,12 @@ fun EqualizerSheet(
                             text = "Equalizer",
                             fontSize = 20.sp,
                             fontWeight = FontWeight.Bold,
-                            color = Color.White
+                            color = textPrimaryColor
                         )
                         Text(
                             text = if (isEnabled) "Audio FX Active" else "Bypassed",
                             fontSize = 12.sp,
-                            color = if (isEnabled) Color(0xFF10B981) else Color(0xFF64748B),
+                            color = if (isEnabled) Color(0xFF10B981) else textSecondaryColor,
                             fontWeight = FontWeight.Medium
                         )
                     }
@@ -128,7 +135,7 @@ fun EqualizerSheet(
                         Icon(
                             imageVector = Icons.Rounded.RestartAlt,
                             contentDescription = "Reset to Flat",
-                            tint = if (isEnabled) Color.White else Color(0xFF475569)
+                            tint = if (isEnabled) textPrimaryColor else (if (isDarkTheme) Color(0xFF475569) else Color(0xFFCBD5E1))
                         )
                     }
 
@@ -138,8 +145,8 @@ fun EqualizerSheet(
                         colors = SwitchDefaults.colors(
                             checkedThumbColor = Color.White,
                             checkedTrackColor = MaterialTheme.colorScheme.primary,
-                            uncheckedThumbColor = Color(0xFF64748B),
-                            uncheckedTrackColor = Color(0xFF1E2631)
+                            uncheckedThumbColor = if (isDarkTheme) Color(0xFF64748B) else Color(0xFF94A3B8),
+                            uncheckedTrackColor = if (isDarkTheme) Color(0xFF1E2631) else Color(0xFFE2E8F0)
                         )
                     )
                 }
@@ -152,7 +159,7 @@ fun EqualizerSheet(
                 text = "PRESETS",
                 fontSize = 11.sp,
                 fontWeight = FontWeight.Bold,
-                color = Color(0xFF94A3B8),
+                color = textSecondaryColor,
                 letterSpacing = 1.sp
             )
 
@@ -169,9 +176,9 @@ fun EqualizerSheet(
                             .clip(RoundedCornerShape(16.dp))
                             .background(
                                 when {
-                                    !isEnabled -> Color(0xFF161E28)
+                                    !isEnabled -> if (isDarkTheme) Color(0xFF161E28) else Color(0xFFF1F5F9)
                                     isSelected -> MaterialTheme.colorScheme.primary
-                                    else -> Color(0xFF1E2836)
+                                    else -> if (isDarkTheme) Color(0xFF1E2836) else Color(0xFFE2E8F0)
                                 }
                             )
                             .clickable(enabled = isEnabled) {
@@ -184,9 +191,9 @@ fun EqualizerSheet(
                             fontSize = 12.sp,
                             fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
                             color = when {
-                                !isEnabled -> Color(0xFF475569)
+                                !isEnabled -> if (isDarkTheme) Color(0xFF475569) else Color(0xFF94A3B8)
                                 isSelected -> Color.White
-                                else -> Color(0xFFD1D5DB)
+                                else -> if (isDarkTheme) Color(0xFFD1D5DB) else Color(0xFF334155)
                             }
                         )
                     }
@@ -199,7 +206,7 @@ fun EqualizerSheet(
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(18.dp),
-                colors = CardDefaults.cardColors(containerColor = Color(0xFF141C24))
+                colors = CardDefaults.cardColors(containerColor = cardBgColor)
             ) {
                 Column(
                     modifier = Modifier
@@ -215,13 +222,13 @@ fun EqualizerSheet(
                             text = "FREQUENCY BANDS",
                             fontSize = 11.sp,
                             fontWeight = FontWeight.Bold,
-                            color = Color(0xFF94A3B8),
+                            color = textSecondaryColor,
                             letterSpacing = 1.sp
                         )
                         Text(
                             text = "+15 dB / -15 dB",
                             fontSize = 10.sp,
-                            color = Color(0xFF64748B)
+                            color = if (isDarkTheme) Color(0xFF64748B) else Color(0xFF94A3B8)
                         )
                     }
 
@@ -240,6 +247,7 @@ fun EqualizerSheet(
                                 minMb = minLevel,
                                 maxMb = maxLevel,
                                 isEnabled = isEnabled,
+                                isDarkTheme = isDarkTheme,
                                 onLevelChange = { newLvl ->
                                     EqualizerManager.setBandLevel(context, band.index, newLvl)
                                 }
@@ -260,7 +268,7 @@ fun EqualizerSheet(
                 Card(
                     modifier = Modifier.weight(1f),
                     shape = RoundedCornerShape(16.dp),
-                    colors = CardDefaults.cardColors(containerColor = Color(0xFF141C24))
+                    colors = CardDefaults.cardColors(containerColor = cardBgColor)
                 ) {
                     Column(modifier = Modifier.padding(12.dp)) {
                         Row(
@@ -272,7 +280,7 @@ fun EqualizerSheet(
                                 Icon(
                                     imageVector = Icons.Rounded.Headphones,
                                     contentDescription = null,
-                                    tint = if (isEnabled && EqualizerManager.isBassBoostSupported) MaterialTheme.colorScheme.primary else Color(0xFF64748B),
+                                    tint = if (isEnabled && EqualizerManager.isBassBoostSupported) MaterialTheme.colorScheme.primary else (if (isDarkTheme) Color(0xFF64748B) else Color(0xFF94A3B8)),
                                     modifier = Modifier.size(16.dp)
                                 )
                                 Spacer(modifier = Modifier.width(6.dp))
@@ -280,7 +288,7 @@ fun EqualizerSheet(
                                     text = "Bass Boost",
                                     fontSize = 13.sp,
                                     fontWeight = FontWeight.Bold,
-                                    color = Color.White
+                                    color = textPrimaryColor
                                 )
                             }
                             val bassPercent = (EqualizerManager.bassBoostStrength / 10f).roundToInt()
@@ -288,7 +296,7 @@ fun EqualizerSheet(
                                 text = "$bassPercent%",
                                 fontSize = 12.sp,
                                 fontWeight = FontWeight.SemiBold,
-                                color = if (isEnabled) MaterialTheme.colorScheme.primary else Color(0xFF64748B)
+                                color = if (isEnabled) MaterialTheme.colorScheme.primary else textSecondaryColor
                             )
                         }
 
@@ -300,9 +308,9 @@ fun EqualizerSheet(
                             valueRange = 0f..1000f,
                             enabled = isEnabled && EqualizerManager.isBassBoostSupported,
                             colors = SliderDefaults.colors(
-                                thumbColor = Color.White,
+                                thumbColor = if (isDarkTheme) Color.White else MaterialTheme.colorScheme.primary,
                                 activeTrackColor = MaterialTheme.colorScheme.primary,
-                                inactiveTrackColor = Color(0xFF1E2836)
+                                inactiveTrackColor = if (isDarkTheme) Color(0xFF1E2836) else Color(0xFFCBD5E1)
                             ),
                             modifier = Modifier.fillMaxWidth()
                         )
@@ -313,7 +321,7 @@ fun EqualizerSheet(
                 Card(
                     modifier = Modifier.weight(1f),
                     shape = RoundedCornerShape(16.dp),
-                    colors = CardDefaults.cardColors(containerColor = Color(0xFF141C24))
+                    colors = CardDefaults.cardColors(containerColor = cardBgColor)
                 ) {
                     Column(modifier = Modifier.padding(12.dp)) {
                         Row(
@@ -325,7 +333,7 @@ fun EqualizerSheet(
                                 Icon(
                                     imageVector = Icons.Rounded.SurroundSound,
                                     contentDescription = null,
-                                    tint = if (isEnabled && EqualizerManager.isVirtualizerSupported) MaterialTheme.colorScheme.primary else Color(0xFF64748B),
+                                    tint = if (isEnabled && EqualizerManager.isVirtualizerSupported) MaterialTheme.colorScheme.primary else (if (isDarkTheme) Color(0xFF64748B) else Color(0xFF94A3B8)),
                                     modifier = Modifier.size(16.dp)
                                 )
                                 Spacer(modifier = Modifier.width(6.dp))
@@ -333,7 +341,7 @@ fun EqualizerSheet(
                                     text = "Virtualizer",
                                     fontSize = 13.sp,
                                     fontWeight = FontWeight.Bold,
-                                    color = Color.White
+                                    color = textPrimaryColor
                                 )
                             }
                             val virtPercent = (EqualizerManager.virtualizerStrength / 10f).roundToInt()
@@ -341,7 +349,7 @@ fun EqualizerSheet(
                                 text = "$virtPercent%",
                                 fontSize = 12.sp,
                                 fontWeight = FontWeight.SemiBold,
-                                color = if (isEnabled) MaterialTheme.colorScheme.primary else Color(0xFF64748B)
+                                color = if (isEnabled) MaterialTheme.colorScheme.primary else textSecondaryColor
                             )
                         }
 
@@ -353,9 +361,9 @@ fun EqualizerSheet(
                             valueRange = 0f..1000f,
                             enabled = isEnabled && EqualizerManager.isVirtualizerSupported,
                             colors = SliderDefaults.colors(
-                                thumbColor = Color.White,
+                                thumbColor = if (isDarkTheme) Color.White else MaterialTheme.colorScheme.primary,
                                 activeTrackColor = MaterialTheme.colorScheme.primary,
-                                inactiveTrackColor = Color(0xFF1E2836)
+                                inactiveTrackColor = if (isDarkTheme) Color(0xFF1E2836) else Color(0xFFCBD5E1)
                             ),
                             modifier = Modifier.fillMaxWidth()
                         )
@@ -374,10 +382,10 @@ private fun VerticalBandColumn(
     minMb: Short,
     maxMb: Short,
     isEnabled: Boolean,
+    isDarkTheme: Boolean,
     onLevelChange: (Short) -> Unit
 ) {
     val totalRange = (maxMb - minMb).toFloat().coerceAtLeast(1f)
-    // Fraction 0.0 (bottom) to 1.0 (top)
     val fraction = ((band.levelMb - minMb) / totalRange).coerceIn(0f, 1f)
     val animatedFraction by animateFloatAsState(targetValue = fraction, label = "bandFrac")
 
@@ -388,28 +396,26 @@ private fun VerticalBandColumn(
         horizontalAlignment = Alignment.CenterHorizontally,
         modifier = Modifier.width(52.dp)
     ) {
-        // Current dB readout
         Text(
             text = dbLabel,
             fontSize = 11.sp,
             fontWeight = FontWeight.Bold,
             color = when {
-                !isEnabled -> Color(0xFF475569)
+                !isEnabled -> if (isDarkTheme) Color(0xFF475569) else Color(0xFF94A3B8)
                 dbVal > 0 -> MaterialTheme.colorScheme.primary
-                dbVal < 0 -> Color(0xFF38BDF8)
-                else -> Color(0xFF94A3B8)
+                dbVal < 0 -> if (isDarkTheme) Color(0xFF38BDF8) else Color(0xFF0284C7)
+                else -> if (isDarkTheme) Color(0xFF94A3B8) else Color(0xFF64748B)
             }
         )
 
         Spacer(modifier = Modifier.height(6.dp))
 
-        // Custom Vertical Touch Channel
         Box(
             modifier = Modifier
                 .width(28.dp)
                 .height(130.dp)
                 .clip(RoundedCornerShape(14.dp))
-                .background(Color(0xFF1B232D))
+                .background(if (isDarkTheme) Color(0xFF1B232D) else Color(0xFFE2E8F0))
                 .pointerInput(isEnabled) {
                     if (!isEnabled) return@pointerInput
                     detectTapGestures { offset ->
@@ -429,18 +435,17 @@ private fun VerticalBandColumn(
                 },
             contentAlignment = Alignment.BottomCenter
         ) {
-            // Zero-line center reference notch
+            // Zero-line reference
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(2.dp)
                     .align(Alignment.Center)
-                    .background(Color(0x30FFFFFF))
+                    .background(if (isDarkTheme) Color(0x30FFFFFF) else Color(0x30000000))
             )
 
             // Dynamic Fill Column from Zero Line
             if (animatedFraction >= 0.5f) {
-                // Boost (fill upwards from center)
                 Box(
                     modifier = Modifier
                         .fillMaxWidth(0.55f)
@@ -449,15 +454,14 @@ private fun VerticalBandColumn(
                         .background(
                             Brush.verticalGradient(
                                 colors = listOf(
-                                    if (isEnabled) MaterialTheme.colorScheme.primary else Color(0xFF475569),
-                                    if (isEnabled) Color(0xFF9F75FF) else Color(0xFF334155)
+                                    if (isEnabled) MaterialTheme.colorScheme.primary else (if (isDarkTheme) Color(0xFF475569) else Color(0xFF94A3B8)),
+                                    if (isEnabled) (if (isDarkTheme) Color(0xFF9F75FF) else Color(0xFF8B5CF6)) else (if (isDarkTheme) Color(0xFF334155) else Color(0xFFCBD5E1))
                                 )
                             ),
                             shape = RoundedCornerShape(4.dp)
                         )
                 )
             } else {
-                // Cut (fill downwards from center)
                 Box(
                     modifier = Modifier
                         .fillMaxWidth(0.55f)
@@ -466,8 +470,8 @@ private fun VerticalBandColumn(
                         .background(
                             Brush.verticalGradient(
                                 colors = listOf(
-                                    if (isEnabled) Color(0xFF38BDF8) else Color(0xFF334155),
-                                    if (isEnabled) Color(0xFF0284C7) else Color(0xFF475569)
+                                    if (isEnabled) (if (isDarkTheme) Color(0xFF38BDF8) else Color(0xFF0284C7)) else (if (isDarkTheme) Color(0xFF334155) else Color(0xFFCBD5E1)),
+                                    if (isEnabled) (if (isDarkTheme) Color(0xFF0284C7) else Color(0xFF0369A1)) else (if (isDarkTheme) Color(0xFF475569) else Color(0xFF94A3B8))
                                 )
                             ),
                             shape = RoundedCornerShape(4.dp)
@@ -487,7 +491,15 @@ private fun VerticalBandColumn(
                         .align(Alignment.BottomCenter)
                         .padding(bottom = (animatedFraction * 106).dp)
                         .clip(CircleShape)
-                        .background(if (isEnabled) Color.White else Color(0xFF64748B)),
+                        .background(
+                            if (isEnabled) Color.White 
+                            else (if (isDarkTheme) Color(0xFF64748B) else Color(0xFFCBD5E1))
+                        )
+                        .then(
+                            if (!isDarkTheme && isEnabled) {
+                                Modifier.border(1.dp, Color(0xFFCBD5E1), CircleShape)
+                            } else Modifier
+                        ),
                     contentAlignment = Alignment.Center
                 ) {
                     Box(
@@ -495,7 +507,8 @@ private fun VerticalBandColumn(
                             .size(10.dp)
                             .clip(CircleShape)
                             .background(
-                                if (isEnabled) MaterialTheme.colorScheme.primary else Color(0xFF1E2836)
+                                if (isEnabled) MaterialTheme.colorScheme.primary 
+                                else (if (isDarkTheme) Color(0xFF1E2836) else Color(0xFF94A3B8))
                             )
                     )
                 }
@@ -504,12 +517,11 @@ private fun VerticalBandColumn(
 
         Spacer(modifier = Modifier.height(8.dp))
 
-        // Band Frequency Label (e.g. 60 Hz, 3.6 kHz)
         Text(
             text = band.centerFreqLabel,
             fontSize = 11.sp,
             fontWeight = FontWeight.Medium,
-            color = if (isEnabled) Color.White else Color(0xFF64748B),
+            color = if (isEnabled) (if (isDarkTheme) Color.White else Color(0xFF0F172A)) else (if (isDarkTheme) Color(0xFF64748B) else Color(0xFF94A3B8)),
             textAlign = TextAlign.Center,
             maxLines = 1
         )

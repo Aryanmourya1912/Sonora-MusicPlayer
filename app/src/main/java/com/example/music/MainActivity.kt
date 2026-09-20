@@ -3889,6 +3889,9 @@ fun SonoraPlayerScreen(
     }
 
     if (showEqualizerSheet) {
-        EqualizerSheet(onDismiss = { showEqualizerSheet = false })
+        EqualizerSheet(
+            isDarkTheme = isDarkTheme,
+            onDismiss = { showEqualizerSheet = false }
+        )
     }
 }
