@@ -42,6 +42,12 @@ interface SonoraDao {
     // --- Playlists ---
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun createPlaylist(playlist: PlaylistEntity): Long
+    
+    @Query("DELETE FROM playlist_songs WHERE playlistId = :playlistId")
+    suspend fun deletePlaylistSongs(playlistId: Long)
+
+    @Query("DELETE FROM playlist_songs WHERE playlistId = :playlistId AND songId = :songId")
+    suspend fun removeSongFromPlaylist(playlistId: Long, songId: String)
 
     @Query("DELETE FROM playlists WHERE id = :playlistId")
     suspend fun deletePlaylist(playlistId: Long)
