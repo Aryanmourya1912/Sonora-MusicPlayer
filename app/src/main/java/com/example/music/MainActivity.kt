@@ -237,11 +237,11 @@ private val SonoraLightColors = lightColorScheme(
     primary = Color(0xFF6200EE),
     background = Color(0xFFF8FAFC),
     surface = Color(0xFFFFFFFF),
-    surfaceVariant = Color(0xFFE2E8F0),
+    surfaceVariant = Color(0xFFF1F5F9),
     onPrimary = Color.White,
-    onBackground = Color.White,
-    onSurface = Color.White,
-    onSurfaceVariant = Color(0xFF475569)
+    onBackground = Color(0xFF0F172A),       // Deep slate-black for headings & titles
+    onSurface = Color(0xFF0F172A),          // Deep slate-black for labels & icons
+    onSurfaceVariant = Color(0xFF475569)    // Mid-slate grey for secondary text
 )
 
 class MainActivity : ComponentActivity() {
@@ -2600,15 +2600,21 @@ fun SonoraPlayerScreen(
                                     Box(
                                         modifier = Modifier
                                             .clip(RoundedCornerShape(18.dp))
-                                            .background(if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant)
+                                            .background(
+                                                if (isSelected) MaterialTheme.colorScheme.primary 
+                                                else if (isDarkTheme) Color(0xFF1A232E) 
+                                                else Color(0xFFE2E8F0)
+                                            )
                                             .clickable { selectedMoodCategory = cat }
                                             .padding(horizontal = 16.dp, vertical = 8.dp)
                                     ) {
                                         Text(
                                             text = cat.label,
-                                            color = if (isSelected) Color.White else MaterialTheme.colorScheme.onSurface,
+                                            color = if (isSelected) Color.White 
+                                                    else if (isDarkTheme) Color(0xFFCBD5E1) 
+                                                    else Color(0xFF1E293B),
                                             fontSize = 13.sp,
-                                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
+                                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.SemiBold
                                         )
                                     }
                                 }
@@ -2666,7 +2672,7 @@ fun SonoraPlayerScreen(
                                                                     Spacer(modifier = Modifier.height(4.dp))
                                                                     Text(
                                                                         text = song.title,
-                                                                        color = MaterialTheme.colorScheme.onBackground,
+                                                                        color = if (isDarkTheme) Color.White else Color(0xFF0F172A),
                                                                         fontSize = 13.sp,
                                                                         fontWeight = FontWeight.SemiBold,
                                                                         maxLines = 1,
@@ -2698,7 +2704,11 @@ fun SonoraPlayerScreen(
                                                 modifier = Modifier
                                                     .size(if (isCurrent) 8.dp else 6.dp)
                                                     .clip(CircleShape)
-                                                    .background(if (isCurrent) MaterialTheme.colorScheme.primary else Color(0xFF334155))
+                                                    .background(
+                                                        if (isCurrent) MaterialTheme.colorScheme.primary 
+                                                        else if (isDarkTheme) Color(0xFF334155) 
+                                                        else Color(0xFFCBD5E1)
+                                                    )
                                             )
                                             if (p < 3) Spacer(modifier = Modifier.width(6.dp))
                                         }
@@ -2737,7 +2747,7 @@ fun SonoraPlayerScreen(
                                                 Spacer(modifier = Modifier.height(6.dp))
                                                 Text(
                                                     text = song.title,
-                                                    color = MaterialTheme.colorScheme.onBackground,
+                                                    color = if (isDarkTheme) Color.White else Color(0xFF0F172A),
                                                     fontSize = 13.sp,
                                                     fontWeight = FontWeight.Bold,
                                                     maxLines = 1,
@@ -2745,7 +2755,7 @@ fun SonoraPlayerScreen(
                                                 )
                                                 Text(
                                                     text = song.artist,
-                                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                    color = if (isDarkTheme) Color(0xFF94A3B8) else Color(0xFF64748B),
                                                     fontSize = 12.sp,
                                                     maxLines = 1,
                                                     overflow = TextOverflow.Ellipsis
@@ -3184,54 +3194,115 @@ fun SonoraPlayerScreen(
                 }
             }
 
-            NavigationBar(
-                containerColor = MaterialTheme.colorScheme.surface,
-                contentColor = MaterialTheme.colorScheme.onSurface,
-                windowInsets = WindowInsets.navigationBars,
+            // Bottom Navigation Bar with top border and high-contrast theme styling
+            Surface(
+                color = if (isDarkTheme) Color(0xFF080C10) else Color(0xFFFFFFFF),
+                tonalElevation = 8.dp,
+                shadowElevation = 10.dp,
                 modifier = Modifier.fillMaxWidth()
             ) {
-                NavigationBarItem(
-                    selected = selectedNavTab == 0,
-                    onClick = { selectedNavTab = 0 },
-                    icon = { Icon(imageVector = Icons.Rounded.Home, contentDescription = "Home", modifier = Modifier.size(22.dp)) },
-                    label = { Text("Home", fontSize = 11.sp, fontWeight = FontWeight.Medium, maxLines = 1) },
-                    alwaysShowLabel = true,
-                    colors = NavigationBarItemDefaults.colors(
-                        selectedIconColor = MaterialTheme.colorScheme.onSurface,
-                        unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                        selectedTextColor = MaterialTheme.colorScheme.onSurface,
-                        unselectedTextColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                        indicatorColor = MaterialTheme.colorScheme.surfaceVariant
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    // Subtle top divider line for clear separation from screen background
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(1.dp)
+                            .background(if (isDarkTheme) Color(0xFF1E2836) else Color(0xFFE2E8F0))
                     )
-                )
-                NavigationBarItem(
-                    selected = selectedNavTab == 1,
-                    onClick = { selectedNavTab = 1 },
-                    icon = { Icon(imageVector = Icons.Rounded.Search, contentDescription = "Search", modifier = Modifier.size(22.dp)) },
-                    label = { Text("Search", fontSize = 11.sp, fontWeight = FontWeight.Medium, maxLines = 1) },
-                    alwaysShowLabel = true,
-                    colors = NavigationBarItemDefaults.colors(
-                        selectedIconColor = MaterialTheme.colorScheme.onSurface,
-                        unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                        selectedTextColor = MaterialTheme.colorScheme.onSurface,
-                        unselectedTextColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                        indicatorColor = MaterialTheme.colorScheme.surfaceVariant
-                    )
-                )
-                NavigationBarItem(
-                    selected = selectedNavTab == 2,
-                    onClick = { selectedNavTab = 2 },
-                    icon = { Icon(imageVector = Icons.Rounded.LibraryMusic, contentDescription = "Library", modifier = Modifier.size(22.dp)) },
-                    label = { Text("Library", fontSize = 11.sp, fontWeight = FontWeight.Medium, maxLines = 1) },
-                    alwaysShowLabel = true,
-                    colors = NavigationBarItemDefaults.colors(
-                        selectedIconColor = MaterialTheme.colorScheme.onSurface,
-                        unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                        selectedTextColor = MaterialTheme.colorScheme.onSurface,
-                        unselectedTextColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                        indicatorColor = MaterialTheme.colorScheme.surfaceVariant
-                    )
-                )
+
+                    NavigationBar(
+                        containerColor = if (isDarkTheme) Color(0xFF080C10) else Color(0xFFFFFFFF),
+                        contentColor = if (isDarkTheme) Color.White else Color(0xFF0F172A),
+                        windowInsets = WindowInsets.navigationBars,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        val selectedItemColor = if (isDarkTheme) Color(0xFFB388FF) else Color(0xFF6200EE)
+                        val unselectedItemColor = if (isDarkTheme) Color(0xFF94A3B8) else Color(0xFF64748B)
+                        val indicatorBgColor = if (isDarkTheme) Color(0xFF263242) else Color(0xFFEDE7F6)
+
+                        NavigationBarItem(
+                            selected = selectedNavTab == 0,
+                            onClick = { selectedNavTab = 0 },
+                            icon = {
+                                Icon(
+                                    imageVector = Icons.Rounded.Home,
+                                    contentDescription = "Home",
+                                    modifier = Modifier.size(22.dp)
+                                )
+                            },
+                            label = {
+                                Text(
+                                    "Home",
+                                    fontSize = 11.sp,
+                                    fontWeight = if (selectedNavTab == 0) FontWeight.Bold else FontWeight.Medium,
+                                    maxLines = 1
+                                )
+                            },
+                            alwaysShowLabel = true,
+                            colors = NavigationBarItemDefaults.colors(
+                                selectedIconColor = selectedItemColor,
+                                selectedTextColor = selectedItemColor,
+                                unselectedIconColor = unselectedItemColor,
+                                unselectedTextColor = unselectedItemColor,
+                                indicatorColor = indicatorBgColor
+                            )
+                        )
+                        NavigationBarItem(
+                            selected = selectedNavTab == 1,
+                            onClick = { selectedNavTab = 1 },
+                            icon = {
+                                Icon(
+                                    imageVector = Icons.Rounded.Search,
+                                    contentDescription = "Search",
+                                    modifier = Modifier.size(22.dp)
+                                )
+                            },
+                            label = {
+                                Text(
+                                    "Search",
+                                    fontSize = 11.sp,
+                                    fontWeight = if (selectedNavTab == 1) FontWeight.Bold else FontWeight.Medium,
+                                    maxLines = 1
+                                )
+                            },
+                            alwaysShowLabel = true,
+                            colors = NavigationBarItemDefaults.colors(
+                                selectedIconColor = selectedItemColor,
+                                selectedTextColor = selectedItemColor,
+                                unselectedIconColor = unselectedItemColor,
+                                unselectedTextColor = unselectedItemColor,
+                                indicatorColor = indicatorBgColor
+                            )
+                        )
+                        NavigationBarItem(
+                            selected = selectedNavTab == 2,
+                            onClick = { selectedNavTab = 2 },
+                            icon = {
+                                Icon(
+                                    imageVector = Icons.Rounded.LibraryMusic,
+                                    contentDescription = "Library",
+                                    modifier = Modifier.size(22.dp)
+                                )
+                            },
+                            label = {
+                                Text(
+                                    "Library",
+                                    fontSize = 11.sp,
+                                    fontWeight = if (selectedNavTab == 2) FontWeight.Bold else FontWeight.Medium,
+                                    maxLines = 1
+                                )
+                            },
+                            alwaysShowLabel = true,
+                            colors = NavigationBarItemDefaults.colors(
+                                selectedIconColor = selectedItemColor,
+                                selectedTextColor = selectedItemColor,
+                                unselectedIconColor = unselectedItemColor,
+                                unselectedTextColor = unselectedItemColor,
+                                indicatorColor = indicatorBgColor
+                            )
+                        )
+                    }
+                }
             }
         }
 
