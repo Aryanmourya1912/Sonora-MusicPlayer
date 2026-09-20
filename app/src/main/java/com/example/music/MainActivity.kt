@@ -1407,6 +1407,151 @@ fun SyncedLyricsView(
     }
 }
 
+@Composable
+fun SwipeablePlaylistTrackRow(
+    track: FullTrackItem,
+    index: Int,
+    totalCount: Int,
+    isDarkTheme: Boolean,
+    onClick: () -> Unit,
+    onMoveUp: () -> Unit,
+    onMoveDown: () -> Unit,
+    onDelete: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    var dragOffsetX by remember { mutableFloatStateOf(0f) }
+    val animatedOffsetX by animateFloatAsState(
+        targetValue = dragOffsetX,
+        animationSpec = tween(180),
+        label = "playlistRowSwipe"
+    )
+
+    Box(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp)
+            .clip(RoundedCornerShape(12.dp))
+    ) {
+        // Red background with Trash Icon revealed during left-swipe
+        Box(
+            modifier = Modifier
+                .matchParentSize()
+                .background(Color(0xFFDC2626))
+                .padding(horizontal = 20.dp),
+            contentAlignment = Alignment.CenterEnd
+        ) {
+            Icon(
+                imageVector = Icons.Rounded.Delete,
+                contentDescription = "Delete",
+                tint = Color.White,
+                modifier = Modifier.size(24.dp)
+            )
+        }
+
+        // Foreground Content Card with Drag and Move Controls
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .offset { androidx.compose.ui.unit.IntOffset(animatedOffsetX.roundToInt(), 0) }
+                .draggable(
+                    orientation = Orientation.Horizontal,
+                    state = rememberDraggableState { delta ->
+                        dragOffsetX = (dragOffsetX + delta).coerceIn(-180f, 0f)
+                    },
+                    onDragStopped = { velocity ->
+                        if (dragOffsetX < -90f || velocity < -400f) {
+                            onDelete()
+                        }
+                        dragOffsetX = 0f
+                    }
+                )
+                .clickable { onClick() },
+            colors = CardDefaults.cardColors(
+                containerColor = if (isDarkTheme) Color(0xFF141C24) else Color(0xFFF1F5F9)
+            ),
+            shape = RoundedCornerShape(12.dp)
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                // Reorder controls (Move Up / Move Down)
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center
+                ) {
+                    IconButton(
+                        onClick = onMoveUp,
+                        enabled = index > 0,
+                        modifier = Modifier.size(20.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.ArrowUpward,
+                            contentDescription = "Move Up",
+                            tint = if (index > 0) (if (isDarkTheme) Color.White else Color(0xFF0F172A)) else Color(0x3094A3B8),
+                            modifier = Modifier.size(14.dp)
+                        )
+                    }
+                    IconButton(
+                        onClick = onMoveDown,
+                        enabled = index < totalCount - 1,
+                        modifier = Modifier.size(20.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.ArrowDownward,
+                            contentDescription = "Move Down",
+                            tint = if (index < totalCount - 1) (if (isDarkTheme) Color.White else Color(0xFF0F172A)) else Color(0x3094A3B8),
+                            modifier = Modifier.size(14.dp)
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.width(6.dp))
+
+                AsyncImage(
+                    model = track.artworkUrl,
+                    contentDescription = track.title,
+                    modifier = Modifier
+                        .size(46.dp)
+                        .clip(RoundedCornerShape(8.dp)),
+                    contentScale = ContentScale.Crop
+                )
+
+                Spacer(modifier = Modifier.width(12.dp))
+
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = track.title,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = if (isDarkTheme) Color.White else Color(0xFF0F172A),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Text(
+                        text = track.artist,
+                        fontSize = 12.sp,
+                        color = if (isDarkTheme) Color(0xFF94A3B8) else Color(0xFF64748B),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+
+                IconButton(onClick = onDelete) {
+                    Icon(
+                        imageVector = Icons.Rounded.Close,
+                        contentDescription = "Remove",
+                        tint = if (isDarkTheme) Color(0xFF94A3B8) else Color(0xFF64748B),
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+            }
+        }
+    }
+}
+
 private const val PREFS_SONORA = "sonora_playback_state"
 private const val KEY_LAST_ID = "last_id"
 private const val KEY_LAST_TITLE = "last_title"
@@ -3109,28 +3254,220 @@ fun SonoraPlayerScreen(
                                     }
                                 }
                                 1 -> {
-                                    LazyColumn(modifier = Modifier.fillMaxSize()) {
-                                        item {
-                                            Button(
-                                                onClick = { showCreatePlaylistDialog = true },
-                                                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
-                                                shape = RoundedCornerShape(8.dp),
-                                                modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp)
-                                            ) { Text("+ New Playlist") }
+                                    if (viewingPlaylist != null) {
+                                        val playlist = viewingPlaylist!!
+                                        val playlistTracks = activePlaylistSongs.map {
+                                            FullTrackItem(it.songId, it.title, it.artist, it.audioUrl, it.artworkUrl, it.duration)
                                         }
-                                        items(allPlaylists) { playlist ->
-                                            Card(
-                                                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp).clickable { viewingPlaylist = playlist },
-                                                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                                        var localPlaylistTracks by remember(playlistTracks) { mutableStateOf(playlistTracks) }
+
+                                        Column(modifier = Modifier.fillMaxSize()) {
+                                            // Top navigation row
+                                            Row(
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .padding(vertical = 4.dp),
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.SpaceBetween
                                             ) {
-                                                Row(modifier = Modifier.fillMaxWidth().padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
-                                                    Icon(imageVector = Icons.Rounded.Folder, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(24.dp))
-                                                    Spacer(modifier = Modifier.width(12.dp))
-                                                    Text(playlist.name, color = MaterialTheme.colorScheme.onSurface, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                                                IconButton(onClick = { viewingPlaylist = null }) {
+                                                    Icon(
+                                                        imageVector = Icons.Rounded.ArrowBack,
+                                                        contentDescription = "Back",
+                                                        tint = if (isDarkTheme) Color.White else Color(0xFF0F172A)
+                                                    )
+                                                }
+                                                Text(
+                                                    text = playlist.name,
+                                                    fontSize = 18.sp,
+                                                    fontWeight = FontWeight.Bold,
+                                                    color = if (isDarkTheme) Color.White else Color(0xFF0F172A),
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis
+                                                )
+                                                IconButton(
+                                                    onClick = {
+                                                        coroutineScope.launch {
+                                                            dao.deletePlaylistSongs(playlist.id)
+                                                            dao.deletePlaylist(playlist.id)
+                                                            viewingPlaylist = null
+                                                        }
+                                                    }
+                                                ) {
+                                                    Icon(
+                                                        imageVector = Icons.Rounded.Delete,
+                                                        contentDescription = "Delete Playlist",
+                                                        tint = Color(0xFFFF5252),
+                                                        modifier = Modifier.size(20.dp)
+                                                    )
                                                 }
                                             }
+
+                                            // Hero Section: 4-Artwork Mosaic Cover & Action Buttons
+                                            Row(
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .padding(vertical = 12.dp),
+                                                verticalAlignment = Alignment.CenterVertically
+                                            ) {
+                                                PlaylistMosaicCover(
+                                                    artworkUrls = localPlaylistTracks.map { it.artworkUrl },
+                                                    modifier = Modifier.size(110.dp),
+                                                    shape = RoundedCornerShape(16.dp),
+                                                    fallbackIconSize = 42.dp
+                                                )
+
+                                                Spacer(modifier = Modifier.width(16.dp))
+
+                                                Column(modifier = Modifier.weight(1f)) {
+                                                    Text(
+                                                        text = playlist.name,
+                                                        fontSize = 20.sp,
+                                                        fontWeight = FontWeight.Bold,
+                                                        color = if (isDarkTheme) Color.White else Color(0xFF0F172A)
+                                                    )
+                                                    Text(
+                                                        text = "${localPlaylistTracks.size} songs",
+                                                        fontSize = 13.sp,
+                                                        color = if (isDarkTheme) Color(0xFF94A3B8) else Color(0xFF64748B)
+                                                    )
+
+                                                    Spacer(modifier = Modifier.height(10.dp))
+
+                                                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                                        Button(
+                                                            onClick = {
+                                                                if (localPlaylistTracks.isNotEmpty()) {
+                                                                    playQueue(localPlaylistTracks, 0)
+                                                                }
+                                                            },
+                                                            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
+                                                            shape = RoundedCornerShape(20.dp),
+                                                            modifier = Modifier.height(36.dp)
+                                                        ) {
+                                                            Icon(imageVector = Icons.Rounded.PlayArrow, contentDescription = "Play", modifier = Modifier.size(16.dp))
+                                                            Spacer(modifier = Modifier.width(4.dp))
+                                                            Text("Play", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                                        }
+
+                                                        Button(
+                                                            onClick = {
+                                                                if (localPlaylistTracks.isNotEmpty()) {
+                                                                    playQueue(localPlaylistTracks.shuffled(), 0)
+                                                                }
+                                                            },
+                                                            colors = ButtonDefaults.buttonColors(
+                                                                containerColor = if (isDarkTheme) Color(0xFF1E2836) else Color(0xFFE2E8F0),
+                                                                contentColor = if (isDarkTheme) Color.White else Color(0xFF0F172A)
+                                                            ),
+                                                            shape = RoundedCornerShape(20.dp),
+                                                            modifier = Modifier.height(36.dp)
+                                                        ) {
+                                                            Icon(imageVector = Icons.Rounded.Shuffle, contentDescription = "Shuffle", modifier = Modifier.size(14.dp))
+                                                            Spacer(modifier = Modifier.width(4.dp))
+                                                            Text("Shuffle", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                                        }
+                                                    }
+                                                }
+                                            }
+
+                                            // Reorderable & Swipeable Track List
+                                            LazyColumn(modifier = Modifier.fillMaxSize()) {
+                                                itemsIndexed(localPlaylistTracks, key = { _, track -> track.id }) { idx, track ->
+                                                    SwipeablePlaylistTrackRow(
+                                                        track = track,
+                                                        index = idx,
+                                                        totalCount = localPlaylistTracks.size,
+                                                        isDarkTheme = isDarkTheme,
+                                                        onClick = { playQueue(localPlaylistTracks, idx) },
+                                                        onMoveUp = {
+                                                            if (idx > 0) {
+                                                                val mutable = localPlaylistTracks.toMutableList()
+                                                                val item = mutable.removeAt(idx)
+                                                                mutable.add(idx - 1, item)
+                                                                localPlaylistTracks = mutable
+                                                            }
+                                                        },
+                                                        onMoveDown = {
+                                                            if (idx < localPlaylistTracks.size - 1) {
+                                                                val mutable = localPlaylistTracks.toMutableList()
+                                                                val item = mutable.removeAt(idx)
+                                                                mutable.add(idx + 1, item)
+                                                                localPlaylistTracks = mutable
+                                                            }
+                                                        },
+                                                        onDelete = {
+                                                            coroutineScope.launch {
+                                                                dao.removeSongFromPlaylist(playlist.id, track.id)
+                                                                localPlaylistTracks = localPlaylistTracks.filter { it.id != track.id }
+                                                            }
+                                                        }
+                                                    )
+                                                }
+                                                item { Spacer(modifier = Modifier.height(90.dp)) }
+                                            }
                                         }
-                                        item { Spacer(modifier = Modifier.height(84.dp)) }
+                                    } else {
+                                        // Playlists overview list with 4-Artwork Mosaic Covers
+                                        LazyColumn(modifier = Modifier.fillMaxSize()) {
+                                            item {
+                                                Button(
+                                                    onClick = { showCreatePlaylistDialog = true },
+                                                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
+                                                    shape = RoundedCornerShape(10.dp),
+                                                    modifier = Modifier
+                                                        .fillMaxWidth()
+                                                        .padding(vertical = 6.dp)
+                                                ) {
+                                                    Text("+ Create New Playlist", fontWeight = FontWeight.Bold)
+                                                }
+                                            }
+                                            items(allPlaylists) { playlist ->
+                                                val songsForThisPlaylist by dao.getSongsForPlaylist(playlist.id).collectAsState(initial = emptyList())
+
+                                                Card(
+                                                    modifier = Modifier
+                                                        .fillMaxWidth()
+                                                        .padding(vertical = 4.dp)
+                                                        .clickable { viewingPlaylist = playlist },
+                                                    colors = CardDefaults.cardColors(
+                                                        containerColor = if (isDarkTheme) Color(0xFF141C24) else Color(0xFFF1F5F9)
+                                                    ),
+                                                    shape = RoundedCornerShape(12.dp)
+                                                ) {
+                                                    Row(
+                                                        modifier = Modifier
+                                                            .fillMaxWidth()
+                                                            .padding(10.dp),
+                                                        verticalAlignment = Alignment.CenterVertically
+                                                    ) {
+                                                        PlaylistMosaicCover(
+                                                            artworkUrls = songsForThisPlaylist.map { it.artworkUrl },
+                                                            modifier = Modifier.size(56.dp),
+                                                            shape = RoundedCornerShape(10.dp),
+                                                            fallbackIconSize = 24.dp
+                                                        )
+
+                                                        Spacer(modifier = Modifier.width(14.dp))
+
+                                                        Column(modifier = Modifier.weight(1f)) {
+                                                            Text(
+                                                                text = playlist.name,
+                                                                color = if (isDarkTheme) Color.White else Color(0xFF0F172A),
+                                                                fontSize = 15.sp,
+                                                                fontWeight = FontWeight.Bold
+                                                            )
+                                                            Text(
+                                                                text = "${songsForThisPlaylist.size} tracks",
+                                                                color = if (isDarkTheme) Color(0xFF94A3B8) else Color(0xFF64748B),
+                                                                fontSize = 12.sp
+                                                            )
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            item { Spacer(modifier = Modifier.height(90.dp)) }
+                                        }
                                     }
                                 }
                                 2 -> {
