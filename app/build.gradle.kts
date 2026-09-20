@@ -7,7 +7,7 @@ plugins {
 
 val gitHubRunNumber = System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull() ?: 1
 val autoVersionCode = gitHubRunNumber + 10
-val autoVersionName = "1.2.$gitHubRunNumber"
+val autoVersionName = "1.3.$gitHubRunNumber"
 
 android {
     namespace = "com.example.music"

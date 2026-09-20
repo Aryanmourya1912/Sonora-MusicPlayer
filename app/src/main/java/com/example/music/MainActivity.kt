@@ -20,6 +20,8 @@ import androidx.activity.compose.setContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideInVertically
@@ -47,6 +49,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -156,6 +159,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
@@ -193,6 +197,7 @@ import java.util.Locale
 import javax.crypto.Cipher
 import javax.crypto.spec.SecretKeySpec
 import kotlin.math.max
+import kotlin.math.roundToInt
 
 data class FullTrackItem(
     val id: String,
@@ -3169,18 +3174,60 @@ fun SonoraPlayerScreen(
             if (activeSongId.isNotBlank()) {
                 val progressFraction = if (totalDuration > 0) (currentPosition.toFloat() / totalDuration.toFloat()).coerceIn(0f, 1f) else 0f
 
+                // Horizontal swipe drag offset with bouncy spring animation
+                var miniplayerDragOffsetX by remember { mutableFloatStateOf(0f) }
+                val animatedMiniplayerOffsetX by animateFloatAsState(
+                    targetValue = miniplayerDragOffsetX,
+                    animationSpec = spring(
+                        dampingRatio = Spring.DampingRatioMediumBouncy,
+                        stiffness = Spring.StiffnessLow
+                    ),
+                    label = "miniplayerSwipeOffset"
+                )
+
                 Card(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(horizontal = 12.dp, vertical = 4.dp)
+                        .offset { IntOffset(animatedMiniplayerOffsetX.roundToInt(), 0) }
+                        // Horizontal swipe: Left for Next, Right for Previous
                         .draggable(
+                            orientation = Orientation.Horizontal,
+                            state = rememberDraggableState { delta ->
+                                miniplayerDragOffsetX = (miniplayerDragOffsetX + delta * 0.65f).coerceIn(-280f, 280f)
+                            },
+                            onDragStopped = { velocity ->
+                                val threshold = 110f
+                                if (miniplayerDragOffsetX < -threshold || velocity < -450f) {
+                                    // Swipe Left -> Skip to Next track
+                                    controller?.let { player ->
+                                        if (player.mediaItemCount > 0 && player.hasNextMediaItem()) {
+                                            player.seekToNextMediaItem()
+                                        }
+                                    }
+                                } else if (miniplayerDragOffsetX > threshold || velocity > 450f) {
+                                    // Swipe Right -> Skip to Previous track
+                                    controller?.let { player ->
+                                        if (player.currentPosition > 3000L) {
+                                            player.seekTo(0L)
+                                        } else if (player.hasPreviousMediaItem()) {
+                                            player.seekToPreviousMediaItem()
+                                        }
+                                    }
+                                }
+                                miniplayerDragOffsetX = 0f
+                            }
+                        )
+                        // Vertical swipe: Drag up to expand
+                        .draggable(
+                            orientation = Orientation.Vertical,
                             state = rememberDraggableState { delta ->
                                 if (delta < -20f) {
                                     isPlayerExpanded = true
                                 }
-                            },
-                            orientation = Orientation.Vertical
+                            }
                         )
+                        // Tap to expand
                         .clickable { isPlayerExpanded = true },
                     shape = RoundedCornerShape(28.dp),
                     colors = CardDefaults.cardColors(containerColor = Color.Transparent)
