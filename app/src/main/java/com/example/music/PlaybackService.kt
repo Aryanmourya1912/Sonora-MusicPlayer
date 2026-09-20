@@ -9,6 +9,7 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import androidx.core.content.ContextCompat
+import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.session.CommandButton
 import androidx.media3.session.MediaSession
@@ -22,11 +23,9 @@ import com.google.common.util.concurrent.ListenableFuture
 class PlaybackService : MediaSessionService() {
 
     private var mediaSession: MediaSession? = null
-
     private val closeCommand = SessionCommand(ACTION_CLOSE_APP, Bundle.EMPTY)
 
     private val sessionCallback = object : MediaSession.Callback {
-
         override fun onConnect(
             session: MediaSession,
             controller: MediaSession.ControllerInfo
@@ -51,20 +50,14 @@ class PlaybackService : MediaSessionService() {
             if (customCommand.customAction == ACTION_CLOSE_APP) {
                 Log.d("Sonora", "Close button tapped in notification")
                 exitApp()
-                return Futures.immediateFuture(
-                    SessionResult(SessionResult.RESULT_SUCCESS)
-                )
+                return Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
             }
             return super.onCustomCommand(session, controller, customCommand, args)
         }
     }
 
     private val killReceiver = object : BroadcastReceiver() {
-
-        override fun onReceive(
-            context: Context?,
-            intent: Intent?
-        ) {
+        override fun onReceive(context: Context?, intent: Intent?) {
             if (intent?.action == ACTION_KILL_SERVICE) {
                 terminatePlayback()
             }
@@ -74,9 +67,20 @@ class PlaybackService : MediaSessionService() {
     override fun onCreate() {
         super.onCreate()
 
+        // Initialize Equalizer manager with context
+        EqualizerManager.init(this)
+
         val player = ExoPlayer.Builder(this).build()
 
-        // "Close" (X) button shown in the playback notification.
+        // Bind hardware Equalizer to ExoPlayer's audio session
+        EqualizerManager.attachAudioSession(player.audioSessionId)
+
+        player.addListener(object : Player.Listener {
+            override fun onAudioSessionIdChanged(audioSessionId: Int) {
+                EqualizerManager.attachAudioSession(audioSessionId)
+            }
+        })
+
         val closeButton = CommandButton.Builder()
             .setDisplayName("Close")
             .setIconResId(R.drawable.ic_close)
@@ -96,42 +100,22 @@ class PlaybackService : MediaSessionService() {
         )
     }
 
-    override fun onGetSession(
-        controllerInfo: MediaSession.ControllerInfo
-    ): MediaSession? {
-        return mediaSession
-    }
+    override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession? = mediaSession
 
-    override fun onStartCommand(
-        intent: Intent?,
-        flags: Int,
-        startId: Int
-    ): Int {
-
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP_SERVICE) {
             terminatePlayback()
             return START_NOT_STICKY
         }
-
-        super.onStartCommand(
-            intent,
-            flags,
-            startId
-        )
-
+        super.onStartCommand(intent, flags, startId)
         return START_NOT_STICKY
     }
 
-    /**
-     * Called when the user removes the app's task from Recents
-     * (requires android:stopWithTask="false" in the manifest).
-     */
     override fun onTaskRemoved(rootIntent: Intent?) {
         Log.d("Sonora", "PlaybackService.onTaskRemoved fired")
         exitApp()
     }
 
-    /** Stops playback, removes the notification and exits the app process. */
     private fun exitApp() {
         Handler(Looper.getMainLooper()).post {
             terminatePlayback()
@@ -140,6 +124,8 @@ class PlaybackService : MediaSessionService() {
     }
 
     private fun terminatePlayback() {
+        EqualizerManager.releaseEffects()
+
         mediaSession?.let { session ->
             try {
                 session.player.apply {
@@ -148,48 +134,33 @@ class PlaybackService : MediaSessionService() {
                     clearMediaItems()
                     release()
                 }
-            } catch (_: Exception) {
-                // Ignore player cleanup errors
-            }
+            } catch (_: Exception) {}
 
             try {
                 session.release()
-            } catch (_: Exception) {
-                // Ignore session cleanup errors
-            }
+            } catch (_: Exception) {}
         }
         mediaSession = null
 
         try {
             stopForeground(STOP_FOREGROUND_REMOVE)
-        } catch (_: Exception) {
-            // Service may not be in the foreground
-        }
+        } catch (_: Exception) {}
 
         stopSelf()
     }
 
     override fun onDestroy() {
-
         try {
             unregisterReceiver(killReceiver)
-        } catch (_: Exception) {
-            // Receiver already unregistered
-        }
+        } catch (_: Exception) {}
 
         terminatePlayback()
-
         super.onDestroy()
     }
 
     companion object {
-        private const val ACTION_KILL_SERVICE =
-            "com.example.music.ACTION_KILL_SERVICE"
-
-        private const val ACTION_STOP_SERVICE =
-            "ACTION_STOP_SERVICE"
-
-        private const val ACTION_CLOSE_APP =
-            "com.example.music.ACTION_CLOSE_APP"
+        private const val ACTION_KILL_SERVICE = "com.example.music.ACTION_KILL_SERVICE"
+        private const val ACTION_STOP_SERVICE = "ACTION_STOP_SERVICE"
+        private const val ACTION_CLOSE_APP = "com.example.music.ACTION_CLOSE_APP"
     }
 }
