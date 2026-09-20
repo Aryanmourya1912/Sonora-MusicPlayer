@@ -1821,13 +1821,19 @@ fun SonoraPlayerScreen(
     }
 
     fun updateQueueState(player: Player) {
-        val count = player.mediaItemCount
-        val items = ArrayList<FullTrackItem>(count)
-        for (i in 0 until count) {
-            items.add(mediaItemToTrack(player.getMediaItemAt(i)))
+        try {
+            val count = player.mediaItemCount
+            val items = ArrayList<FullTrackItem>(count)
+            for (i in 0 until count) {
+                if (i < player.mediaItemCount) {
+                    items.add(mediaItemToTrack(player.getMediaItemAt(i)))
+                }
+            }
+            queueList = items
+            currentTrackIndex = player.currentMediaItemIndex.coerceAtLeast(0)
+        } catch (_: Exception) {
+            // Prevents crashes if timeline mutates during iteration
         }
-        queueList = items
-        currentTrackIndex = player.currentMediaItemIndex
     }
 
     var isAutoQueueFilling by remember { mutableStateOf(false) }
@@ -2721,9 +2727,9 @@ fun SonoraPlayerScreen(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text("Up Next Queue", color = MaterialTheme.colorScheme.onSurface, fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                    Text("Up Next Queue", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 18.sp)
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text("Radio", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp, modifier = Modifier.padding(end = 4.dp))
+                        Text("Radio", color = Color(0xFF94A3B8), fontSize = 11.sp, modifier = Modifier.padding(end = 4.dp))
                         Switch(
                             checked = endlessRadioEnabled,
                             onCheckedChange = { endlessRadioEnabled = it },
@@ -2738,14 +2744,15 @@ fun SonoraPlayerScreen(
             text = {
                 var localQueue by remember(queueList) { mutableStateOf(queueList) }
                 LazyColumn(modifier = Modifier.fillMaxWidth().height(360.dp)) {
-                    itemsIndexed(localQueue, key = { _, track -> track.id }) { index, track ->
+                    // Unique composite key prevents LazyColumn key duplicate crashes
+                    itemsIndexed(localQueue, key = { index, track -> "${track.id}_$index" }) { index, track ->
                         val isCurrent = index == currentTrackIndex
                         Card(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .padding(vertical = 3.dp),
                             colors = CardDefaults.cardColors(
-                                containerColor = if (isCurrent) MaterialTheme.colorScheme.primary.copy(alpha = 0.15f) else MaterialTheme.colorScheme.surfaceVariant
+                                containerColor = if (isCurrent) Color(0xFF263242) else Color(0xFF141C24)
                             ),
                             shape = RoundedCornerShape(8.dp)
                         ) {
@@ -2753,39 +2760,50 @@ fun SonoraPlayerScreen(
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .padding(8.dp)
-                                    .clickable { controller?.seekToDefaultPosition(index) },
+                                    .clickable {
+                                        controller?.let { player ->
+                                            if (index in 0 until player.mediaItemCount) {
+                                                player.seekToDefaultPosition(index)
+                                                player.play()
+                                            }
+                                        }
+                                    },
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Column {
                                     IconButton(
                                         onClick = {
-                                            if (index > 0) {
-                                                val mutable = localQueue.toMutableList()
-                                                val item = mutable.removeAt(index)
-                                                mutable.add(index - 1, item)
-                                                localQueue = mutable
-                                                controller?.moveMediaItem(index, index - 1)
-                                                updateQueueState(controller!!)
+                                            controller?.let { player ->
+                                                if (index > 0 && index < player.mediaItemCount) {
+                                                    val mutable = localQueue.toMutableList()
+                                                    val item = mutable.removeAt(index)
+                                                    mutable.add(index - 1, item)
+                                                    localQueue = mutable
+                                                    player.moveMediaItem(index, index - 1)
+                                                    updateQueueState(player)
+                                                }
                                             }
                                         },
                                         modifier = Modifier.size(18.dp)
                                     ) {
-                                        Icon(imageVector = Icons.Rounded.ArrowUpward, contentDescription = "Move Up", tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(14.dp))
+                                        Icon(imageVector = Icons.Rounded.ArrowUpward, contentDescription = "Move Up", tint = Color(0xFF94A3B8), modifier = Modifier.size(14.dp))
                                     }
                                     IconButton(
                                         onClick = {
-                                            if (index < localQueue.size - 1) {
-                                                val mutable = localQueue.toMutableList()
-                                                val item = mutable.removeAt(index)
-                                                mutable.add(index + 1, item)
-                                                localQueue = mutable
-                                                controller?.moveMediaItem(index, index + 1)
-                                                updateQueueState(controller!!)
+                                            controller?.let { player ->
+                                                if (index < localQueue.size - 1 && index + 1 < player.mediaItemCount) {
+                                                    val mutable = localQueue.toMutableList()
+                                                    val item = mutable.removeAt(index)
+                                                    mutable.add(index + 1, item)
+                                                    localQueue = mutable
+                                                    player.moveMediaItem(index, index + 1)
+                                                    updateQueueState(player)
+                                                }
                                             }
                                         },
                                         modifier = Modifier.size(18.dp)
                                     ) {
-                                        Icon(imageVector = Icons.Rounded.ArrowDownward, contentDescription = "Move Down", tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(14.dp))
+                                        Icon(imageVector = Icons.Rounded.ArrowDownward, contentDescription = "Move Down", tint = Color(0xFF94A3B8), modifier = Modifier.size(14.dp))
                                     }
                                 }
 
@@ -2794,13 +2812,13 @@ fun SonoraPlayerScreen(
                                     Icon(
                                         imageVector = Icons.Rounded.PlayArrow,
                                         contentDescription = "Playing",
-                                        tint = MaterialTheme.colorScheme.primary,
+                                        tint = Color(0xFFD3E2F8),
                                         modifier = Modifier.size(16.dp)
                                     )
                                 } else {
                                     Text(
                                         text = "${index + 1}",
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        color = Color(0xFF64748B),
                                         fontSize = 12.sp,
                                         fontWeight = FontWeight.Bold,
                                         modifier = Modifier.width(20.dp)
@@ -2819,24 +2837,28 @@ fun SonoraPlayerScreen(
                                         text = track.title,
                                         fontWeight = if (isCurrent) FontWeight.Bold else FontWeight.SemiBold,
                                         fontSize = 14.sp,
-                                        color = if (isCurrent) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+                                        color = Color.White,
                                         maxLines = 1
                                     )
-                                    Text(track.artist, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp, maxLines = 1)
+                                    Text(track.artist, color = Color(0xFF94A3B8), fontSize = 12.sp, maxLines = 1)
                                 }
                                 IconButton(
                                     onClick = {
-                                        val mutable = localQueue.toMutableList()
-                                        mutable.removeAt(index)
-                                        localQueue = mutable
-                                        controller?.removeMediaItem(index)
-                                        updateQueueState(controller!!)
+                                        controller?.let { player ->
+                                            if (index in 0 until player.mediaItemCount) {
+                                                val mutable = localQueue.toMutableList()
+                                                mutable.removeAt(index)
+                                                localQueue = mutable
+                                                player.removeMediaItem(index)
+                                                updateQueueState(player)
+                                            }
+                                        }
                                     }
                                 ) {
                                     Icon(
                                         imageVector = Icons.Rounded.Close,
                                         contentDescription = "Remove",
-                                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        tint = Color(0xFF94A3B8),
                                         modifier = Modifier.size(18.dp)
                                     )
                                 }
@@ -2847,9 +2869,9 @@ fun SonoraPlayerScreen(
             },
             confirmButton = {},
             dismissButton = {
-                TextButton(onClick = { showQueueDialog = false }) { Text("Close", color = MaterialTheme.colorScheme.primary) }
+                TextButton(onClick = { showQueueDialog = false }) { Text("Close", color = Color(0xFF94A3B8)) }
             },
-            containerColor = MaterialTheme.colorScheme.surface,
+            containerColor = Color(0xFF161F29),
             shape = RoundedCornerShape(16.dp)
         )
     }
@@ -3909,24 +3931,18 @@ fun SonoraPlayerScreen(
                                 modifier = Modifier
                                     .size(64.dp)
                                     .clip(CircleShape)
-                                    .background(playerControlBg)
+                                    .background(Color(0x50FFFFFF))
                                     .clickable {
                                         controller?.let { player ->
-                                            if (player.hasNextMediaItem()) {
+                                            if (player.mediaItemCount > 0 && player.hasNextMediaItem()) {
                                                 player.seekToNextMediaItem()
                                             }
                                         }
                                     },
                                 contentAlignment = Alignment.Center
                             ) {
-                                Icon(
-                                    imageVector = Icons.Rounded.SkipNext,
-                                    contentDescription = "Next",
-                                    tint = playerTextColor,
-                                    modifier = Modifier.size(28.dp)
-                                )
+                                Icon(imageVector = Icons.Rounded.SkipNext, contentDescription = "Next", tint = Color.White, modifier = Modifier.size(28.dp))
                             }
-                        }
 
                         // Bottom Action Bar
                         Row(
