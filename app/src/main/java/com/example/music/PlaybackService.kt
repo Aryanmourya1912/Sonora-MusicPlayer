@@ -67,30 +67,22 @@ class PlaybackService : MediaSessionService() {
     override fun onCreate() {
         super.onCreate()
 
-        // Initialize Equalizer manager with context
-        EqualizerManager.init(this)
-
         val player = ExoPlayer.Builder(this).build()
 
-        // Bind hardware Equalizer to ExoPlayer's audio session
-        EqualizerManager.attachAudioSession(player.audioSessionId)
+        // Attach EqualizerManager to the audio session
+        EqualizerManager.init(this, player.audioSessionId)
 
-        player.addListener(object : Player.Listener {
-            override fun onAudioSessionIdChanged(audioSessionId: Int) {
-                EqualizerManager.attachAudioSession(audioSessionId)
-            }
-        })
-
+        // "Close" (X) button shown in the playback notification.
         val closeButton = CommandButton.Builder()
             .setDisplayName("Close")
             .setIconResId(R.drawable.ic_close)
             .setSessionCommand(closeCommand)
             .build()
 
-        mediaSession = MediaSession.Builder(this, player)
-            .setCallback(sessionCallback)
-            .setCustomLayout(ImmutableList.of(closeButton))
-            .build()
+            mediaSession = MediaSession.Builder(this, player)
+                .setCallback(sessionCallback)
+                .setCustomLayout(ImmutableList.of(closeButton))
+                .build()
 
         ContextCompat.registerReceiver(
             this,
@@ -124,7 +116,7 @@ class PlaybackService : MediaSessionService() {
     }
 
     private fun terminatePlayback() {
-        EqualizerManager.releaseEffects()
+        EqualizerManager.release()
 
         mediaSession?.let { session ->
             try {

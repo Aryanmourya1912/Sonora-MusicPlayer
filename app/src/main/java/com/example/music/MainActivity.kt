@@ -1765,7 +1765,7 @@ fun SonoraPlayerScreen(
         mutableFloatStateOf(audioManager.getStreamVolume(AudioManager.STREAM_MUSIC).toFloat())
     }
     
-    var showEqualizerModal by remember { mutableStateOf(false) }
+    var showEqualizerSheet by remember { mutableStateOf(false) }
 
     DisposableEffect(audioManager) {
         val runnable = Runnable {
@@ -2585,11 +2585,8 @@ fun SonoraPlayerScreen(
         )
     }
     
-    if (showEqualizerModal) {
-        EqualizerModalBottomSheet(
-            isDarkTheme = isDarkTheme,
-            onDismissRequest = { showEqualizerModal = false }
-        )
+    if (showEqualizerSheet) {
+        EqualizerSheet(onDismiss = { showEqualizerSheet = false })
     }
 
     if (songToAddToPlaylist != null) {
@@ -4018,16 +4015,15 @@ fun SonoraPlayerScreen(
                                     .size(46.dp)
                                     .clip(RoundedCornerShape(12.dp))
                                     .background(
-                                        if (EqualizerManager.isEnabled) MaterialTheme.colorScheme.primary.copy(alpha = 0.2f)
-                                        else playerControlBg
+                                        if (EqualizerManager.isEnabled) Color(0xFF7C4DFF) else Color(0x30FFFFFF)
                                     )
-                                    .clickable { showEqualizerModal = true },
+                                    .clickable { showEqualizerSheet = true },
                                 contentAlignment = Alignment.Center
                             ) {
                                 Icon(
                                     imageVector = Icons.Rounded.Tune,
                                     contentDescription = "Equalizer",
-                                    tint = if (EqualizerManager.isEnabled) MaterialTheme.colorScheme.primary else playerTextColor,
+                                    tint = Color.White,
                                     modifier = Modifier.size(18.dp)
                                 )
                             }

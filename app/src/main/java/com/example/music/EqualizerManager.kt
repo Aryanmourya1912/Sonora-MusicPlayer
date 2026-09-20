@@ -6,206 +6,330 @@ import android.media.audiofx.BassBoost
 import android.media.audiofx.Equalizer
 import android.media.audiofx.Virtualizer
 import android.util.Log
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+
+data class EqualizerBand(
+    val index: Short,
+    val centerFreqHz: Int,
+    val centerFreqLabel: String,
+    val levelMb: Short
+)
 
 object EqualizerManager {
+    private const val PREFS_NAME = "sonora_equalizer_prefs"
+    private const val KEY_ENABLED = "eq_enabled"
+    private const val KEY_PRESET = "eq_preset"
+    private const val KEY_BASS_BOOST = "eq_bass_boost"
+    private const val KEY_VIRTUALIZER = "eq_virtualizer"
+    private const val KEY_BAND_PREFIX = "eq_band_"
+
     private var equalizer: Equalizer? = null
     private var bassBoost: BassBoost? = null
     private var virtualizer: Virtualizer? = null
-    private var currentAudioSessionId: Int = 0
-    private var prefs: SharedPreferences? = null
+    private var currentSessionId: Int = 0
 
-    var isEnabled: Boolean = true
+    var isEnabled by mutableStateOf(true)
         private set
 
-    var currentPreset: String = "Flat"
+    var minLevelMb by mutableStateOf((-1500).toShort())
         private set
 
-    // 5 frequency band gain levels in dB (-12 dB to +12 dB)
-    val bandLevels = floatArrayOf(0f, 0f, 0f, 0f, 0f)
-
-    // Extra enhancements: Bass Boost (0 to 1000) & Virtualizer (0 to 1000)
-    var bassBoostStrength: Int = 0
-        private set
-    var virtualizerStrength: Int = 0
+    var maxLevelMb by mutableStateOf((1500).toShort())
         private set
 
-    val bandLabels = listOf(
-        "60 Hz" to "Sub-Bass",
-        "230 Hz" to "Bass",
-        "910 Hz" to "Midrange",
-        "3.6 kHz" to "Presence",
-        "14 kHz" to "Treble"
+    val bands = mutableStateListOf<EqualizerBand>()
+
+    val presets = mutableStateListOf<String>()
+
+    var currentPresetIndex by mutableIntStateOf(0)
+        private set
+
+    var bassBoostStrength by mutableFloatStateOf(0f)
+        private set
+
+    var isBassBoostSupported by mutableStateOf(true)
+        private set
+
+    var virtualizerStrength by mutableFloatStateOf(0f)
+        private set
+
+    var isVirtualizerSupported by mutableStateOf(true)
+        private set
+
+    private val defaultPresets = listOf(
+        "Flat" to listOf(0, 0, 0, 0, 0),
+        "Bass Boost" to listOf(600, 450, 200, 0, 0),
+        "Rock" to listOf(500, 300, -100, 300, 500),
+        "Pop" to listOf(-100, 200, 500, 200, -200),
+        "Hip Hop" to listOf(500, 300, 0, 200, 350),
+        "Jazz" to listOf(300, 200, -200, 200, 400),
+        "Classical" to listOf(400, 300, -100, 300, 400),
+        "Electronic" to listOf(450, 200, 0, 200, 450),
+        "Vocal Boost" to listOf(-200, 0, 500, 300, -100)
     )
 
-    fun init(context: Context) {
-        prefs = context.getSharedPreferences("sonora_equalizer", Context.MODE_PRIVATE)
-        loadSettings()
+    init {
+        // Pre-populate default 5-band layout so the UI is ready even before audio starts
+        val initialLabels = listOf("60 Hz", "230 Hz", "910 Hz", "3.6 kHz", "14 kHz")
+        val initialFreqs = listOf(60, 230, 910, 3600, 14000)
+        for (i in 0 until 5) {
+            bands.add(EqualizerBand(i.toShort(), initialFreqs[i], initialLabels[i], 0.toShort()))
+        }
+        defaultPresets.forEach { presets.add(it.first) }
+        presets.add("Custom")
     }
 
-    fun attachAudioSession(audioSessionId: Int) {
+    fun init(context: Context, audioSessionId: Int) {
         if (audioSessionId <= 0) return
-        if (audioSessionId == currentAudioSessionId && equalizer != null) return
+        if (currentSessionId == audioSessionId && equalizer != null) return
 
-        currentAudioSessionId = audioSessionId
+        release()
+        currentSessionId = audioSessionId
+
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val savedEnabled = prefs.getBoolean(KEY_ENABLED, true)
+        val savedBass = prefs.getInt(KEY_BASS_BOOST, 0)
+        val savedVirt = prefs.getInt(KEY_VIRTUALIZER, 0)
+        val savedPreset = prefs.getInt(KEY_PRESET, 0)
+
+        isEnabled = savedEnabled
+        bassBoostStrength = savedBass.toFloat()
+        virtualizerStrength = savedVirt.toFloat()
+        currentPresetIndex = savedPreset
+
         try {
-            releaseEffects()
+            val eq = Equalizer(0, audioSessionId)
+            eq.enabled = savedEnabled
 
-            equalizer = Equalizer(0, audioSessionId).apply {
-                enabled = isEnabled
+            val range = eq.bandLevelRange
+            if (range != null && range.size >= 2) {
+                minLevelMb = range[0]
+                maxLevelMb = range[1]
             }
 
-            try {
-                bassBoost = BassBoost(0, audioSessionId).apply {
-                    enabled = isEnabled && strengthSupported
-                    if (strengthSupported) setStrength(bassBoostStrength.toShort())
-                }
-            } catch (_: Exception) {}
+            val numBands = eq.numberOfBands
+            val bandList = ArrayList<EqualizerBand>()
 
-            try {
-                virtualizer = Virtualizer(0, audioSessionId).apply {
-                    enabled = isEnabled && strengthSupported
-                    if (strengthSupported) setStrength(virtualizerStrength.toShort())
+            for (i in 0 until numBands) {
+                val bandIdx = i.toShort()
+                val centerFreqMhz = eq.getCenterFreq(bandIdx)
+                val freqHz = centerFreqMhz / 1000
+                val label = if (freqHz >= 1000) {
+                    val k = freqHz / 1000.0
+                    if (k % 1.0 == 0.0) "${k.toInt()} kHz" else String.format(java.util.Locale.ROOT, "%.1f kHz", k)
+                } else {
+                    "$freqHz Hz"
                 }
-            } catch (_: Exception) {}
 
-            applyAllSettings()
-            Log.d("SonoraEQ", "Equalizer attached to AudioSession: $audioSessionId")
+                val savedLevel = prefs.getInt("$KEY_BAND_PREFIX$i", Int.MIN_VALUE)
+                val actualLevel = if (savedLevel != Int.MIN_VALUE) {
+                    val clamped = savedLevel.coerceIn(minLevelMb.toInt(), maxLevelMb.toInt()).toShort()
+                    eq.setBandLevel(bandIdx, clamped)
+                    clamped
+                } else {
+                    eq.getBandLevel(bandIdx)
+                }
+
+                bandList.add(EqualizerBand(bandIdx, freqHz, label, actualLevel))
+            }
+
+            bands.clear()
+            bands.addAll(bandList)
+
+            val presetList = mutableListOf<String>()
+            val numPresets = eq.numberOfPresets
+            if (numPresets > 0) {
+                for (p in 0 until numPresets) {
+                    presetList.add(eq.getPresetName(p.toShort()))
+                }
+            } else {
+                defaultPresets.forEach { presetList.add(it.first) }
+            }
+            if (!presetList.contains("Custom")) {
+                presetList.add("Custom")
+            }
+
+            presets.clear()
+            presets.addAll(presetList)
+
+            equalizer = eq
         } catch (e: Exception) {
-            Log.e("SonoraEQ", "Failed to initialize Equalizer effects", e)
+            Log.e("Sonora", "Equalizer init error: ${e.message}")
+            equalizer = null
+        }
+
+        try {
+            val bb = BassBoost(0, audioSessionId)
+            isBassBoostSupported = bb.strengthSupported
+            if (isBassBoostSupported) {
+                bb.enabled = savedEnabled
+                bb.setStrength(savedBass.toShort().coerceIn(0, 1000))
+            }
+            bassBoost = bb
+        } catch (e: Exception) {
+            isBassBoostSupported = false
+            bassBoost = null
+        }
+
+        try {
+            val virt = Virtualizer(0, audioSessionId)
+            isVirtualizerSupported = virt.strengthSupported
+            if (isVirtualizerSupported) {
+                virt.enabled = savedEnabled
+                virt.setStrength(savedVirt.toShort().coerceIn(0, 1000))
+            }
+            virtualizer = virt
+        } catch (e: Exception) {
+            isVirtualizerSupported = false
+            virtualizer = null
         }
     }
 
-    fun setEnabled(enabled: Boolean) {
+    fun setEnabled(context: Context, enabled: Boolean) {
         isEnabled = enabled
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
+            .putBoolean(KEY_ENABLED, enabled)
+            .apply()
+
         try {
             equalizer?.enabled = enabled
-            bassBoost?.enabled = enabled && (bassBoost?.strengthSupported == true)
-            virtualizer?.enabled = enabled && (virtualizer?.strengthSupported == true)
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
-        saveSettings()
+            if (isBassBoostSupported) bassBoost?.enabled = enabled
+            if (isVirtualizerSupported) virtualizer?.enabled = enabled
+        } catch (_: Exception) {}
     }
 
-    fun setBandLevel(bandIndex: Int, dbValue: Float) {
-        if (bandIndex in bandLevels.indices) {
-            bandLevels[bandIndex] = dbValue.coerceIn(-12f, 12f)
+    fun setBandLevel(context: Context, bandIndex: Short, levelMb: Short) {
+        val clamped = levelMb.coerceIn(minLevelMb, maxLevelMb)
+        try {
+            equalizer?.setBandLevel(bandIndex, clamped)
+        } catch (_: Exception) {}
+
+        val idx = bands.indexOfFirst { it.index == bandIndex }
+        if (idx >= 0) {
+            bands[idx] = bands[idx].copy(levelMb = clamped)
+        }
+
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
+            .putInt("$KEY_BAND_PREFIX$bandIndex", clamped.toInt())
+            .apply()
+
+        val customIdx = presets.indexOf("Custom").takeIf { it >= 0 } ?: (presets.size - 1)
+        if (currentPresetIndex != customIdx) {
+            currentPresetIndex = customIdx
+            context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
+                .putInt(KEY_PRESET, customIdx)
+                .apply()
+        }
+    }
+
+    fun applyPreset(context: Context, presetIndex: Int) {
+        if (presetIndex < 0 || presetIndex >= presets.size) return
+        currentPresetIndex = presetIndex
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
+            .putInt(KEY_PRESET, presetIndex)
+            .apply()
+
+        val customIdx = presets.indexOf("Custom")
+        if (presetIndex == customIdx) return
+
+        val eq = equalizer
+        val numNativePresets = eq?.numberOfPresets ?: 0
+
+        if (numNativePresets > 0 && presetIndex < numNativePresets) {
             try {
-                val mB = (bandLevels[bandIndex] * 100).toInt().toShort()
-                equalizer?.setBandLevel(bandIndex.toShort(), mB)
+                eq?.usePreset(presetIndex.toShort())
+                for (i in bands.indices) {
+                    val bandIdx = bands[i].index
+                    val lvl = eq?.getBandLevel(bandIdx) ?: 0.toShort()
+                    bands[i] = bands[i].copy(levelMb = lvl)
+                    context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
+                        .putInt("$KEY_BAND_PREFIX$bandIdx", lvl.toInt())
+                        .apply()
+                }
             } catch (e: Exception) {
-                e.printStackTrace()
+                Log.e("Sonora", "usePreset error: ${e.message}")
             }
-            currentPreset = "Custom"
-            saveSettings()
+        } else {
+            val presetName = presets[presetIndex]
+            val pair = defaultPresets.find { it.first.equals(presetName, ignoreCase = true) }
+            if (pair != null) {
+                val levels = pair.second
+                for (i in bands.indices) {
+                    val lvl = (if (i < levels.size) levels[i] else 0).toShort()
+                    val clamped = lvl.coerceIn(minLevelMb, maxLevelMb)
+                    try {
+                        eq?.setBandLevel(bands[i].index, clamped)
+                    } catch (_: Exception) {}
+                    bands[i] = bands[i].copy(levelMb = clamped)
+                    context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
+                        .putInt("$KEY_BAND_PREFIX${bands[i].index}", clamped.toInt())
+                        .apply()
+                }
+            }
         }
     }
 
-    fun setBassBoost(strength: Int) {
-        bassBoostStrength = strength.coerceIn(0, 1000)
-        try {
-            if (bassBoost?.strengthSupported == true) {
-                bassBoost?.setStrength(bassBoostStrength.toShort())
-            }
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
-        saveSettings()
-    }
+    fun setBassBoost(context: Context, strength: Float) {
+        val clamped = strength.coerceIn(0f, 1000f)
+        bassBoostStrength = clamped
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
+            .putInt(KEY_BASS_BOOST, clamped.toInt())
+            .apply()
 
-    fun setVirtualizer(strength: Int) {
-        virtualizerStrength = strength.coerceIn(0, 1000)
-        try {
-            if (virtualizer?.strengthSupported == true) {
-                virtualizer?.setStrength(virtualizerStrength.toShort())
-            }
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
-        saveSettings()
-    }
-
-    fun applyPreset(presetName: String) {
-        currentPreset = presetName
-        val targetLevels = when (presetName) {
-            "Bass Booster" -> floatArrayOf(6f, 4f, 1f, 0f, -1f)
-            "Vocal Booster" -> floatArrayOf(-2f, 1f, 5f, 3f, 0f)
-            "Rock" -> floatArrayOf(4f, 2f, -1f, 3f, 5f)
-            "Pop" -> floatArrayOf(-1f, 2f, 4f, 2f, -1f)
-            "Jazz" -> floatArrayOf(3f, 1f, -2f, 2f, 4f)
-            "Classical" -> floatArrayOf(4f, 2f, -1f, 2f, 3f)
-            "Electronic" -> floatArrayOf(5f, 3f, 0f, 2f, 4f)
-            else -> floatArrayOf(0f, 0f, 0f, 0f, 0f) // Flat
-        }
-
-        for (i in 0 until 5) {
-            bandLevels[i] = targetLevels[i]
+        if (isBassBoostSupported) {
             try {
-                val mB = (bandLevels[i] * 100).toInt().toShort()
-                equalizer?.setBandLevel(i.toShort(), mB)
-            } catch (e: Exception) {
-                e.printStackTrace()
-            }
-        }
-        saveSettings()
-    }
-
-    private fun applyAllSettings() {
-        try {
-            equalizer?.enabled = isEnabled
-            val numBands = equalizer?.numberOfBands?.toInt() ?: 5
-            for (i in 0 until numBands.coerceAtMost(5)) {
-                val mB = (bandLevels[i] * 100).toInt().toShort()
-                equalizer?.setBandLevel(i.toShort(), mB)
-            }
-            if (bassBoost?.strengthSupported == true) {
-                bassBoost?.setStrength(bassBoostStrength.toShort())
-            }
-            if (virtualizer?.strengthSupported == true) {
-                virtualizer?.setStrength(virtualizerStrength.toShort())
-            }
-        } catch (e: Exception) {
-            e.printStackTrace()
+                bassBoost?.setStrength(clamped.toInt().toShort())
+            } catch (_: Exception) {}
         }
     }
 
-    private fun saveSettings() {
-        prefs?.edit()?.apply {
-            putBoolean("eq_enabled", isEnabled)
-            putString("eq_preset", currentPreset)
-            for (i in 0 until 5) {
-                putFloat("eq_band_$i", bandLevels[i])
-            }
-            putInt("eq_bass_boost", bassBoostStrength)
-            putInt("eq_virtualizer", virtualizerStrength)
-            apply()
+    fun setVirtualizer(context: Context, strength: Float) {
+        val clamped = strength.coerceIn(0f, 1000f)
+        virtualizerStrength = clamped
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
+            .putInt(KEY_VIRTUALIZER, clamped.toInt())
+            .apply()
+
+        if (isVirtualizerSupported) {
+            try {
+                virtualizer?.setStrength(clamped.toInt().toShort())
+            } catch (_: Exception) {}
         }
     }
 
-    private fun loadSettings() {
-        prefs?.let { p ->
-            isEnabled = p.getBoolean("eq_enabled", true)
-            currentPreset = p.getString("eq_preset", "Flat") ?: "Flat"
-            for (i in 0 until 5) {
-                bandLevels[i] = p.getFloat("eq_band_$i", 0f)
+    fun resetToFlat(context: Context) {
+        val flatIdx = presets.indexOfFirst { it.equals("Flat", ignoreCase = true) }
+        if (flatIdx >= 0) {
+            applyPreset(context, flatIdx)
+        } else {
+            for (i in bands.indices) {
+                setBandLevel(context, bands[i].index, 0.toShort())
             }
-            bassBoostStrength = p.getInt("eq_bass_boost", 0)
-            virtualizerStrength = p.getInt("eq_virtualizer", 0)
         }
+        setBassBoost(context, 0f)
+        setVirtualizer(context, 0f)
     }
 
-    fun releaseEffects() {
+    fun release() {
         try {
             equalizer?.release()
         } catch (_: Exception) {}
+        equalizer = null
+
         try {
             bassBoost?.release()
         } catch (_: Exception) {}
+        bassBoost = null
+
         try {
             virtualizer?.release()
         } catch (_: Exception) {}
-        equalizer = null
-        bassBoost = null
         virtualizer = null
+        currentSessionId = 0
     }
 }
