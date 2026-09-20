@@ -68,6 +68,9 @@ interface SonoraDao {
 
     @Query("DELETE FROM downloaded_songs WHERE id = :songId")
     suspend fun deleteDownloadedSong(songId: String)
+    
+    @Query("DELETE FROM downloaded_songs")
+    suspend fun deleteAllDownloadedSongs()
 
     @Query("SELECT * FROM downloaded_songs ORDER BY downloadedAt DESC")
     fun getAllDownloadedSongs(): Flow<List<DownloadedSongEntity>>

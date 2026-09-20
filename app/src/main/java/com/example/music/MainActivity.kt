@@ -525,6 +525,49 @@ fun findRenderersRecursive(json: Any?, targetKey: String, sink: MutableList<JSON
     }
 }
 
+fun formatStorageSize(bytes: Long): String {
+    if (bytes <= 0L) return "0 MB"
+    val kb = bytes / 1024.0
+    val mb = kb / 1024.0
+    val gb = mb / 1024.0
+    return when {
+        gb >= 1.0 -> String.format(Locale.ROOT, "%.2f GB", gb)
+        mb >= 1.0 -> String.format(Locale.ROOT, "%.1f MB", mb)
+        kb >= 1.0 -> String.format(Locale.ROOT, "%.1f KB", kb)
+        else -> "$bytes B"
+    }
+}
+
+fun calculateTotalOfflineBytes(downloadedSongs: List<DownloadedSongEntity>): Long {
+    var total = 0L
+    for (song in downloadedSongs) {
+        val file = File(song.localFilePath)
+        if (file.exists()) {
+            total += file.length()
+        }
+    }
+    return total
+}
+
+suspend fun downloadTrackWithAutoRetry(
+    context: Context,
+    track: FullTrackItem,
+    maxRetries: Int = 2
+): String? {
+    var attempt = 0
+    while (attempt <= maxRetries) {
+        val path = downloadTrackToStorage(context, track)
+        if (path != null && File(path).exists()) {
+            return path
+        }
+        attempt++
+        if (attempt <= maxRetries) {
+            delay(1200L) // Backoff before retrying
+        }
+    }
+    return null
+}
+
 fun extractVideoIdFromRenderer(item: JSONObject): String {
     item.optString("videoId").takeIf { it.isNotBlank() }?.let { return it }
     item.optJSONObject("playlistItemData")?.optString("videoId")?.takeIf { it.isNotBlank() }?.let { return it }
@@ -1618,7 +1661,8 @@ fun SonoraPlayerScreen(
     var sleepTimerActiveMinutes by remember { mutableIntStateOf(0) }
     var sleepTimerSecondsRemaining by remember { mutableLongStateOf(0L) }
 
-    var downloadingSongIds by remember { mutableStateOf<Set<String>>(emptySet()) }
+    var failedDownloadTracks by remember { mutableStateOf<Map<String, FullTrackItem>>(emptyMap()) }
+    var showClearAllDownloadsDialog by remember { mutableStateOf(false) }
 
     var searchQuery by remember { mutableStateOf("") }
     var searchResults by remember { mutableStateOf<List<FullTrackItem>>(emptyList()) }
@@ -1841,8 +1885,10 @@ fun SonoraPlayerScreen(
     fun triggerDownload(track: FullTrackItem) {
         if (track.id in downloadingSongIds) return
         downloadingSongIds = downloadingSongIds + track.id
+        failedDownloadTracks = failedDownloadTracks - track.id
+
         coroutineScope.launch {
-            val localPath = downloadTrackToStorage(context, track)
+            val localPath = downloadTrackWithAutoRetry(context, track, maxRetries = 2)
             if (localPath != null) {
                 dao.insertDownloadedSong(
                     DownloadedSongEntity(
@@ -1854,9 +1900,10 @@ fun SonoraPlayerScreen(
                         duration = track.durationFormatted
                     )
                 )
-                Toast.makeText(context, "Downloaded \"${track.title}\"", Toast.LENGTH_SHORT).show()
+                Toast.makeText(context, "Saved offline: \"${track.title}\"", Toast.LENGTH_SHORT).show()
             } else {
-                Toast.makeText(context, "Download failed", Toast.LENGTH_SHORT).show()
+                failedDownloadTracks = failedDownloadTracks + (track.id to track)
+                Toast.makeText(context, "Download failed after 3 attempts: ${track.title}", Toast.LENGTH_SHORT).show()
             }
             downloadingSongIds = downloadingSongIds - track.id
         }
@@ -2133,34 +2180,39 @@ fun SonoraPlayerScreen(
 
             if (endlessRadioEnabled) {
                 coroutineScope.launch {
-                    val candidates = mutableListOf<FullTrackItem>()
-                    candidates.addAll(fetchYouTubeAutomixRadio(targetTrack.id))
-
-                    if (candidates.size < 35) {
-                        val (artistSongs, _) = searchYouTubeMusic("${targetTrack.artist} song")
-                        candidates.addAll(artistSongs)
-                    }
-                    if (candidates.size < 35) {
-                        val (hindiSongs, _) = searchYouTubeMusic("Trending Hindi Bollywood Songs")
-                        candidates.addAll(hindiSongs)
-                    }
-
-                    val currentQueueTracks = (0 until (controller?.mediaItemCount ?: 0)).map { idx ->
-                        mediaItemToTrack(controller!!.getMediaItemAt(idx))
-                    }
-                    val filtered = filterSimilarTracks(candidates, currentQueueTracks)
-
-                    var added = 0
-                    for (song in filtered) {
-                        if ((controller?.mediaItemCount ?: 0) >= 31) break
-                        val sUrl = resolveTrackAudioStream(song)
-                        if (sUrl.isNotBlank()) {
-                            song.audioUrl = sUrl
-                            controller?.addMediaItem(buildMediaItem(song))
-                            added++
+                    try {
+                        // Skip online recommendations if the track is already stored offline
+                        if (downloadedLocal != null && File(downloadedLocal.localFilePath).exists()) {
+                            return@launch
                         }
+
+                        val candidates = mutableListOf<FullTrackItem>()
+                        candidates.addAll(fetchYouTubeAutomixRadio(targetTrack.id))
+
+                        if (candidates.size < 35) {
+                            val (artistSongs, _) = searchYouTubeMusic("${targetTrack.artist} song")
+                            candidates.addAll(artistSongs)
+                        }
+
+                        val currentQueueTracks = (0 until (controller?.mediaItemCount ?: 0)).map { idx ->
+                            mediaItemToTrack(controller!!.getMediaItemAt(idx))
+                        }
+                        val filtered = filterSimilarTracks(candidates, currentQueueTracks)
+
+                        var added = 0
+                        for (song in filtered) {
+                            if ((controller?.mediaItemCount ?: 0) >= 31) break
+                            val sUrl = resolveTrackAudioStream(song)
+                            if (sUrl.isNotBlank()) {
+                                song.audioUrl = sUrl
+                                controller?.addMediaItem(buildMediaItem(song))
+                                added++
+                            }
+                        }
+                        controller?.let { updateQueueState(it) }
+                    } catch (_: Exception) {
+                        // Suppress network failures gracefully when offline
                     }
-                    controller?.let { updateQueueState(it) }
                 }
             }
         }
@@ -2434,6 +2486,51 @@ fun SonoraPlayerScreen(
                 }
             }
         }
+    }
+    
+    if (showClearAllDownloadsDialog) {
+        AlertDialog(
+            onDismissRequest = { showClearAllDownloadsDialog = false },
+            title = {
+                Text(
+                    text = "Clear All Downloads?",
+                    color = if (isDarkTheme) Color.White else Color(0xFF0F172A),
+                    fontWeight = FontWeight.Bold
+                )
+            },
+            text = {
+                Text(
+                    text = "This will permanently remove all downloaded songs and free up device storage.",
+                    color = if (isDarkTheme) Color(0xFF94A3B8) else Color(0xFF64748B),
+                    fontSize = 14.sp
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        coroutineScope.launch {
+                            val downloadFolder = File(context.filesDir, "sonora_offline")
+                            if (downloadFolder.exists()) {
+                                downloadFolder.listFiles()?.forEach { it.delete() }
+                            }
+                            dao.deleteAllDownloadedSongs()
+                            showClearAllDownloadsDialog = false
+                            Toast.makeText(context, "All offline downloads cleared", Toast.LENGTH_SHORT).show()
+                        }
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFDC2626))
+                ) {
+                    Text("Delete All", fontWeight = FontWeight.Bold, color = Color.White)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showClearAllDownloadsDialog = false }) {
+                    Text("Cancel", color = if (isDarkTheme) Color(0xFF94A3B8) else Color(0xFF64748B))
+                }
+            },
+            containerColor = if (isDarkTheme) Color(0xFF161F29) else Color(0xFFFFFFFF),
+            shape = RoundedCornerShape(16.dp)
+        )
     }
 
     if (showSleepTimerDialog) {
@@ -3471,35 +3568,255 @@ fun SonoraPlayerScreen(
                                     }
                                 }
                                 2 -> {
-                                    val convertedDownloads = downloadedSongs.map { FullTrackItem(it.id, it.title, it.artist, it.localFilePath, it.artworkUrl, it.duration) }
-                                    LazyColumn(modifier = Modifier.fillMaxSize()) {
-                                        itemsIndexed(convertedDownloads) { index, song ->
-                                            Row(
-                                                modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp).clickable { playQueue(convertedDownloads, index) },
-                                                verticalAlignment = Alignment.CenterVertically
-                                            ) {
-                                                AsyncImage(model = song.artworkUrl, contentDescription = song.title, modifier = Modifier.size(50.dp).clip(RoundedCornerShape(6.dp)), contentScale = ContentScale.Crop)
-                                                Spacer(modifier = Modifier.width(12.dp))
-                                                Column(modifier = Modifier.weight(1f)) {
-                                                    Text(song.title, fontWeight = FontWeight.Bold, fontSize = 15.sp, color = MaterialTheme.colorScheme.onBackground, maxLines = 1)
-                                                    Text(song.artist, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp, maxLines = 1)
-                                                }
-                                                IconButton(
-                                                    onClick = {
-                                                        coroutineScope.launch {
-                                                            File(song.audioUrl).delete()
-                                                            dao.deleteDownloadedSong(song.id)
+                                    val convertedDownloads = remember(downloadedSongs) {
+                                        downloadedSongs.map {
+                                            FullTrackItem(it.id, it.title, it.artist, it.localFilePath, it.artworkUrl, it.duration)
+                                        }
+                                    }
+                                    val totalStorageBytes = remember(downloadedSongs) {
+                                        calculateTotalOfflineBytes(downloadedSongs)
+                                    }
+
+                                    Column(modifier = Modifier.fillMaxSize()) {
+                                        // Top Summary Card: Total Storage & Batch Actions
+                                        Card(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .padding(vertical = 8.dp),
+                                            colors = CardDefaults.cardColors(
+                                                containerColor = if (isDarkTheme) Color(0xFF141C24) else Color(0xFFF1F5F9)
+                                            ),
+                                            shape = RoundedCornerShape(16.dp)
+                                        ) {
+                                            Column(modifier = Modifier.padding(16.dp)) {
+                                                Row(
+                                                    modifier = Modifier.fillMaxWidth(),
+                                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                                    verticalAlignment = Alignment.CenterVertically
+                                                ) {
+                                                    Column {
+                                                        Text(
+                                                            text = "Storage Used",
+                                                            fontSize = 12.sp,
+                                                            fontWeight = FontWeight.Medium,
+                                                            color = if (isDarkTheme) Color(0xFF94A3B8) else Color(0xFF64748B)
+                                                        )
+                                                        Text(
+                                                            text = formatStorageSize(totalStorageBytes),
+                                                            fontSize = 22.sp,
+                                                            fontWeight = FontWeight.Bold,
+                                                            color = if (isDarkTheme) Color.White else Color(0xFF0F172A)
+                                                        )
+                                                    }
+
+                                                    if (downloadedSongs.isNotEmpty()) {
+                                                        TextButton(
+                                                            onClick = { showClearAllDownloadsDialog = true },
+                                                            colors = ButtonDefaults.textButtonColors(contentColor = Color(0xFFFF5252))
+                                                        ) {
+                                                            Icon(
+                                                                imageVector = Icons.Rounded.Delete,
+                                                                contentDescription = null,
+                                                                modifier = Modifier.size(16.dp)
+                                                            )
+                                                            Spacer(modifier = Modifier.width(4.dp))
+                                                            Text("Clear All", fontSize = 13.sp, fontWeight = FontWeight.Bold)
                                                         }
                                                     }
-                                                ) {
-                                                    Icon(imageVector = Icons.Rounded.Delete, contentDescription = "Delete", tint = Color(0xFFFF5252), modifier = Modifier.size(20.dp))
                                                 }
-                                                IconButton(onClick = { selectedTrackForOptions = song }) {
-                                                    Icon(imageVector = Icons.Rounded.MoreVert, contentDescription = "Options", tint = MaterialTheme.colorScheme.onBackground, modifier = Modifier.size(20.dp))
+
+                                                Spacer(modifier = Modifier.height(12.dp))
+
+                                                Row(
+                                                    modifier = Modifier.fillMaxWidth(),
+                                                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                                ) {
+                                                    Button(
+                                                        onClick = {
+                                                            if (convertedDownloads.isNotEmpty()) {
+                                                                playQueue(convertedDownloads, 0)
+                                                            }
+                                                        },
+                                                        enabled = convertedDownloads.isNotEmpty(),
+                                                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
+                                                        shape = RoundedCornerShape(20.dp),
+                                                        modifier = Modifier.weight(1f).height(38.dp)
+                                                    ) {
+                                                        Icon(imageVector = Icons.Rounded.PlayArrow, contentDescription = null, modifier = Modifier.size(16.dp))
+                                                        Spacer(modifier = Modifier.width(6.dp))
+                                                        Text("Play All (${convertedDownloads.size})", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                                    }
+
+                                                    Button(
+                                                        onClick = {
+                                                            if (convertedDownloads.isNotEmpty()) {
+                                                                playQueue(convertedDownloads.shuffled(), 0)
+                                                            }
+                                                        },
+                                                        enabled = convertedDownloads.isNotEmpty(),
+                                                        colors = ButtonDefaults.buttonColors(
+                                                            containerColor = if (isDarkTheme) Color(0xFF1E2836) else Color(0xFFE2E8F0),
+                                                            contentColor = if (isDarkTheme) Color.White else Color(0xFF0F172A)
+                                                        ),
+                                                        shape = RoundedCornerShape(20.dp),
+                                                        modifier = Modifier.weight(1f).height(38.dp)
+                                                    ) {
+                                                        Icon(imageVector = Icons.Rounded.Shuffle, contentDescription = null, modifier = Modifier.size(14.dp))
+                                                        Spacer(modifier = Modifier.width(6.dp))
+                                                        Text("Shuffle", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                                    }
                                                 }
                                             }
                                         }
-                                        item { Spacer(modifier = Modifier.height(84.dp)) }
+
+                                        // Failed Downloads Retry Banner (Visible only if failures exist)
+                                        if (failedDownloadTracks.isNotEmpty()) {
+                                            Card(
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .padding(vertical = 6.dp),
+                                                colors = CardDefaults.cardColors(containerColor = Color(0xFF3B1820)),
+                                                shape = RoundedCornerShape(12.dp)
+                                            ) {
+                                                Row(
+                                                    modifier = Modifier
+                                                        .fillMaxWidth()
+                                                        .padding(horizontal = 14.dp, vertical = 10.dp),
+                                                    verticalAlignment = Alignment.CenterVertically,
+                                                    horizontalArrangement = Arrangement.SpaceBetween
+                                                ) {
+                                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                                        Icon(
+                                                            imageVector = Icons.Rounded.Close,
+                                                            contentDescription = null,
+                                                            tint = Color(0xFFFF5252),
+                                                            modifier = Modifier.size(18.dp)
+                                                        )
+                                                        Spacer(modifier = Modifier.width(8.dp))
+                                                        Text(
+                                                            text = "${failedDownloadTracks.size} download(s) failed",
+                                                            fontSize = 13.sp,
+                                                            color = Color(0xFFFF8A80),
+                                                            fontWeight = FontWeight.SemiBold
+                                                        )
+                                                    }
+
+                                                    TextButton(
+                                                        onClick = {
+                                                            val toRetry = failedDownloadTracks.values.toList()
+                                                            toRetry.forEach { track -> triggerDownload(track) }
+                                                        }
+                                                    ) {
+                                                        Text("Retry All", color = Color(0xFFFF8A80), fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        // Downloaded Tracks List
+                                        if (convertedDownloads.isEmpty()) {
+                                            Box(
+                                                modifier = Modifier.fillMaxSize().padding(top = 40.dp),
+                                                contentAlignment = Alignment.Center
+                                            ) {
+                                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                                    Icon(
+                                                        imageVector = Icons.Rounded.Download,
+                                                        contentDescription = null,
+                                                        tint = if (isDarkTheme) Color(0xFF334155) else Color(0xFFCBD5E1),
+                                                        modifier = Modifier.size(54.dp)
+                                                    )
+                                                    Spacer(modifier = Modifier.height(10.dp))
+                                                    Text(
+                                                        text = "No offline songs yet",
+                                                        fontSize = 16.sp,
+                                                        fontWeight = FontWeight.Bold,
+                                                        color = if (isDarkTheme) Color(0xFF94A3B8) else Color(0xFF64748B)
+                                                    )
+                                                    Text(
+                                                        text = "Download songs from Search or Home to listen offline",
+                                                        fontSize = 13.sp,
+                                                        color = if (isDarkTheme) Color(0xFF64748B) else Color(0xFF94A3B8)
+                                                    )
+                                                }
+                                            }
+                                        } else {
+                                            LazyColumn(modifier = Modifier.fillMaxSize()) {
+                                                itemsIndexed(convertedDownloads, key = { _, song -> song.id }) { index, song ->
+                                                    val localFile = File(song.audioUrl)
+                                                    val fileSizeStr = if (localFile.exists()) formatStorageSize(localFile.length()) else ""
+
+                                                    Row(
+                                                        modifier = Modifier
+                                                            .fillMaxWidth()
+                                                            .padding(vertical = 6.dp)
+                                                            .clickable { playQueue(convertedDownloads, index) },
+                                                        verticalAlignment = Alignment.CenterVertically
+                                                    ) {
+                                                        AsyncImage(
+                                                            model = song.artworkUrl,
+                                                            contentDescription = song.title,
+                                                            modifier = Modifier
+                                                                .size(50.dp)
+                                                                .clip(RoundedCornerShape(8.dp)),
+                                                            contentScale = ContentScale.Crop
+                                                        )
+                                                        Spacer(modifier = Modifier.width(12.dp))
+                                                        Column(modifier = Modifier.weight(1f)) {
+                                                            Text(
+                                                                text = song.title,
+                                                                fontWeight = FontWeight.Bold,
+                                                                fontSize = 14.sp,
+                                                                color = if (isDarkTheme) Color.White else Color(0xFF0F172A),
+                                                                maxLines = 1,
+                                                                overflow = TextOverflow.Ellipsis
+                                                            )
+                                                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                                                Text(
+                                                                    text = song.artist,
+                                                                    color = if (isDarkTheme) Color(0xFF94A3B8) else Color(0xFF64748B),
+                                                                    fontSize = 12.sp,
+                                                                    maxLines = 1,
+                                                                    overflow = TextOverflow.Ellipsis
+                                                                )
+                                                                if (fileSizeStr.isNotBlank()) {
+                                                                    Text(
+                                                                        text = " • $fileSizeStr",
+                                                                        color = if (isDarkTheme) Color(0xFF64748B) else Color(0xFF94A3B8),
+                                                                        fontSize = 11.sp
+                                                                    )
+                                                                }
+                                                            }
+                                                        }
+                                                        IconButton(
+                                                            onClick = {
+                                                                coroutineScope.launch {
+                                                                    val file = File(song.audioUrl)
+                                                                    if (file.exists()) file.delete()
+                                                                    dao.deleteDownloadedSong(song.id)
+                                                                }
+                                                            }
+                                                        ) {
+                                                            Icon(
+                                                                imageVector = Icons.Rounded.Delete,
+                                                                contentDescription = "Delete",
+                                                                tint = Color(0xFFFF5252),
+                                                                modifier = Modifier.size(20.dp)
+                                                            )
+                                                        }
+                                                        IconButton(onClick = { selectedTrackForOptions = song }) {
+                                                            Icon(
+                                                                imageVector = Icons.Rounded.MoreVert,
+                                                                contentDescription = "Options",
+                                                                tint = if (isDarkTheme) Color.White else Color(0xFF0F172A),
+                                                                modifier = Modifier.size(20.dp)
+                                                            )
+                                                        }
+                                                    }
+                                                }
+                                                item { Spacer(modifier = Modifier.height(90.dp)) }
+                                            }
+                                        }
                                     }
                                 }
                             }
