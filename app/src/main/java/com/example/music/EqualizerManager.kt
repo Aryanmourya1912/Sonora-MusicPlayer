@@ -34,7 +34,10 @@ object EqualizerManager {
     private var virtualizer: Virtualizer? = null
     private var currentSessionId: Int = 0
 
-    var isEnabled by mutableStateOf(true)
+    // Backed by private state to avoid platform declaration clash with setEnabled()
+    private var _isEnabled by mutableStateOf(true)
+    val isEnabled: Boolean
+        get() = _isEnabled
 
     var minLevelMb by mutableStateOf((-1500).toShort())
     var maxLevelMb by mutableStateOf((1500).toShort())
@@ -90,7 +93,7 @@ object EqualizerManager {
         val savedPreset = prefs.getInt(KEY_PRESET, 0)
         val savedPresetName = prefs.getString(KEY_PRESET_NAME, "Flat") ?: "Flat"
 
-        isEnabled = savedEnabled
+        _isEnabled = savedEnabled
         bassBoostStrength = savedBass.toFloat()
         virtualizerStrength = savedVirt.toFloat()
         currentPresetIndex = savedPreset
@@ -191,7 +194,7 @@ object EqualizerManager {
         val ctx = appContext
         if (ctx != null) setEnabled(ctx, enabled)
         else {
-            isEnabled = enabled
+            _isEnabled = enabled
             equalizer?.enabled = enabled
             if (isBassBoostSupported) bassBoost?.enabled = enabled
             if (isVirtualizerSupported) virtualizer?.enabled = enabled
@@ -199,7 +202,7 @@ object EqualizerManager {
     }
 
     fun setEnabled(context: Context, enabled: Boolean) {
-        isEnabled = enabled
+        _isEnabled = enabled
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
             .putBoolean(KEY_ENABLED, enabled)
             .apply()
@@ -361,6 +364,11 @@ object EqualizerManager {
                 virtualizer?.setStrength(clamped.toInt().toShort())
             } catch (_: Exception) {}
         }
+    }
+
+    fun resetToFlat() {
+        val ctx = appContext
+        if (ctx != null) resetToFlat(ctx)
     }
 
     fun resetToFlat(context: Context) {
