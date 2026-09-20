@@ -3347,6 +3347,21 @@ fun SonoraPlayerScreen(
                                 contentScale = ContentScale.Crop
                             )
                         }
+                        
+                        Spacer(modifier = Modifier.height(10.dp))
+
+                        DynamicAudioVisualizer(
+                            isPlaying = isPlaying,
+                            primaryColor = animatedDominantColor,
+                            secondaryColor = animatedSecondaryColor,
+                            modifier = Modifier
+                                .fillMaxWidth(0.88f)
+                                .padding(horizontal = 8.dp),
+                            barCount = 30,
+                            visualizerHeight = 36.dp
+                        )
+
+                        Spacer(modifier = Modifier.height(10.dp))
 
                         Column(modifier = Modifier.fillMaxWidth()) {
                             Row(
