@@ -25,6 +25,9 @@ import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -1158,6 +1161,8 @@ fun SyncedLyricsView(
     modifier: Modifier = Modifier
 ) {
     val listState = rememberLazyListState()
+    val coroutineScope = rememberCoroutineScope()
+    var isManualScrolling by remember { mutableStateOf(false) }
 
     val activeIndex = remember(currentPositionMs, lyrics) {
         if (lyrics.isEmpty()) -1
@@ -1167,125 +1172,229 @@ fun SyncedLyricsView(
         }
     }
 
-    LaunchedEffect(activeIndex) {
-        if (activeIndex >= 0 && lyrics.isNotEmpty()) {
-            listState.animateScrollToItem(maxOf(0, activeIndex - 2))
+    // Detect manual scrolling and release lock after 3.5s of inactivity
+    LaunchedEffect(listState.isScrollInProgress) {
+        if (listState.isScrollInProgress) {
+            isManualScrolling = true
+        } else if (isManualScrolling) {
+            delay(3500L)
+            isManualScrolling = false
         }
     }
 
-    Column(
+    // Smooth auto-scroll snap when playback progresses
+    LaunchedEffect(activeIndex, isManualScrolling) {
+        if (!isManualScrolling && activeIndex >= 0 && lyrics.isNotEmpty()) {
+            listState.animateScrollToItem(
+                index = activeIndex,
+                scrollOffset = -140 // Centers the line on screen
+            )
+        }
+    }
+
+    Box(
         modifier = modifier
             .fillMaxSize()
-            .padding(horizontal = 24.dp, vertical = 16.dp),
-        horizontalAlignment = Alignment.CenterHorizontally
+            .padding(horizontal = 20.dp, vertical = 12.dp)
     ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
+        Column(
+            modifier = Modifier.fillMaxSize(),
+            horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            IconButton(onClick = onCloseRequested) {
-                Icon(
-                    imageVector = Icons.Rounded.ArrowBack,
-                    contentDescription = "Back",
-                    tint = Color.White,
-                    modifier = Modifier.size(24.dp)
-                )
-            }
-            Text(
-                text = if (providerName.isNotBlank()) "Lyrics from $providerName" else "Synchronized Lyrics",
-                fontSize = 13.sp,
-                color = Color.White.copy(alpha = 0.7f),
-                fontWeight = FontWeight.Medium
-            )
-            Spacer(modifier = Modifier.width(36.dp))
-        }
-
-        Spacer(modifier = Modifier.height(16.dp))
-
-        if (isLoading) {
-            Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
-                CircularProgressIndicator(color = Color.White)
-            }
-        } else if (lyrics.isEmpty()) {
-            Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
-                Text(
-                    text = "No synchronized lyrics found for this track",
-                    color = Color.White.copy(alpha = 0.6f),
-                    fontSize = 15.sp,
-                    textAlign = TextAlign.Center
-                )
-            }
-        } else {
-            LazyColumn(
-                state = listState,
+            // Header: Back navigation, Provider Name, and Lyric Status
+            Row(
                 modifier = Modifier
-                    .weight(1f)
-                    .fillMaxWidth(),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(26.dp)
+                    .fillMaxWidth()
+                    .padding(vertical = 4.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                itemsIndexed(lyrics) { index, item ->
-                    val isActive = index == activeIndex
-
-                    val animatedAlpha by animateFloatAsState(
-                        targetValue = if (isActive) 1f else 0.35f,
-                        animationSpec = tween(350),
-                        label = "lyricAlpha"
+                IconButton(onClick = onCloseRequested) {
+                    Icon(
+                        imageVector = Icons.Rounded.ArrowBack,
+                        contentDescription = "Back",
+                        tint = Color.White,
+                        modifier = Modifier.size(24.dp)
                     )
+                }
 
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     Text(
-                        text = item.text,
-                        fontSize = if (isActive) 26.sp else 20.sp,
-                        fontWeight = if (isActive) FontWeight.Bold else FontWeight.Medium,
-                        color = Color.White.copy(alpha = animatedAlpha),
-                        textAlign = TextAlign.Center,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 16.dp)
-                            .clickable { onSeekRequested(item.timeMs) }
+                        text = if (providerName.isNotBlank()) "Lyrics from $providerName" else "Synchronized Lyrics",
+                        fontSize = 13.sp,
+                        color = Color.White.copy(alpha = 0.75f),
+                        fontWeight = FontWeight.Medium
                     )
+                    if (isManualScrolling) {
+                        Text(
+                            text = "Auto-scroll paused",
+                            fontSize = 11.sp,
+                            color = Color(0xFFFBBF24),
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.width(48.dp))
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            if (isLoading) {
+                Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
+                    CircularProgressIndicator(color = Color.White)
+                }
+            } else if (lyrics.isEmpty()) {
+                Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
+                    Text(
+                        text = "No synchronized lyrics found for this track",
+                        color = Color.White.copy(alpha = 0.6f),
+                        fontSize = 15.sp,
+                        textAlign = TextAlign.Center
+                    )
+                }
+            } else {
+                LazyColumn(
+                    state = listState,
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth(),
+                    contentPadding = PaddingValues(top = 180.dp, bottom = 220.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(28.dp)
+                ) {
+                    itemsIndexed(lyrics, key = { index, line -> "${line.timeMs}_$index" }) { index, item ->
+                        val isActive = index == activeIndex
+
+                        val animatedAlpha by animateFloatAsState(
+                            targetValue = if (isActive) 1f else 0.35f,
+                            animationSpec = tween(300),
+                            label = "lyricAlpha"
+                        )
+
+                        val animatedScale by animateFloatAsState(
+                            targetValue = if (isActive) 1.05f else 0.96f,
+                            animationSpec = tween(300),
+                            label = "lyricScale"
+                        )
+
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(12.dp))
+                                .clickable {
+                                    onSeekRequested(item.timeMs)
+                                    isManualScrolling = false
+                                }
+                                .padding(horizontal = 12.dp, vertical = 6.dp)
+                        ) {
+                            Text(
+                                text = item.text,
+                                fontSize = if (isActive) 26.sp else 20.sp,
+                                fontWeight = if (isActive) FontWeight.Bold else FontWeight.Medium,
+                                color = Color.White.copy(alpha = animatedAlpha),
+                                textAlign = TextAlign.Center,
+                                modifier = Modifier.fillMaxWidth()
+                            )
+
+                            if (isManualScrolling) {
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Text(
+                                    text = formatTime(item.timeMs),
+                                    fontSize = 11.sp,
+                                    color = if (isActive) Color(0xFF7C4DFF) else Color.White.copy(alpha = 0.45f),
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            // Bottom Track Info Bar
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(22.dp),
+                colors = CardDefaults.cardColors(containerColor = Color(0x33FFFFFF))
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(10.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    AsyncImage(
+                        model = artworkUrl,
+                        contentDescription = trackTitle,
+                        modifier = Modifier
+                            .size(46.dp)
+                            .clip(RoundedCornerShape(12.dp)),
+                        contentScale = ContentScale.Crop
+                    )
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = trackTitle,
+                            color = Color.White,
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Text(
+                            text = trackArtist,
+                            color = Color(0xFFD1D5DB),
+                            fontSize = 12.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
                 }
             }
         }
 
-        Spacer(modifier = Modifier.height(12.dp))
-
-        Card(
-            modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(24.dp),
-            colors = CardDefaults.cardColors(containerColor = Color(0x33FFFFFF))
+        // Floating "Sync to Audio" Button when user scrolls away
+        AnimatedVisibility(
+            visible = isManualScrolling && activeIndex >= 0,
+            enter = slideInVertically(initialOffsetY = { it / 2 }) + fadeIn(),
+            exit = slideOutVertically(targetOffsetY = { it / 2 }) + fadeOut(),
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .padding(bottom = 76.dp)
         ) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(10.dp),
-                verticalAlignment = Alignment.CenterVertically
+            Card(
+                shape = RoundedCornerShape(24.dp),
+                colors = CardDefaults.cardColors(containerColor = Color(0xFF7C4DFF)),
+                elevation = CardDefaults.cardElevation(defaultElevation = 6.dp),
+                modifier = Modifier.clickable {
+                    isManualScrolling = false
+                    coroutineScope.launch {
+                        listState.animateScrollToItem(
+                            index = activeIndex,
+                            scrollOffset = -140
+                        )
+                    }
+                }
             ) {
-                AsyncImage(
-                    model = artworkUrl,
-                    contentDescription = trackTitle,
-                    modifier = Modifier
-                        .size(46.dp)
-                        .clip(RoundedCornerShape(12.dp)),
-                    contentScale = ContentScale.Crop
-                )
-                Spacer(modifier = Modifier.width(12.dp))
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = trackTitle,
-                        color = Color.White,
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.Bold,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
+                Row(
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.PlayArrow,
+                        contentDescription = "Sync",
+                        tint = Color.White,
+                        modifier = Modifier.size(16.dp)
                     )
                     Text(
-                        text = trackArtist,
-                        color = Color(0xFFD1D5DB),
+                        text = "Sync to Audio",
+                        color = Color.White,
                         fontSize = 12.sp,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
+                        fontWeight = FontWeight.Bold
                     )
                 }
             }
@@ -2785,7 +2894,7 @@ fun SonoraPlayerScreen(
                                     OutlinedTextField(
                                         value = searchQuery,
                                         onValueChange = { searchQuery = it },
-                                        placeholder = { Text("Search Hindi, English, Artists...", color = Color(0xFF6B7280)) },
+                                        placeholder = { Text("Search YouTube music...", color = Color(0xFF6B7280)) },
                                         singleLine = true,
                                         shape = RoundedCornerShape(24.dp),
                                         keyboardOptions = KeyboardOptions(
