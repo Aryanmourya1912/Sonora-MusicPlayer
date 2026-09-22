@@ -4198,37 +4198,24 @@ fun SonoraPlayerScreen(
                                 modifier = Modifier.weight(1f),
                                 horizontalAlignment = Alignment.CenterHorizontally
                             ) {
-                                Text(
-                                    text = "Now Playing",
-                                    fontSize = 13.sp,
-                                    color = Color(0xFFD1D5DB),
-                                    fontWeight = FontWeight.Medium
-                                )
-                                Text(
-                                    text = activeTitle,
-                                    fontSize = 14.sp,
-                                    color = Color.White,
-                                    fontWeight = FontWeight.SemiBold,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
+                                Text(text = "Now Playing", fontSize = 13.sp, color = Color(0xFFD1D5DB), fontWeight = FontWeight.Medium)
+                                Text(text = activeTitle, fontSize = 14.sp, color = Color.White, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                             }
                             Row(verticalAlignment = Alignment.CenterVertically) {
-                            // 🟢 VINYL / STANDARD MODE TOGGLE BUTTON
-                            IconButton(
-                                onClick = { playerDisplayMode = if (playerDisplayMode == 0) 1 else 0 }
-                            ) {
-                                Icon(
-                                    imageVector = if (playerDisplayMode == 1) Icons.Rounded.Album else Icons.Rounded.GraphicEq,
-                                    contentDescription = "Switch Vinyl / Standard Mode",
-                                    tint = if (playerDisplayMode == 1) MaterialTheme.colorScheme.primary else (if (isDarkTheme) Color.White else Color(0xFF0F172A)),
-                                    modifier = Modifier.size(22.dp)
-                                )
-                            }
-                            IconButton(onClick = { showLiveLyrics = !showLiveLyrics }) {
-                                Icon(imageVector = Icons.Rounded.Notes, contentDescription = "Live Lyrics", tint = Color.White, modifier = Modifier.size(24.dp))
-                            }
-                        }
+                                // 🟢 VINYL / STANDARD MODE TOGGLE BUTTON
+                                IconButton(onClick = { playerDisplayMode = if (playerDisplayMode == 0) 1 else 0 }) {
+                                    Icon(
+                                        imageVector = if (playerDisplayMode == 1) Icons.Rounded.Album else Icons.Rounded.GraphicEq,
+                                        contentDescription = "Switch Vinyl / Standard Mode",
+                                        tint = if (playerDisplayMode == 1) MaterialTheme.colorScheme.primary else (if (isDarkTheme) Color.White else Color(0xFF0F172A)),
+                                        modifier = Modifier.size(22.dp)
+                                    )
+                                }
+                                IconButton(onClick = { showLiveLyrics = !showLiveLyrics }) {
+                                    Icon(imageVector = Icons.Rounded.Notes, contentDescription = "Live Lyrics", tint = Color.White, modifier = Modifier.size(24.dp))
+                                }
+                            } // closes inner Row
+                        } // closes outer Row
 
                         Box(
                             modifier = Modifier
@@ -4565,5 +4552,4 @@ fun SonoraPlayerScreen(
             onDismiss = { showEqualizerSheet = false }
         )
     }
-}
 }
