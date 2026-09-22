@@ -1663,6 +1663,7 @@ fun SonoraPlayerScreen(
     var sleepTimerActiveMinutes by remember { mutableIntStateOf(0) }
     var sleepTimerSecondsRemaining by remember { mutableLongStateOf(0L) }
 
+    var downloadingSongIds by remember { mutableStateOf<Set<String>>(emptySet()) }
     var failedDownloadTracks by remember { mutableStateOf<Map<String, FullTrackItem>>(emptyMap()) }
     var showClearAllDownloadsDialog by remember { mutableStateOf(false) }
 
