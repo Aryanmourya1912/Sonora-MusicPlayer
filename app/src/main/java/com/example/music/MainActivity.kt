@@ -12,17 +12,20 @@ import android.media.AudioManager
 import android.net.Uri
 import android.os.Bundle
 import android.util.Base64
-import android.util.Log
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
+import androidx.compose.animation.togetherWith
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutHorizontally
@@ -167,6 +170,7 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.Player
@@ -249,9 +253,9 @@ private val SonoraLightColors = lightColorScheme(
     surface = Color(0xFFFFFFFF),
     surfaceVariant = Color(0xFFF1F5F9),
     onPrimary = Color.White,
-    onBackground = Color(0xFF0F172A),       // Deep slate-black for headings & titles
-    onSurface = Color(0xFF0F172A),          // Deep slate-black for labels & icons
-    onSurfaceVariant = Color(0xFF475569)    // Mid-slate grey for secondary text
+    onBackground = Color(0xFF0F172A),
+    onSurface = Color(0xFF0F172A),
+    onSurfaceVariant = Color(0xFF475569)
 )
 
 class MainActivity : ComponentActivity() {
@@ -285,47 +289,63 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-suspend fun extractArtworkPaletteColors(context: Context, imageUrl: String): Pair<Color, Color> = withContext(Dispatchers.IO) {
-    if (imageUrl.isBlank()) {
-        return@withContext Pair(Color(0xFF1E2836), Color(0xFF0D1520))
-    }
-    try {
-        val loader = ImageLoader(context)
-        val request = ImageRequest.Builder(context)
-            .data(imageUrl)
-            .allowHardware(false)
-            .build()
-        val result = (loader.execute(request) as? SuccessResult)?.drawable
-        val bitmap = (result as? BitmapDrawable)?.bitmap
-        if (bitmap != null) {
-            val palette = Palette.from(bitmap).generate()
-            val dominant = palette.getDominantColor(0xFF1E2836.toInt())
-            val secondary = palette.getDarkMutedColor(palette.getDarkVibrantColor(0xFF0D1520.toInt()))
-            return@withContext Pair(Color(dominant), Color(secondary))
+// ---------------------------------------------------------------------------
+// Artwork palette
+// ---------------------------------------------------------------------------
+
+suspend fun extractArtworkPaletteColors(context: Context, imageUrl: String): Pair<Color, Color> =
+    withContext(Dispatchers.IO) {
+        if (imageUrl.isBlank()) {
+            return@withContext Pair(Color(0xFF1E2836), Color(0xFF0D1520))
         }
-    } catch (e: Exception) {
-        e.printStackTrace()
+        try {
+            val loader = ImageLoader(context)
+            val request = ImageRequest.Builder(context)
+                .data(imageUrl)
+                .allowHardware(false)
+                .build()
+            val result = (loader.execute(request) as? SuccessResult)?.drawable
+            val bitmap = (result as? BitmapDrawable)?.bitmap
+            if (bitmap != null) {
+                val palette = Palette.from(bitmap).generate()
+                val dominant = palette.getDominantColor(0xFF1E2836.toInt())
+                val secondary = palette.getDarkMutedColor(palette.getDarkVibrantColor(0xFF0D1520.toInt()))
+                return@withContext Pair(Color(dominant), Color(secondary))
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+        Pair(Color(0xFF1E2836), Color(0xFF0D1520))
     }
-    Pair(Color(0xFF1E2836), Color(0xFF0D1520))
-}
+
+// ---------------------------------------------------------------------------
+// Lyrics
+// ---------------------------------------------------------------------------
+
+// Matches a leading LRC time tag such as [01:23.45] or [01:23.456] or [01:23]
+private val LRC_TIME_TAG = Regex("""\[(\d{1,3}):(\d{2})(?:[.:](\d{1,3}))?]""")
 
 fun parseLrcLyrics(lrcString: String): List<SyncedLyricLine> {
     val lines = mutableListOf<SyncedLyricLine>()
-    val regex = """\[(\d{2}):(\d{2})\.(\d{2,3})\](.*)""".toRegex()
-
     lrcString.lines().forEach { rawLine ->
-        val match = regex.find(rawLine.trim())
-        if (match != null) {
-            val min = match.groupValues[1].toLongOrNull() ?: 0L
-            val sec = match.groupValues[2].toLongOrNull() ?: 0L
-            val msRaw = match.groupValues[3]
-            val ms = if (msRaw.length == 2) (msRaw.toLongOrNull() ?: 0L) * 10 else (msRaw.toLongOrNull() ?: 0L)
-            val totalMs = (min * 60 + sec) * 1000 + ms
-            val text = match.groupValues[4].trim()
+        val line = rawLine.trim()
+        val tags = LRC_TIME_TAG.findAll(line).toList()
+        if (tags.isEmpty()) return@forEach
 
-            if (text.isNotBlank()) {
-                lines.add(SyncedLyricLine(timeMs = totalMs, text = text))
+        val text = line.substring(tags.last().range.last + 1).trim()
+        if (text.isBlank()) return@forEach
+
+        for (tag in tags) {
+            val min = tag.groupValues[1].toLongOrNull() ?: 0L
+            val sec = tag.groupValues[2].toLongOrNull() ?: 0L
+            val fraction = tag.groupValues[3]
+            val ms = when (fraction.length) {
+                0 -> 0L
+                1 -> (fraction.toLongOrNull() ?: 0L) * 100L
+                2 -> (fraction.toLongOrNull() ?: 0L) * 10L
+                else -> fraction.take(3).toLongOrNull() ?: 0L
             }
+            lines.add(SyncedLyricLine(timeMs = (min * 60 + sec) * 1000 + ms, text = text))
         }
     }
     return lines.sortedBy { it.timeMs }
@@ -336,7 +356,6 @@ fun convertPlainLyricsToTimed(plainText: String, durationSec: Int): List<SyncedL
         .map { it.trim() }
         .filter { it.isNotBlank() && !it.startsWith("[") }
     if (cleanLines.isEmpty()) return emptyList()
-
     val totalMs = if (durationSec > 10) durationSec * 1000L else cleanLines.size * 3500L
     val intervalMs = totalMs / cleanLines.size
 
@@ -345,43 +364,33 @@ fun convertPlainLyricsToTimed(plainText: String, durationSec: Int): List<SyncedL
     }
 }
 
+// org.json returns the *string* "null" from optString() for JSON null, so guard it.
+private fun JSONObject.optStringOrEmpty(key: String): String =
+    if (isNull(key)) "" else optString(key, "")
+
 suspend fun fetchLyricsFromPriorityProviders(
     songTitle: String,
     artistName: String,
     durationSeconds: Int = 0
 ): Pair<String, List<SyncedLyricLine>> = withContext(Dispatchers.IO) {
-    val providers = listOf(
-        "Better Lyrics",
-        "LrcLib",
-        "KuGou",
-        "Paxsenix",
-        "LyricsPlus",
-        "Zemer"
-    )
-
     val cleanTitle = cleanSongTitle(songTitle)
-    val cleanArtist = if (artistName.equals("Song", ignoreCase = true) || artistName.equals("Unknown Artist", ignoreCase = true)) "" else cleanArtist(artistName)
+    val artistClean =
+        if (artistName.equals("Song", ignoreCase = true) || artistName.equals("Unknown Artist", ignoreCase = true)) ""
+        else cleanArtist(artistName)
 
-    for (provider in providers) {
-        try {
-            when (provider) {
-                "LrcLib" -> {
-                    val result = fetchFromLrcLib(cleanTitle, cleanArtist, durationSeconds)
-                    if (result.isNotEmpty()) return@withContext Pair("LrcLib", result)
-                }
-                "KuGou" -> {
-                    val result = fetchFromKuGou(cleanTitle, cleanArtist, durationSeconds)
-                    if (result.isNotEmpty()) return@withContext Pair("KuGou", result)
-                }
-                else -> {
-                    val result = fetchFromLrcLib(cleanTitle, "", durationSeconds)
-                    if (result.isNotEmpty()) return@withContext Pair(provider, result)
-                }
-            }
-        } catch (_: Exception) {}
+    try {
+        val result = fetchFromLrcLib(cleanTitle, artistClean, durationSeconds)
+        if (result.isNotEmpty()) return@withContext Pair("LrcLib", result)
+    } catch (e: Exception) {
     }
 
-    Pair("Sonora", emptyList())
+    try {
+        val result = fetchFromKuGou(cleanTitle, artistClean, durationSeconds)
+        if (result.isNotEmpty()) return@withContext Pair("KuGou", result)
+    } catch (e: Exception) {
+    }
+
+    Pair("Sonora", emptyList<SyncedLyricLine>())
 }
 
 private fun fetchFromLrcLib(title: String, artist: String, duration: Int): List<SyncedLyricLine> {
@@ -389,7 +398,6 @@ private fun fetchFromLrcLib(title: String, artist: String, duration: Int): List<
         if (artist.isNotBlank()) "$title $artist" else null,
         title
     )
-
     for (q in queries) {
         try {
             val encodedQuery = URLEncoder.encode(q, "UTF-8")
@@ -406,26 +414,27 @@ private fun fetchFromLrcLib(title: String, artist: String, duration: Int): List<
                 val array = JSONArray(resp)
                 for (i in 0 until array.length()) {
                     val item = array.getJSONObject(i)
-                    val synced = item.optString("syncedLyrics", "")
+                    val synced = item.optStringOrEmpty("syncedLyrics")
                     if (synced.isNotBlank()) {
                         val parsed = parseLrcLyrics(synced)
                         if (parsed.isNotEmpty()) return parsed
                     }
                 }
-                if (array.length() > 0) {
-                    val plain = array.getJSONObject(0).optString("plainLyrics", "")
+                for (i in 0 until array.length()) {
+                    val plain = array.getJSONObject(i).optStringOrEmpty("plainLyrics")
                     if (plain.isNotBlank()) {
                         return convertPlainLyricsToTimed(plain, duration)
                     }
                 }
             }
-        } catch (_: Exception) {}
+        } catch (e: Exception) {
+        }
     }
     return emptyList()
 }
 
 private fun fetchFromKuGou(title: String, artist: String, duration: Int): List<SyncedLyricLine> {
-    return try {
+    try {
         val query = URLEncoder.encode("$title $artist".trim(), "UTF-8")
         val searchUrl = "http://lyrics.kugou.com/search?ver=1&man=yes&client=pc&keyword=$query&duration=&hash="
         val conn = (URL(searchUrl).openConnection() as HttpURLConnection).apply {
@@ -440,11 +449,15 @@ private fun fetchFromKuGou(title: String, artist: String, duration: Int): List<S
             if (candidates != null && candidates.length() > 0) {
                 val id = candidates.getJSONObject(0).optString("id")
                 val accesskey = candidates.getJSONObject(0).optString("accesskey")
-                val lrcUrl = "http://lyrics.kugou.com/download?ver=1&client=pc&id=$id&accesskey=$accesskey&fmt=lrc&charset=utf8"
-                val dlConn = (URL(lrcUrl).openConnection() as HttpURLConnection)
+                val lrcUrl =
+                    "http://lyrics.kugou.com/download?ver=1&client=pc&id=$id&accesskey=$accesskey&fmt=lrc&charset=utf8"
+                val dlConn = (URL(lrcUrl).openConnection() as HttpURLConnection).apply {
+                    connectTimeout = 3000
+                    readTimeout = 3000
+                }
                 if (dlConn.responseCode == HttpURLConnection.HTTP_OK) {
                     val dlResp = dlConn.inputStream.bufferedReader().use { it.readText() }
-                    val b64 = JSONObject(dlResp).optString("content")
+                    val b64 = JSONObject(dlResp).optStringOrEmpty("content")
                     if (b64.isNotBlank()) {
                         val lrcText = String(Base64.decode(b64, Base64.DEFAULT), Charsets.UTF_8)
                         val parsed = parseLrcLyrics(lrcText)
@@ -454,11 +467,14 @@ private fun fetchFromKuGou(title: String, artist: String, duration: Int): List<S
                 }
             }
         }
-        emptyList()
-    } catch (_: Exception) {
-        emptyList()
+    } catch (e: Exception) {
     }
+    return emptyList()
 }
+
+// ---------------------------------------------------------------------------
+// Play history (SharedPreferences)
+// ---------------------------------------------------------------------------
 
 fun recordTrackPlay(context: Context, track: FullTrackItem) {
     if (track.id.isBlank()) return
@@ -476,8 +492,7 @@ fun recordTrackPlay(context: Context, track: FullTrackItem) {
 
 fun getMostPlayedTracks(context: Context): List<FullTrackItem> {
     val prefs = context.getSharedPreferences("sonora_play_counts", Context.MODE_PRIVATE)
-    val allKeys = prefs.all
-    val songIds = allKeys.keys.filter { it.startsWith("count_") }.map { it.removePrefix("count_") }
+    val songIds = prefs.all.keys.filter { it.startsWith("count_") }.map { it.removePrefix("count_") }
     return songIds.map { id ->
         val count = prefs.getInt("count_$id", 0)
         val title = prefs.getString("title_$id", "Unknown Track") ?: "Unknown Track"
@@ -486,14 +501,15 @@ fun getMostPlayedTracks(context: Context): List<FullTrackItem> {
         val dur = prefs.getString("dur_$id", "0:00") ?: "0:00"
         val lastPlayed = prefs.getLong("last_played_$id", 0L)
         Triple(FullTrackItem(id, title, artist, "", art, dur), count, lastPlayed)
-    }.sortedWith(compareByDescending<Triple<FullTrackItem, Int, Long>> { it.second }.thenByDescending { it.third })
-        .map { it.first }
+    }.sortedWith(
+        compareByDescending<Triple<FullTrackItem, Int, Long>> { it.second }
+            .thenByDescending { it.third }
+    ).map { it.first }
 }
 
 fun getRecentlyPlayedTracks(context: Context): List<FullTrackItem> {
     val prefs = context.getSharedPreferences("sonora_play_counts", Context.MODE_PRIVATE)
-    val allKeys = prefs.all
-    val songIds = allKeys.keys.filter { it.startsWith("last_played_") }.map { it.removePrefix("last_played_") }
+    val songIds = prefs.all.keys.filter { it.startsWith("last_played_") }.map { it.removePrefix("last_played_") }
     return songIds.map { id ->
         val title = prefs.getString("title_$id", "Unknown Track") ?: "Unknown Track"
         val artist = prefs.getString("artist_$id", "Unknown Artist") ?: "Unknown Artist"
@@ -501,9 +517,12 @@ fun getRecentlyPlayedTracks(context: Context): List<FullTrackItem> {
         val dur = prefs.getString("dur_$id", "0:00") ?: "0:00"
         val lastPlayed = prefs.getLong("last_played_$id", 0L)
         Pair(FullTrackItem(id, title, artist, "", art, dur), lastPlayed)
-    }.sortedByDescending { it.second }
-        .map { it.first }
+    }.sortedByDescending { it.second }.map { it.first }
 }
+
+// ---------------------------------------------------------------------------
+// YouTube Music parsing
+// ---------------------------------------------------------------------------
 
 fun findRenderersRecursive(json: Any?, targetKey: String, sink: MutableList<JSONObject>) {
     when (json) {
@@ -564,7 +583,7 @@ suspend fun downloadTrackWithAutoRetry(
         }
         attempt++
         if (attempt <= maxRetries) {
-            delay(1200L) // Backoff before retrying
+            delay(1200L)
         }
     }
     return null
@@ -579,7 +598,9 @@ fun extractVideoIdFromRenderer(item: JSONObject): String {
         ?.optJSONObject("musicPlayButtonRenderer")
         ?.optJSONObject("playNavigationEndpoint")
         ?.optJSONObject("watchEndpoint")
-        ?.optString("videoId")?.takeIf { it.isNotBlank() }?.let { return it }
+        ?.optString("videoId")
+        ?.takeIf { it.isNotBlank() }
+        ?.let { return it }
 
     val flexCols = item.optJSONArray("flexColumns")
     if (flexCols != null) {
@@ -618,7 +639,10 @@ suspend fun searchYouTubeMusic(query: String): Pair<List<FullTrackItem>, String?
         conn.readTimeout = 8000
         conn.doOutput = true
         conn.setRequestProperty("Content-Type", "application/json")
-        conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+        conn.setRequestProperty(
+            "User-Agent",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        )
         conn.setRequestProperty("Referer", "https://music.youtube.com/")
 
         val payload = JSONObject().apply {
@@ -636,7 +660,7 @@ suspend fun searchYouTubeMusic(query: String): Pair<List<FullTrackItem>, String?
         conn.outputStream.use { it.write(payload.toString().toByteArray(Charsets.UTF_8)) }
 
         if (conn.responseCode != HttpURLConnection.HTTP_OK) {
-            return@withContext Pair(emptyList(), "YouTube status: ${conn.responseCode}")
+            return@withContext Pair(emptyList<FullTrackItem>(), "YouTube status: ${conn.responseCode}")
         }
 
         val respText = conn.inputStream.bufferedReader().use { it.readText() }
@@ -695,15 +719,15 @@ suspend fun searchYouTubeMusic(query: String): Pair<List<FullTrackItem>, String?
                 )
             )
         }
-        Pair(results, null)
+        Pair(results as List<FullTrackItem>, null as String?)
     } catch (e: Exception) {
-        Pair(results, e.localizedMessage ?: "Network error occurred")
+        Pair(results as List<FullTrackItem>, (e.localizedMessage ?: "Network error occurred") as String?)
     }
 }
 
 suspend fun fetchYouTubeAutomixRadio(videoId: String): List<FullTrackItem> = withContext(Dispatchers.IO) {
     val results = mutableListOf<FullTrackItem>()
-    if (videoId.isBlank()) return@withContext results
+    if (videoId.isBlank()) return@withContext results as List<FullTrackItem>
     try {
         val url = URL("https://music.youtube.com/youtubei/v1/next")
         val conn = url.openConnection() as HttpURLConnection
@@ -741,7 +765,10 @@ suspend fun fetchYouTubeAutomixRadio(videoId: String): List<FullTrackItem> = wit
                 val vId = extractVideoIdFromRenderer(item)
                 if (vId.isBlank()) continue
 
-                val title = sanitizeText(item.optJSONObject("title")?.optJSONArray("runs")?.optJSONObject(0)?.optString("text", "Unknown Track") ?: "Unknown Track")
+                val title = sanitizeText(
+                    item.optJSONObject("title")?.optJSONArray("runs")?.optJSONObject(0)
+                        ?.optString("text", "Unknown Track") ?: "Unknown Track"
+                )
                 var radioArtist = "Unknown Artist"
                 val bylineRuns = item.optJSONObject("longBylineText")?.optJSONArray("runs")
                     ?: item.optJSONObject("shortBylineText")?.optJSONArray("runs")
@@ -754,7 +781,8 @@ suspend fun fetchYouTubeAutomixRadio(videoId: String): List<FullTrackItem> = wit
                         }
                     }
                 }
-                val duration = item.optJSONObject("lengthText")?.optJSONArray("runs")?.optJSONObject(0)?.optString("text", "") ?: ""
+                val duration = item.optJSONObject("lengthText")?.optJSONArray("runs")?.optJSONObject(0)
+                    ?.optString("text", "") ?: ""
 
                 val thumbArray = item.optJSONObject("thumbnail")?.optJSONArray("thumbnails")
                 val artworkUrl = if (thumbArray != null && thumbArray.length() > 0) {
@@ -776,8 +804,12 @@ suspend fun fetchYouTubeAutomixRadio(videoId: String): List<FullTrackItem> = wit
     } catch (e: Exception) {
         e.printStackTrace()
     }
-    results
+    results as List<FullTrackItem>
 }
+
+// ---------------------------------------------------------------------------
+// Audio stream resolution
+// ---------------------------------------------------------------------------
 
 fun decryptMediaUrl(encryptedUrl: String): String {
     if (encryptedUrl.isBlank()) return ""
@@ -804,112 +836,91 @@ fun decryptMediaUrl(encryptedUrl: String): String {
     }
 }
 
+private fun bestAudioUrlFromFormats(formats: JSONArray?): String {
+    if (formats == null) return ""
+    var bestUrl = ""
+    var maxBitrate = 0L
+    for (i in 0 until formats.length()) {
+        val fmt = formats.getJSONObject(i)
+        val mime = fmt.optString("mimeType", "")
+        val streamUrl = fmt.optString("url", "")
+        if (mime.startsWith("audio/") && streamUrl.isNotBlank()) {
+            val bitrate = fmt.optLong("bitrate", 0L)
+            if (bitrate > maxBitrate) {
+                maxBitrate = bitrate
+                bestUrl = streamUrl
+            }
+        }
+    }
+    return bestUrl
+}
+
+private fun requestYouTubePlayerAudio(
+    videoId: String,
+    userAgent: String,
+    client: JSONObject,
+    thirdParty: JSONObject? = null
+): String {
+    return try {
+        val conn = URL("https://www.youtube.com/youtubei/v1/player").openConnection() as HttpURLConnection
+        conn.requestMethod = "POST"
+        conn.connectTimeout = 4000
+        conn.readTimeout = 4000
+        conn.doOutput = true
+        conn.setRequestProperty("Content-Type", "application/json")
+        conn.setRequestProperty("User-Agent", userAgent)
+
+        val payload = JSONObject().apply {
+            put("videoId", videoId)
+            put("contentCheckOk", true)
+            put("racyCheckOk", true)
+            put("context", JSONObject().apply {
+                put("client", client)
+                if (thirdParty != null) put("thirdParty", thirdParty)
+            })
+        }
+
+        conn.outputStream.use { it.write(payload.toString().toByteArray(Charsets.UTF_8)) }
+
+        if (conn.responseCode == HttpURLConnection.HTTP_OK) {
+            val resp = conn.inputStream.bufferedReader().use { it.readText() }
+            val root = JSONObject(resp)
+            bestAudioUrlFromFormats(root.optJSONObject("streamingData")?.optJSONArray("adaptiveFormats"))
+        } else {
+            ""
+        }
+    } catch (e: Exception) {
+        ""
+    }
+}
+
 suspend fun resolveTrackAudioStream(track: FullTrackItem): String = withContext(Dispatchers.IO) {
     val videoId = track.id
 
     if (videoId.isNotBlank()) {
-        try {
-            val url = URL("https://www.youtube.com/youtubei/v1/player")
-            val conn = url.openConnection() as HttpURLConnection
-            conn.requestMethod = "POST"
-            conn.connectTimeout = 4000
-            conn.readTimeout = 4000
-            conn.doOutput = true
-            conn.setRequestProperty("Content-Type", "application/json")
-            conn.setRequestProperty("User-Agent", "GoogleTest/1.0")
+        val androidTestClient = JSONObject().apply {
+            put("clientName", "ANDROID_TESTSUITE")
+            put("clientVersion", "1.9")
+            put("androidSdkVersion", 30)
+            put("hl", "en")
+            put("gl", "US")
+        }
+        val first = requestYouTubePlayerAudio(videoId, "GoogleTest/1.0", androidTestClient)
+        if (first.isNotBlank()) return@withContext first
 
-            val payload = JSONObject().apply {
-                put("videoId", videoId)
-                put("contentCheckOk", true)
-                put("racyCheckOk", true)
-                put("context", JSONObject().apply {
-                    put("client", JSONObject().apply {
-                        put("clientName", "ANDROID_TESTSUITE")
-                        put("clientVersion", "1.9")
-                        put("androidSdkVersion", 30)
-                        put("hl", "en")
-                        put("gl", "US")
-                    })
-                })
-            }
-
-            conn.outputStream.use { it.write(payload.toString().toByteArray(Charsets.UTF_8)) }
-
-            if (conn.responseCode == HttpURLConnection.HTTP_OK) {
-                val resp = conn.inputStream.bufferedReader().use { it.readText() }
-                val root = JSONObject(resp)
-                val formats = root.optJSONObject("streamingData")?.optJSONArray("adaptiveFormats")
-                if (formats != null) {
-                    var bestUrl = ""
-                    var maxBitrate = 0L
-                    for (i in 0 until formats.length()) {
-                        val fmt = formats.getJSONObject(i)
-                        val mime = fmt.optString("mimeType", "")
-                        val streamUrl = fmt.optString("url", "")
-                        if (mime.startsWith("audio/") && streamUrl.isNotBlank()) {
-                            val bitrate = fmt.optLong("bitrate", 0L)
-                            if (bitrate > maxBitrate) {
-                                maxBitrate = bitrate
-                                bestUrl = streamUrl
-                            }
-                        }
-                    }
-                    if (bestUrl.isNotBlank()) return@withContext bestUrl
-                }
-            }
-        } catch (_: Exception) {}
-
-        try {
-            val url = URL("https://www.youtube.com/youtubei/v1/player")
-            val conn = url.openConnection() as HttpURLConnection
-            conn.requestMethod = "POST"
-            conn.connectTimeout = 4000
-            conn.readTimeout = 4000
-            conn.doOutput = true
-            conn.setRequestProperty("Content-Type", "application/json")
-            conn.setRequestProperty("User-Agent", "Mozilla/5.0 (SMART-TV; Linux; Tizen 5.0) AppleWebKit/538.1 (KHTML, like Gecko) Version/5.0 TV Safari/538.1")
-
-            val payload = JSONObject().apply {
-                put("videoId", videoId)
-                put("contentCheckOk", true)
-                put("racyCheckOk", true)
-                put("context", JSONObject().apply {
-                    put("client", JSONObject().apply {
-                        put("clientName", "TVHTML5_SIMPLY_EMBEDDED_PLAYER")
-                        put("clientVersion", "2.0")
-                        put("hl", "en")
-                    })
-                    put("thirdParty", JSONObject().apply {
-                        put("embedUrl", "https://www.youtube.com")
-                    })
-                })
-            }
-
-            conn.outputStream.use { it.write(payload.toString().toByteArray(Charsets.UTF_8)) }
-
-            if (conn.responseCode == HttpURLConnection.HTTP_OK) {
-                val resp = conn.inputStream.bufferedReader().use { it.readText() }
-                val root = JSONObject(resp)
-                val formats = root.optJSONObject("streamingData")?.optJSONArray("adaptiveFormats")
-                if (formats != null) {
-                    var bestUrl = ""
-                    var maxBitrate = 0L
-                    for (i in 0 until formats.length()) {
-                        val fmt = formats.getJSONObject(i)
-                        val mime = fmt.optString("mimeType", "")
-                        val streamUrl = fmt.optString("url", "")
-                        if (mime.startsWith("audio/") && streamUrl.isNotBlank()) {
-                            val bitrate = fmt.optLong("bitrate", 0L)
-                            if (bitrate > maxBitrate) {
-                                maxBitrate = bitrate
-                                bestUrl = streamUrl
-                            }
-                        }
-                    }
-                    if (bestUrl.isNotBlank()) return@withContext bestUrl
-                }
-            }
-        } catch (_: Exception) {}
+        val tvClient = JSONObject().apply {
+            put("clientName", "TVHTML5_SIMPLY_EMBEDDED_PLAYER")
+            put("clientVersion", "2.0")
+            put("hl", "en")
+        }
+        val tvThirdParty = JSONObject().apply { put("embedUrl", "https://www.youtube.com") }
+        val second = requestYouTubePlayerAudio(
+            videoId,
+            "Mozilla/5.0 (SMART-TV; Linux; Tizen 5.0) AppleWebKit/538.1 (KHTML, like Gecko) Version/5.0 TV Safari/538.1",
+            tvClient,
+            tvThirdParty
+        )
+        if (second.isNotBlank()) return@withContext second
 
         val pipedInstances = listOf(
             "https://pipedapi.adminforge.de",
@@ -943,13 +954,17 @@ suspend fun resolveTrackAudioStream(track: FullTrackItem): String = withContext(
                         if (bestUrl.isNotBlank()) return@withContext bestUrl
                     }
                 }
-            } catch (_: Exception) { continue }
+            } catch (e: Exception) {
+                continue
+            }
         }
     }
 
     try {
         val queryText = URLEncoder.encode("${track.title} ${track.artist}".trim(), "UTF-8")
-        val saavnUrl = URL("https://www.jiosaavn.com/api.php?__call=search.getResults&_format=json&_marker=0&api_version=4&ctx=web6dot0&n=3&p=1&q=$queryText")
+        val saavnUrl = URL(
+            "https://www.jiosaavn.com/api.php?__call=search.getResults&_format=json&_marker=0&api_version=4&ctx=web6dot0&n=3&p=1&q=$queryText"
+        )
         val conn = saavnUrl.openConnection() as HttpURLConnection
         conn.requestMethod = "GET"
         conn.connectTimeout = 4000
@@ -969,29 +984,44 @@ suspend fun resolveTrackAudioStream(track: FullTrackItem): String = withContext(
                 }
             }
         }
-    } catch (_: Exception) {}
+    } catch (e: Exception) {
+    }
 
     ""
 }
 
+// ---------------------------------------------------------------------------
+// Text cleaning / duplicate detection
+// ---------------------------------------------------------------------------
+
+private const val TITLE_NOISE_WORDS =
+    "slowed|reverb|remix|acoustic|live|sped up|speed up|lofi|instrumental|edit|deluxe|remastered|remaster|version|soundtrack|ost|audio|video|lyrics|official"
+
+private val ARTIST_SPLIT_REGEX =
+    Regex("\\s*(,|&|/|;|\\bfeat\\.?|\\bft\\.?|\\band\\b)\\s*", RegexOption.IGNORE_CASE)
+
 fun cleanSongTitle(rawTitle: String): String {
     var clean = rawTitle.lowercase(Locale.ROOT)
-    clean = clean.replace("\\(.*?\\)".toRegex(), " ")
-    clean = clean.replace("\\[.*?\\]".toRegex(), " ")
-    clean = clean.replace("\\{.*?\\}".toRegex(), " ")
-    clean = clean.replace("-\\s*(slowed|reverb|remix|acoustic|live|sped up|speed up|lofi|instrumental|edit|deluxe|remastered|version|from|soundtrack|ost).*".toRegex(), " ")
-    clean = clean.replace("\\b(slowed|reverb|remix|acoustic|live|sped up|speed up|lofi|instrumental|edit|deluxe|remastered|remaster|version|soundtrack|ost|audio|video|lyrics|official)\\b".toRegex(), " ")
-    clean = clean.replace("\\b(feat|ft)\\.?\\s+.*".toRegex(), " ")
-    clean = clean.replace("[^a-z0-9 ]".toRegex(), " ")
-    return clean.trim().replace("\\s+".toRegex(), " ")
+    clean = clean.replace(Regex("\\(.*?\\)"), " ")
+    clean = clean.replace(Regex("\\[.*?\\]"), " ")
+    clean = clean.replace(Regex("\\{.*?\\}"), " ")
+    clean = clean.replace(
+        Regex("-\\s*(slowed|reverb|remix|acoustic|live|sped up|speed up|lofi|instrumental|edit|deluxe|remastered|version|from|soundtrack|ost).*"),
+        " "
+    )
+    clean = clean.replace(Regex("\\b($TITLE_NOISE_WORDS)\\b"), " ")
+    clean = clean.replace(Regex("\\b(feat|ft)\\.?\\s+.*"), " ")
+    // \p{L}\p{N} keeps Hindi / Punjabi / other non-Latin titles instead of erasing them
+    clean = clean.replace(Regex("[^\\p{L}\\p{N} ]"), " ")
+    return clean.trim().replace(Regex("\\s+"), " ")
 }
 
 fun cleanArtist(rawArtist: String): String {
-    val firstArtist = rawArtist.split(",", "&", "feat.", "ft.", "and", "/", ";").firstOrNull() ?: rawArtist
+    val firstArtist = rawArtist.split(ARTIST_SPLIT_REGEX).firstOrNull() ?: rawArtist
     return firstArtist.lowercase(Locale.ROOT)
-        .replace("[^a-z0-9 ]".toRegex(), " ")
+        .replace(Regex("[^\\p{L}\\p{N} ]"), " ")
         .trim()
-        .replace("\\s+".toRegex(), " ")
+        .replace(Regex("\\s+"), " ")
 }
 
 fun areTracksSimilar(trackA: FullTrackItem, trackB: FullTrackItem): Boolean {
@@ -1029,6 +1059,10 @@ fun filterSimilarTracks(incoming: List<FullTrackItem>, existingQueue: List<FullT
     }
     return result
 }
+
+// ---------------------------------------------------------------------------
+// Media3 helpers
+// ---------------------------------------------------------------------------
 
 fun buildMediaItem(track: FullTrackItem): MediaItem {
     val metadata = MediaMetadata.Builder()
@@ -1069,21 +1103,24 @@ fun mediaItemToTrack(item: MediaItem): FullTrackItem {
     )
 }
 
+// Downloads to a .part file first, so an interrupted download is never mistaken for a finished one.
 suspend fun downloadTrackToStorage(context: Context, track: FullTrackItem): String? = withContext(Dispatchers.IO) {
+    var partFile: File? = null
     try {
         val streamUrl = if (track.audioUrl.startsWith("http")) track.audioUrl else resolveTrackAudioStream(track)
         if (streamUrl.isBlank()) return@withContext null
 
         val downloadFolder = File(context.filesDir, "sonora_offline").apply { if (!exists()) mkdirs() }
-        val cleanName = "${track.id}.m4a"
-        val targetFile = File(downloadFolder, cleanName)
+        val targetFile = File(downloadFolder, "${track.id}.m4a")
 
         if (targetFile.exists() && targetFile.length() > 50_000L) {
             return@withContext targetFile.absolutePath
         }
 
-        val url = URL(streamUrl)
-        val connection = url.openConnection() as HttpURLConnection
+        val tmp = File(downloadFolder, "${track.id}.m4a.part")
+        partFile = tmp
+
+        val connection = URL(streamUrl).openConnection() as HttpURLConnection
         connection.requestMethod = "GET"
         connection.connectTimeout = 12000
         connection.readTimeout = 25000
@@ -1092,18 +1129,22 @@ suspend fun downloadTrackToStorage(context: Context, track: FullTrackItem): Stri
 
         if (connection.responseCode in 200..299) {
             connection.inputStream.use { input ->
-                targetFile.outputStream().use { output ->
+                tmp.outputStream().use { output ->
                     input.copyTo(output)
                 }
             }
-            if (targetFile.exists() && targetFile.length() > 50_000L) {
-                return@withContext targetFile.absolutePath
+            if (tmp.length() > 50_000L) {
+                if (targetFile.exists()) targetFile.delete()
+                if (tmp.renameTo(targetFile)) {
+                    return@withContext targetFile.absolutePath
+                }
             }
         }
     } catch (e: Exception) {
         e.printStackTrace()
     }
-    return@withContext null
+    partFile?.delete()
+    null
 }
 
 fun formatTime(millis: Long): String {
@@ -1114,13 +1155,19 @@ fun formatTime(millis: Long): String {
     return String.format(Locale.ROOT, "%d:%02d", minutes, seconds)
 }
 
+// Decodes the HTML entities YouTube sometimes leaves in titles.
 fun sanitizeText(input: String): String {
-    return input.replace("&quot;", "\"")
-        .replace("&amp;", "&")
-        .replace("&#039;", "'")
+    return input
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
         .replace("&lt;", "<")
         .replace("&gt;", ">")
+        .replace("&amp;", "&")
 }
+
+// ---------------------------------------------------------------------------
+// Small composables
+// ---------------------------------------------------------------------------
 
 @Composable
 fun RefinedDownloadMark(
@@ -1222,7 +1269,6 @@ fun SyncedLyricsView(
         }
     }
 
-    // Detect manual scrolling and release lock after 3.5s of inactivity
     LaunchedEffect(listState.isScrollInProgress) {
         if (listState.isScrollInProgress) {
             isManualScrolling = true
@@ -1232,12 +1278,11 @@ fun SyncedLyricsView(
         }
     }
 
-    // Smooth auto-scroll snap when playback progresses
     LaunchedEffect(activeIndex, isManualScrolling) {
         if (!isManualScrolling && activeIndex >= 0 && lyrics.isNotEmpty()) {
             listState.animateScrollToItem(
                 index = activeIndex,
-                scrollOffset = -140 // Centers the line on screen
+                scrollOffset = -140
             )
         }
     }
@@ -1251,7 +1296,6 @@ fun SyncedLyricsView(
             modifier = Modifier.fillMaxSize(),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            // Header: Back navigation, Provider Name, and Lyric Status
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -1322,12 +1366,6 @@ fun SyncedLyricsView(
                             label = "lyricAlpha"
                         )
 
-                        val animatedScale by animateFloatAsState(
-                            targetValue = if (isActive) 1.05f else 0.96f,
-                            animationSpec = tween(300),
-                            label = "lyricScale"
-                        )
-
                         Column(
                             horizontalAlignment = Alignment.CenterHorizontally,
                             modifier = Modifier
@@ -1364,7 +1402,6 @@ fun SyncedLyricsView(
 
             Spacer(modifier = Modifier.height(10.dp))
 
-            // Bottom Track Info Bar
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(22.dp),
@@ -1406,7 +1443,6 @@ fun SyncedLyricsView(
             }
         }
 
-        // Floating "Sync to Audio" Button when user scrolls away
         AnimatedVisibility(
             visible = isManualScrolling && activeIndex >= 0,
             enter = slideInVertically(initialOffsetY = { it / 2 }) + fadeIn(),
@@ -1477,7 +1513,6 @@ fun SwipeablePlaylistTrackRow(
             .padding(vertical = 4.dp)
             .clip(RoundedCornerShape(12.dp))
     ) {
-        // Red background with Trash Icon revealed during left-swipe
         Box(
             modifier = Modifier
                 .matchParentSize()
@@ -1493,11 +1528,10 @@ fun SwipeablePlaylistTrackRow(
             )
         }
 
-        // Foreground Content Card with Drag and Move Controls
         Card(
             modifier = Modifier
                 .fillMaxWidth()
-                .offset { androidx.compose.ui.unit.IntOffset(animatedOffsetX.roundToInt(), 0) }
+                .offset { IntOffset(animatedOffsetX.roundToInt(), 0) }
                 .draggable(
                     orientation = Orientation.Horizontal,
                     state = rememberDraggableState { delta ->
@@ -1522,7 +1556,6 @@ fun SwipeablePlaylistTrackRow(
                     .padding(8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // Reorder controls (Move Up / Move Down)
                 Column(
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.Center
@@ -1597,6 +1630,10 @@ fun SwipeablePlaylistTrackRow(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Main screen
+// ---------------------------------------------------------------------------
+
 private const val PREFS_SONORA = "sonora_playback_state"
 private const val KEY_LAST_ID = "last_id"
 private const val KEY_LAST_TITLE = "last_title"
@@ -1618,7 +1655,6 @@ fun SonoraPlayerScreen(
     val coroutineScope = rememberCoroutineScope()
     val audioManager = remember { context.getSystemService(Context.AUDIO_SERVICE) as AudioManager }
     val keyboardController = LocalSoftwareKeyboardController.current
-
     val prefs: SharedPreferences = remember {
         context.getSharedPreferences(PREFS_SONORA, Context.MODE_PRIVATE)
     }
@@ -1626,16 +1662,17 @@ fun SonoraPlayerScreen(
     val database = remember { SonoraDatabase.getDatabase(context) }
     val dao = remember { database.sonoraDao() }
 
-    val recentSearches by dao.getRecentSearches().collectAsState(initial = emptyList())
-    val likedSongs by dao.getAllLikedSongs().collectAsState(initial = emptyList())
-    val allPlaylists by dao.getAllPlaylists().collectAsState(initial = emptyList())
-    val downloadedSongs by dao.getAllDownloadedSongs().collectAsState(initial = emptyList())
+    // remember{} so the Room Flows are created once, not on every recomposition
+    val recentSearches by remember { dao.getRecentSearches() }.collectAsState(initial = emptyList())
+    val likedSongs by remember { dao.getAllLikedSongs() }.collectAsState(initial = emptyList())
+    val allPlaylists by remember { dao.getAllPlaylists() }.collectAsState(initial = emptyList())
+    val downloadedSongs by remember { dao.getAllDownloadedSongs() }.collectAsState(initial = emptyList())
 
     var selectedNavTab by remember { mutableIntStateOf(0) }
     var selectedLibrarySubTab by remember { mutableIntStateOf(0) }
     var viewingPlaylist by remember { mutableStateOf<PlaylistEntity?>(null) }
     val activePlaylistSongs by remember(viewingPlaylist?.id) {
-        viewingPlaylist?.let { dao.getSongsForPlaylist(it.id) } ?: flowOf(emptyList())
+        viewingPlaylist?.let { dao.getSongsForPlaylist(it.id) } ?: flowOf(emptyList<PlaylistSongEntity>())
     }.collectAsState(initial = emptyList())
 
     var controller by remember { mutableStateOf<MediaController?>(null) }
@@ -1657,6 +1694,9 @@ fun SonoraPlayerScreen(
     var endlessRadioEnabled by remember { mutableStateOf(true) }
     var showQueueDialog by remember { mutableStateOf(false) }
 
+    // Tracks song IDs currently being processed for the queue to prevent double-tap duplicates
+    var pendingQueueSongIds by remember { mutableStateOf<Set<String>>(emptySet()) }
+
     var isShuffleActive by remember { mutableStateOf(false) }
     var isRepeatActive by remember { mutableStateOf(false) }
     var repeatModeState by remember { mutableIntStateOf(Player.REPEAT_MODE_OFF) }
@@ -1677,7 +1717,7 @@ fun SonoraPlayerScreen(
 
     var mostPlayedTracks by remember { mutableStateOf<List<FullTrackItem>>(emptyList()) }
     var recentlyPlayedTracks by remember { mutableStateOf<List<FullTrackItem>>(emptyList()) }
-    
+
     // 0 = Standard Artwork, 1 = Vinyl Record Turntable
     var playerDisplayMode by rememberSaveable { mutableIntStateOf(0) }
 
@@ -1753,8 +1793,11 @@ fun SonoraPlayerScreen(
         label = "secColorAnim"
     )
 
-    val isCurrentSongLiked by dao.isSongLiked(activeSongId).collectAsState(initial = false)
-    val isCurrentSongDownloaded by dao.isSongDownloaded(activeSongId).collectAsState(initial = false)
+    val isCurrentSongLiked by remember(activeSongId) { dao.isSongLiked(activeSongId) }
+        .collectAsState(initial = false)
+    val isCurrentSongDownloaded = remember(downloadedSongs, activeSongId) {
+        downloadedSongs.any { it.id == activeSongId }
+    }
 
     var showSleepTimerDialog by remember { mutableStateOf(false) }
     var stopAfterCurrentTrack by remember { mutableStateOf(false) }
@@ -1768,24 +1811,14 @@ fun SonoraPlayerScreen(
         mutableFloatStateOf(audioManager.getStreamVolume(AudioManager.STREAM_MUSIC).toFloat())
     }
 
-    DisposableEffect(audioManager) {
-        val runnable = Runnable {
-            currentVolumeSlider = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC).toFloat()
-        }
-        val thread = Thread {
-            var lastVol = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
-            while (true) {
-                Thread.sleep(300)
-                val currVol = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
-                if (currVol != lastVol) {
-                    lastVol = currVol
-                    android.os.Handler(context.mainLooper).post(runnable)
-                }
-            }
-        }
-        thread.start()
-        onDispose {
-            thread.interrupt()
+    // Keeps the volume slider in sync with hardware volume keys.
+    // (Replaces the raw Thread { while(true) Thread.sleep() } which crashed the app with an
+    //  uncaught InterruptedException when it was interrupted on dispose.)
+    LaunchedEffect(audioManager) {
+        while (true) {
+            val v = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC).toFloat()
+            if (v != currentVolumeSlider) currentVolumeSlider = v
+            delay(300L)
         }
     }
 
@@ -1832,7 +1865,8 @@ fun SonoraPlayerScreen(
             }
             queueList = items
             currentTrackIndex = player.currentMediaItemIndex.coerceAtLeast(0)
-        } catch (_: Exception) {}
+        } catch (e: Exception) {
+        }
     }
 
     var isAutoQueueFilling by remember { mutableStateOf(false) }
@@ -1945,7 +1979,8 @@ fun SonoraPlayerScreen(
                         }
                         try {
                             context.sendBroadcast(killIntent)
-                        } catch (_: Exception) {}
+                        } catch (e: Exception) {
+                        }
                     }
                 }
                 Lifecycle.Event.ON_DESTROY -> {
@@ -1957,7 +1992,8 @@ fun SonoraPlayerScreen(
                         }
                         try {
                             context.sendBroadcast(killIntent)
-                        } catch (_: Exception) {}
+                        } catch (e: Exception) {
+                        }
                     }
                 }
                 else -> {}
@@ -1975,7 +2011,8 @@ fun SonoraPlayerScreen(
                 if (disposed || (activity?.isFinishing == true && activity.isChangingConfigurations.not())) {
                     try {
                         mediaController.release()
-                    } catch (_: Exception) {}
+                    } catch (e: Exception) {
+                    }
                     return@addListener
                 }
 
@@ -2116,7 +2153,8 @@ fun SonoraPlayerScreen(
             lifecycleOwner.lifecycle.removeObserver(lifecycleObserver)
             try {
                 controller?.release()
-            } catch (_: Exception) {}
+            } catch (e: Exception) {
+            }
             controller = null
         }
     }
@@ -2187,7 +2225,6 @@ fun SonoraPlayerScreen(
             if (endlessRadioEnabled) {
                 coroutineScope.launch {
                     try {
-                        // Skip online recommendations if the track is already stored offline
                         if (downloadedLocal != null && File(downloadedLocal.localFilePath).exists()) {
                             return@launch
                         }
@@ -2216,10 +2253,96 @@ fun SonoraPlayerScreen(
                             }
                         }
                         controller?.let { updateQueueState(it) }
-                    } catch (_: Exception) {
-                        // Suppress network failures gracefully when offline
+                    } catch (e: Exception) {
                     }
                 }
+            }
+        }
+    }
+
+    fun playNext(track: FullTrackItem) {
+        val ctrl = controller ?: return
+
+        // 1. Prevent race conditions: Reject if this song is already being queued
+        if (track.id in pendingQueueSongIds) return
+
+        val currentIndex = ctrl.currentMediaItemIndex
+        val nextIndex = if (currentIndex == C.INDEX_UNSET || ctrl.mediaItemCount == 0) 0 else currentIndex + 1
+
+        // 2. Reject if the song is already currently playing
+        if (currentIndex != C.INDEX_UNSET && currentIndex < ctrl.mediaItemCount) {
+            val currentItem = ctrl.getMediaItemAt(currentIndex)
+            if (currentItem.mediaId == track.id) {
+                Toast.makeText(context, "\"${track.title}\" is already playing", Toast.LENGTH_SHORT).show()
+                return
+            }
+        }
+
+        // 3. Reject if the song is ALREADY the immediate next track
+        if (nextIndex < ctrl.mediaItemCount) {
+            val nextItem = ctrl.getMediaItemAt(nextIndex)
+            if (nextItem.mediaId == track.id) {
+                Toast.makeText(context, "\"${track.title}\" is already next in queue", Toast.LENGTH_SHORT).show()
+                return
+            }
+        }
+
+        // 4. If the track already exists further down in the queue, move it instead of duplicating
+        val existingIndex = (nextIndex until ctrl.mediaItemCount).firstOrNull { idx ->
+            ctrl.getMediaItemAt(idx).mediaId == track.id
+        }
+
+        if (existingIndex != null) {
+            ctrl.moveMediaItem(existingIndex, nextIndex)
+            updateQueueState(ctrl)
+            Toast.makeText(context, "Moved \"${track.title}\" to play next", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        // 5. Fetch audio URL and insert safely
+        pendingQueueSongIds = pendingQueueSongIds + track.id
+
+        coroutineScope.launch {
+            try {
+                val downloaded = dao.getDownloadedSongById(track.id)
+                val finalAudioUrl = if (downloaded != null && File(downloaded.localFilePath).exists()) {
+                    downloaded.localFilePath
+                } else if (track.audioUrl.isNotBlank() && !track.audioUrl.startsWith("http")) {
+                    track.audioUrl
+                } else {
+                    resolveTrackAudioStream(track)
+                }
+
+                if (finalAudioUrl.isNotBlank()) {
+                    track.audioUrl = finalAudioUrl
+
+                    val curIdx = ctrl.currentMediaItemIndex
+                    val targetIndex = if (curIdx == C.INDEX_UNSET || ctrl.mediaItemCount == 0) {
+                        0
+                    } else {
+                        (curIdx + 1).coerceAtMost(ctrl.mediaItemCount)
+                    }
+
+                    val isAlreadyPresent = (0 until ctrl.mediaItemCount).any { idx ->
+                        ctrl.getMediaItemAt(idx).mediaId == track.id
+                    }
+
+                    if (!isAlreadyPresent) {
+                        ctrl.addMediaItem(targetIndex, buildMediaItem(track))
+                        if (!ctrl.isPlaying && ctrl.mediaItemCount == 1) {
+                            ctrl.prepare()
+                            ctrl.play()
+                        }
+                        updateQueueState(ctrl)
+                        Toast.makeText(context, "Playing next: \"${track.title}\"", Toast.LENGTH_SHORT).show()
+                    }
+                } else {
+                    Toast.makeText(context, "Unable to load audio stream", Toast.LENGTH_SHORT).show()
+                }
+            } catch (e: Exception) {
+                Toast.makeText(context, "Error adding to queue", Toast.LENGTH_SHORT).show()
+            } finally {
+                pendingQueueSongIds = pendingQueueSongIds - track.id
             }
         }
     }
@@ -2329,7 +2452,7 @@ fun SonoraPlayerScreen(
                         ) {
                             Icon(imageVector = Icons.Rounded.PlaylistAdd, contentDescription = "Add to playlist", tint = Color.White, modifier = Modifier.size(22.dp))
                             Spacer(modifier = Modifier.height(6.dp))
-                            Text("Add to playl", fontSize = 12.sp, color = Color.White, fontWeight = FontWeight.Medium)
+                            Text("Playlist", fontSize = 12.sp, color = Color.White, fontWeight = FontWeight.Medium)
                         }
                     }
 
@@ -2362,6 +2485,33 @@ fun SonoraPlayerScreen(
                 Spacer(modifier = Modifier.height(14.dp))
 
                 Column(modifier = Modifier.fillMaxWidth()) {
+                    // Play Next Option
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 3.dp)
+                            .clickable {
+                                playNext(song)
+                                selectedTrackForOptions = null
+                            },
+                        colors = CardDefaults.cardColors(containerColor = Color(0xFF141C24)),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(14.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(imageVector = Icons.Rounded.QueueMusic, contentDescription = null, tint = Color.White, modifier = Modifier.size(20.dp))
+                            Spacer(modifier = Modifier.width(14.dp))
+                            Column {
+                                Text("Play next", fontSize = 14.sp, color = Color.White, fontWeight = FontWeight.SemiBold)
+                                Text("Add as next upcoming track", fontSize = 12.sp, color = Color(0xFF94A3B8))
+                            }
+                        }
+                    }
+
                     Card(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -2375,7 +2525,9 @@ fun SonoraPlayerScreen(
                         shape = RoundedCornerShape(12.dp)
                     ) {
                         Row(
-                            modifier = Modifier.fillMaxWidth().padding(14.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(14.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Icon(imageVector = Icons.Rounded.Person, contentDescription = null, tint = Color.White, modifier = Modifier.size(20.dp))
@@ -2400,7 +2552,9 @@ fun SonoraPlayerScreen(
                         shape = RoundedCornerShape(12.dp)
                     ) {
                         Row(
-                            modifier = Modifier.fillMaxWidth().padding(14.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(14.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Icon(imageVector = Icons.Rounded.Album, contentDescription = null, tint = Color.White, modifier = Modifier.size(20.dp))
@@ -2436,7 +2590,9 @@ fun SonoraPlayerScreen(
                         shape = RoundedCornerShape(12.dp)
                     ) {
                         Row(
-                            modifier = Modifier.fillMaxWidth().padding(14.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(14.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Icon(imageVector = Icons.Rounded.BookmarkAdd, contentDescription = null, tint = Color.White, modifier = Modifier.size(20.dp))
@@ -2457,7 +2613,9 @@ fun SonoraPlayerScreen(
                         shape = RoundedCornerShape(12.dp)
                     ) {
                         Row(
-                            modifier = Modifier.fillMaxWidth().padding(14.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(14.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Icon(imageVector = Icons.Rounded.Download, contentDescription = null, tint = Color.White, modifier = Modifier.size(20.dp))
@@ -2478,7 +2636,9 @@ fun SonoraPlayerScreen(
                         shape = RoundedCornerShape(12.dp)
                     ) {
                         Row(
-                            modifier = Modifier.fillMaxWidth().padding(14.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(14.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Icon(imageVector = Icons.Rounded.Info, contentDescription = null, tint = Color.White, modifier = Modifier.size(20.dp))
@@ -2493,7 +2653,7 @@ fun SonoraPlayerScreen(
             }
         }
     }
-    
+
     if (showClearAllDownloadsDialog) {
         AlertDialog(
             onDismissRequest = { showClearAllDownloadsDialog = false },
@@ -2614,7 +2774,9 @@ fun SonoraPlayerScreen(
                         onClick = { showCreatePlaylistDialog = true },
                         colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
                         shape = RoundedCornerShape(8.dp),
-                        modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp)
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(bottom = 8.dp)
                     ) {
                         Text("+ Create New Playlist", fontWeight = FontWeight.Bold)
                     }
@@ -2628,7 +2790,7 @@ fun SonoraPlayerScreen(
                                         val song = songToAddToPlaylist
                                         if (song != null) {
                                             coroutineScope.launch {
-                                                dao.addSongToPlaylist(
+                                                dao.insertPlaylistSong(
                                                     PlaylistSongEntity(
                                                         playlistId = playlist.id,
                                                         songId = song.id,
@@ -2647,7 +2809,9 @@ fun SonoraPlayerScreen(
                                 shape = RoundedCornerShape(8.dp)
                             ) {
                                 Row(
-                                    modifier = Modifier.fillMaxWidth().padding(12.dp),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(12.dp),
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
                                     Icon(imageVector = Icons.Rounded.Folder, contentDescription = null, tint = Color(0xFF7C4DFF), modifier = Modifier.size(20.dp))
@@ -2692,9 +2856,9 @@ fun SonoraPlayerScreen(
                         if (newPlaylistName.isNotBlank()) {
                             val trimmedName = newPlaylistName.trim()
                             coroutineScope.launch {
-                                val newId = dao.createPlaylist(PlaylistEntity(name = trimmedName))
+                                val newId = dao.insertPlaylist(PlaylistEntity(name = trimmedName))
                                 songToAddToPlaylist?.let { song ->
-                                    dao.addSongToPlaylist(
+                                    dao.insertPlaylistSong(
                                         PlaylistSongEntity(
                                             playlistId = newId,
                                             songId = song.id,
@@ -2750,7 +2914,11 @@ fun SonoraPlayerScreen(
             },
             text = {
                 var localQueue by remember(queueList) { mutableStateOf(queueList) }
-                LazyColumn(modifier = Modifier.fillMaxWidth().height(360.dp)) {
+                LazyColumn(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(360.dp)
+                ) {
                     itemsIndexed(localQueue, key = { index, track -> "${track.id}_$index" }) { index, track ->
                         val isCurrent = index == currentTrackIndex
                         Card(
@@ -2834,7 +3002,9 @@ fun SonoraPlayerScreen(
                                 AsyncImage(
                                     model = track.artworkUrl,
                                     contentDescription = track.title,
-                                    modifier = Modifier.size(40.dp).clip(RoundedCornerShape(6.dp)),
+                                    modifier = Modifier
+                                        .size(40.dp)
+                                        .clip(RoundedCornerShape(6.dp)),
                                     contentScale = ContentScale.Crop
                                 )
                                 Spacer(modifier = Modifier.width(10.dp))
@@ -2882,7 +3052,11 @@ fun SonoraPlayerScreen(
         )
     }
 
-    Box(modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background)
+    ) {
         Column(modifier = Modifier.fillMaxSize()) {
             Box(
                 modifier = Modifier
@@ -2954,7 +3128,9 @@ fun SonoraPlayerScreen(
                             }
 
                             LazyRow(
-                                modifier = Modifier.fillMaxWidth().padding(bottom = 14.dp),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(bottom = 14.dp),
                                 horizontalArrangement = Arrangement.spacedBy(8.dp)
                             ) {
                                 items(DiscoveryCategoryList) { cat ->
@@ -2963,8 +3139,8 @@ fun SonoraPlayerScreen(
                                         modifier = Modifier
                                             .clip(RoundedCornerShape(18.dp))
                                             .background(
-                                                if (isSelected) MaterialTheme.colorScheme.primary 
-                                                else if (isDarkTheme) Color(0xFF1A232E) 
+                                                if (isSelected) MaterialTheme.colorScheme.primary
+                                                else if (isDarkTheme) Color(0xFF1A232E)
                                                 else Color(0xFFE2E8F0)
                                             )
                                             .clickable { selectedMoodCategory = cat }
@@ -2972,9 +3148,9 @@ fun SonoraPlayerScreen(
                                     ) {
                                         Text(
                                             text = cat.label,
-                                            color = if (isSelected) Color.White 
-                                                    else if (isDarkTheme) Color(0xFFCBD5E1) 
-                                                    else Color(0xFF1E293B),
+                                            color = if (isSelected) Color.White
+                                            else if (isDarkTheme) Color(0xFFCBD5E1)
+                                            else Color(0xFF1E293B),
                                             fontSize = 13.sp,
                                             fontWeight = if (isSelected) FontWeight.Bold else FontWeight.SemiBold
                                         )
@@ -2996,7 +3172,9 @@ fun SonoraPlayerScreen(
                                 item {
                                     if (isMoodLoading && allSpeedDialSongs.isEmpty()) {
                                         Box(
-                                            modifier = Modifier.fillMaxWidth().height(260.dp),
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .height(260.dp),
                                             contentAlignment = Alignment.Center
                                         ) {
                                             CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
@@ -3010,7 +3188,9 @@ fun SonoraPlayerScreen(
                                             Column(modifier = Modifier.fillMaxWidth()) {
                                                 for (row in 0 until 3) {
                                                     Row(
-                                                        modifier = Modifier.fillMaxWidth().padding(bottom = 10.dp),
+                                                        modifier = Modifier
+                                                            .fillMaxWidth()
+                                                            .padding(bottom = 10.dp),
                                                         horizontalArrangement = Arrangement.spacedBy(10.dp)
                                                     ) {
                                                         for (col in 0 until 3) {
@@ -3067,8 +3247,8 @@ fun SonoraPlayerScreen(
                                                     .size(if (isCurrent) 8.dp else 6.dp)
                                                     .clip(CircleShape)
                                                     .background(
-                                                        if (isCurrent) MaterialTheme.colorScheme.primary 
-                                                        else if (isDarkTheme) Color(0xFF334155) 
+                                                        if (isCurrent) MaterialTheme.colorScheme.primary
+                                                        else if (isDarkTheme) Color(0xFF334155)
                                                         else Color(0xFFCBD5E1)
                                                     )
                                             )
@@ -3089,7 +3269,9 @@ fun SonoraPlayerScreen(
 
                                 item {
                                     LazyRow(
-                                        modifier = Modifier.fillMaxWidth().padding(bottom = 84.dp),
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(bottom = 84.dp),
                                         horizontalArrangement = Arrangement.spacedBy(14.dp)
                                     ) {
                                         itemsIndexed(keepListeningSongs) { idx, song ->
@@ -3131,10 +3313,20 @@ fun SonoraPlayerScreen(
                     }
 
                     1 -> {
-                        Box(modifier = Modifier.fillMaxSize().statusBarsPadding()) {
-                            Column(modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .statusBarsPadding()
+                        ) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .padding(horizontal = 16.dp)
+                            ) {
                                 Row(
-                                    modifier = Modifier.fillMaxWidth().padding(vertical = 10.dp),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(vertical = 10.dp),
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
                                     IconButton(onClick = {
@@ -3175,7 +3367,9 @@ fun SonoraPlayerScreen(
                                                     imageVector = Icons.Rounded.Close,
                                                     contentDescription = "Clear",
                                                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                                    modifier = Modifier.size(18.dp).clickable { searchQuery = "" }
+                                                    modifier = Modifier
+                                                        .size(18.dp)
+                                                        .clickable { searchQuery = "" }
                                                 )
                                             }
                                         },
@@ -3212,7 +3406,9 @@ fun SonoraPlayerScreen(
                                                 AsyncImage(
                                                     model = song.artworkUrl,
                                                     contentDescription = song.title,
-                                                    modifier = Modifier.size(50.dp).clip(RoundedCornerShape(6.dp)),
+                                                    modifier = Modifier
+                                                        .size(50.dp)
+                                                        .clip(RoundedCornerShape(6.dp)),
                                                     contentScale = ContentScale.Crop
                                                 )
                                                 Spacer(modifier = Modifier.width(12.dp))
@@ -3268,7 +3464,9 @@ fun SonoraPlayerScreen(
                                                     imageVector = Icons.Rounded.NorthWest,
                                                     contentDescription = "Autofill",
                                                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                                    modifier = Modifier.size(18.dp).clickable { searchQuery = historyItem.query }
+                                                    modifier = Modifier
+                                                        .size(18.dp)
+                                                        .clickable { searchQuery = historyItem.query }
                                                 )
                                             }
                                         }
@@ -3308,10 +3506,16 @@ fun SonoraPlayerScreen(
                             )
 
                             Row(
-                                modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(bottom = 12.dp),
                                 horizontalArrangement = Arrangement.spacedBy(8.dp)
                             ) {
-                                listOf("Liked (${likedSongs.size})" to 0, "Playlists (${allPlaylists.size})" to 1, "Offline (${downloadedSongs.size})" to 2).forEach { (label, idx) ->
+                                listOf(
+                                    "Liked (${likedSongs.size})" to 0,
+                                    "Playlists (${allPlaylists.size})" to 1,
+                                    "Offline (${downloadedSongs.size})" to 2
+                                ).forEach { (label, idx) ->
                                     val isSubSel = selectedLibrarySubTab == idx
                                     Card(
                                         shape = RoundedCornerShape(16.dp),
@@ -3320,24 +3524,42 @@ fun SonoraPlayerScreen(
                                         ),
                                         modifier = Modifier.clickable { selectedLibrarySubTab = idx }
                                     ) {
-                                        Text(label, color = if (isSubSel) Color.White else MaterialTheme.colorScheme.onSurface, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp))
+                                        Text(
+                                            label,
+                                            color = if (isSubSel) Color.White else MaterialTheme.colorScheme.onSurface,
+                                            fontSize = 12.sp,
+                                            fontWeight = FontWeight.SemiBold,
+                                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
+                                        )
                                     }
                                 }
                             }
 
                             when (selectedLibrarySubTab) {
                                 0 -> {
-                                    val convertedLiked = likedSongs.map { FullTrackItem(it.id, it.title, it.artist, it.audioUrl, it.artworkUrl, it.duration) }
+                                    val convertedLiked = likedSongs.map {
+                                        FullTrackItem(it.id, it.title, it.artist, it.audioUrl, it.artworkUrl, it.duration)
+                                    }
                                     LazyColumn(modifier = Modifier.fillMaxSize()) {
                                         itemsIndexed(convertedLiked) { index, savedSong ->
                                             val isDownloaded = downloadedSongs.any { it.id == savedSong.id }
                                             val isDownloading = savedSong.id in downloadingSongIds
 
                                             Row(
-                                                modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp).clickable { playQueue(convertedLiked, index) },
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .padding(vertical = 6.dp)
+                                                    .clickable { playQueue(convertedLiked, index) },
                                                 verticalAlignment = Alignment.CenterVertically
                                             ) {
-                                                AsyncImage(model = savedSong.artworkUrl, contentDescription = savedSong.title, modifier = Modifier.size(50.dp).clip(RoundedCornerShape(6.dp)), contentScale = ContentScale.Crop)
+                                                AsyncImage(
+                                                    model = savedSong.artworkUrl,
+                                                    contentDescription = savedSong.title,
+                                                    modifier = Modifier
+                                                        .size(50.dp)
+                                                        .clip(RoundedCornerShape(6.dp)),
+                                                    contentScale = ContentScale.Crop
+                                                )
                                                 Spacer(modifier = Modifier.width(12.dp))
                                                 Column(modifier = Modifier.weight(1f)) {
                                                     Text(savedSong.title, fontWeight = FontWeight.Bold, fontSize = 15.sp, color = MaterialTheme.colorScheme.onBackground, maxLines = 1)
@@ -3365,7 +3587,6 @@ fun SonoraPlayerScreen(
                                         var localPlaylistTracks by remember(playlistTracks) { mutableStateOf(playlistTracks) }
 
                                         Column(modifier = Modifier.fillMaxSize()) {
-                                            // Top navigation row
                                             Row(
                                                 modifier = Modifier
                                                     .fillMaxWidth()
@@ -3406,7 +3627,6 @@ fun SonoraPlayerScreen(
                                                 }
                                             }
 
-                                            // Hero Section: 4-Artwork Mosaic Cover & Action Buttons
                                             Row(
                                                 modifier = Modifier
                                                     .fillMaxWidth()
@@ -3474,7 +3694,6 @@ fun SonoraPlayerScreen(
                                                 }
                                             }
 
-                                            // Reorderable & Swipeable Track List
                                             LazyColumn(modifier = Modifier.fillMaxSize()) {
                                                 itemsIndexed(localPlaylistTracks, key = { _, track -> track.id }) { idx, track ->
                                                     SwipeablePlaylistTrackRow(
@@ -3511,7 +3730,6 @@ fun SonoraPlayerScreen(
                                             }
                                         }
                                     } else {
-                                        // Playlists overview list with 4-Artwork Mosaic Covers
                                         LazyColumn(modifier = Modifier.fillMaxSize()) {
                                             item {
                                                 Button(
@@ -3526,7 +3744,8 @@ fun SonoraPlayerScreen(
                                                 }
                                             }
                                             items(allPlaylists) { playlist ->
-                                                val songsForThisPlaylist by dao.getSongsForPlaylist(playlist.id).collectAsState(initial = emptyList())
+                                                val songsForThisPlaylist by remember(playlist.id) { dao.getSongsForPlaylist(playlist.id) }
+                                                    .collectAsState(initial = emptyList())
 
                                                 Card(
                                                     modifier = Modifier
@@ -3584,7 +3803,6 @@ fun SonoraPlayerScreen(
                                     }
 
                                     Column(modifier = Modifier.fillMaxSize()) {
-                                        // Top Summary Card: Total Storage & Batch Actions
                                         Card(
                                             modifier = Modifier
                                                 .fillMaxWidth()
@@ -3646,7 +3864,9 @@ fun SonoraPlayerScreen(
                                                         enabled = convertedDownloads.isNotEmpty(),
                                                         colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
                                                         shape = RoundedCornerShape(20.dp),
-                                                        modifier = Modifier.weight(1f).height(38.dp)
+                                                        modifier = Modifier
+                                                            .weight(1f)
+                                                            .height(38.dp)
                                                     ) {
                                                         Icon(imageVector = Icons.Rounded.PlayArrow, contentDescription = null, modifier = Modifier.size(16.dp))
                                                         Spacer(modifier = Modifier.width(6.dp))
@@ -3665,7 +3885,9 @@ fun SonoraPlayerScreen(
                                                             contentColor = if (isDarkTheme) Color.White else Color(0xFF0F172A)
                                                         ),
                                                         shape = RoundedCornerShape(20.dp),
-                                                        modifier = Modifier.weight(1f).height(38.dp)
+                                                        modifier = Modifier
+                                                            .weight(1f)
+                                                            .height(38.dp)
                                                     ) {
                                                         Icon(imageVector = Icons.Rounded.Shuffle, contentDescription = null, modifier = Modifier.size(14.dp))
                                                         Spacer(modifier = Modifier.width(6.dp))
@@ -3675,7 +3897,6 @@ fun SonoraPlayerScreen(
                                             }
                                         }
 
-                                        // Failed Downloads Retry Banner (Visible only if failures exist)
                                         if (failedDownloadTracks.isNotEmpty()) {
                                             Card(
                                                 modifier = Modifier
@@ -3719,10 +3940,11 @@ fun SonoraPlayerScreen(
                                             }
                                         }
 
-                                        // Downloaded Tracks List
                                         if (convertedDownloads.isEmpty()) {
                                             Box(
-                                                modifier = Modifier.fillMaxSize().padding(top = 40.dp),
+                                                modifier = Modifier
+                                                    .fillMaxSize()
+                                                    .padding(top = 40.dp),
                                                 contentAlignment = Alignment.Center
                                             ) {
                                                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -3832,9 +4054,9 @@ fun SonoraPlayerScreen(
             }
 
             if (activeSongId.isNotBlank()) {
-                val progressFraction = if (totalDuration > 0) (currentPosition.toFloat() / totalDuration.toFloat()).coerceIn(0f, 1f) else 0f
+                val progressFraction =
+                    if (totalDuration > 0) (currentPosition.toFloat() / totalDuration.toFloat()).coerceIn(0f, 1f) else 0f
 
-                // Horizontal swipe drag offset with bouncy spring animation
                 var miniplayerDragOffsetX by remember { mutableFloatStateOf(0f) }
                 val animatedMiniplayerOffsetX by animateFloatAsState(
                     targetValue = miniplayerDragOffsetX,
@@ -3850,7 +4072,6 @@ fun SonoraPlayerScreen(
                         .fillMaxWidth()
                         .padding(horizontal = 12.dp, vertical = 4.dp)
                         .offset { IntOffset(animatedMiniplayerOffsetX.roundToInt(), 0) }
-                        // Horizontal swipe: Left for Next, Right for Previous
                         .draggable(
                             orientation = Orientation.Horizontal,
                             state = rememberDraggableState { delta ->
@@ -3859,14 +4080,12 @@ fun SonoraPlayerScreen(
                             onDragStopped = { velocity ->
                                 val threshold = 110f
                                 if (miniplayerDragOffsetX < -threshold || velocity < -450f) {
-                                    // Swipe Left -> Skip to Next track
                                     controller?.let { player ->
                                         if (player.mediaItemCount > 0 && player.hasNextMediaItem()) {
                                             player.seekToNextMediaItem()
                                         }
                                     }
                                 } else if (miniplayerDragOffsetX > threshold || velocity > 450f) {
-                                    // Swipe Right -> Skip to Previous track
                                     controller?.let { player ->
                                         if (player.currentPosition > 3000L) {
                                             player.seekTo(0L)
@@ -3878,7 +4097,6 @@ fun SonoraPlayerScreen(
                                 miniplayerDragOffsetX = 0f
                             }
                         )
-                        // Vertical swipe: Drag up to expand
                         .draggable(
                             orientation = Orientation.Vertical,
                             state = rememberDraggableState { delta ->
@@ -3887,7 +4105,6 @@ fun SonoraPlayerScreen(
                                 }
                             }
                         )
-                        // Tap to expand
                         .clickable { isPlayerExpanded = true },
                     shape = RoundedCornerShape(28.dp),
                     colors = CardDefaults.cardColors(containerColor = Color.Transparent)
@@ -3926,7 +4143,9 @@ fun SonoraPlayerScreen(
                                 AsyncImage(
                                     model = activeArtworkUrl,
                                     contentDescription = activeTitle,
-                                    modifier = Modifier.size(36.dp).clip(CircleShape),
+                                    modifier = Modifier
+                                        .size(36.dp)
+                                        .clip(CircleShape),
                                     contentScale = ContentScale.Crop
                                 )
                                 Box(
@@ -4010,7 +4229,6 @@ fun SonoraPlayerScreen(
                 }
             }
 
-            // Bottom Navigation Bar with top border and high-contrast theme styling
             Surface(
                 color = if (isDarkTheme) Color(0xFF080C10) else Color(0xFFFFFFFF),
                 tonalElevation = 8.dp,
@@ -4018,7 +4236,6 @@ fun SonoraPlayerScreen(
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Column(modifier = Modifier.fillMaxWidth()) {
-                    // Subtle top divider line for clear separation from screen background
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -4151,7 +4368,6 @@ fun SonoraPlayerScreen(
                         }
                     }
             ) {
-                // Synced Live Karaoke Lyrics View
                 AnimatedVisibility(
                     visible = showLiveLyrics,
                     enter = slideInHorizontally(initialOffsetX = { it }),
@@ -4174,7 +4390,6 @@ fun SonoraPlayerScreen(
                     )
                 }
 
-                // Standard Player View
                 AnimatedVisibility(
                     visible = !showLiveLyrics,
                     enter = slideInHorizontally(initialOffsetX = { -it }),
@@ -4203,7 +4418,6 @@ fun SonoraPlayerScreen(
                                 Text(text = activeTitle, fontSize = 14.sp, color = Color.White, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                             }
                             Row(verticalAlignment = Alignment.CenterVertically) {
-                                // 🟢 VINYL / STANDARD MODE TOGGLE BUTTON
                                 IconButton(onClick = { playerDisplayMode = if (playerDisplayMode == 0) 1 else 0 }) {
                                     Icon(
                                         imageVector = if (playerDisplayMode == 1) Icons.Rounded.Album else Icons.Rounded.GraphicEq,
@@ -4215,25 +4429,46 @@ fun SonoraPlayerScreen(
                                 IconButton(onClick = { showLiveLyrics = !showLiveLyrics }) {
                                     Icon(imageVector = Icons.Rounded.Notes, contentDescription = "Live Lyrics", tint = Color.White, modifier = Modifier.size(24.dp))
                                 }
-                            } // closes inner Row
-                        } // closes outer Row
-
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth(0.88f)
-                                .aspectRatio(1f)
-                                .clip(RoundedCornerShape(20.dp))
-                                .background(Color(0xFF141C24)),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            AsyncImage(
-                                model = activeArtworkUrl,
-                                contentDescription = activeTitle,
-                                modifier = Modifier.fillMaxSize(),
-                                contentScale = ContentScale.Crop
-                            )
+                            }
                         }
-                        
+
+                        // Artwork Box with Vinyl Record / Standard Album Art switcher
+                        AnimatedContent(
+                            targetState = playerDisplayMode,
+                            transitionSpec = {
+                                (fadeIn(animationSpec = tween(300)) + scaleIn(initialScale = 0.92f))
+                                    .togetherWith(fadeOut(animationSpec = tween(250)) + scaleOut(targetScale = 0.92f))
+                            },
+                            label = "ArtworkModeTransition"
+                        ) { mode ->
+                            if (mode == 1) {
+                                VinylRecordView(
+                                    artworkUrl = activeArtworkUrl,
+                                    isPlaying = isPlaying,
+                                    isDarkTheme = isDarkTheme,
+                                    modifier = Modifier
+                                        .fillMaxWidth(0.90f)
+                                        .padding(vertical = 4.dp)
+                                )
+                            } else {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth(0.88f)
+                                        .aspectRatio(1f)
+                                        .clip(RoundedCornerShape(20.dp))
+                                        .background(Color(0xFF141C24)),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    AsyncImage(
+                                        model = activeArtworkUrl,
+                                        contentDescription = activeTitle,
+                                        modifier = Modifier.fillMaxSize(),
+                                        contentScale = ContentScale.Crop
+                                    )
+                                }
+                            }
+                        }
+
                         Spacer(modifier = Modifier.height(10.dp))
 
                         DynamicAudioVisualizer(
@@ -4347,11 +4582,15 @@ fun SonoraPlayerScreen(
                                     activeTrackColor = Color.White,
                                     inactiveTrackColor = Color(0x40FFFFFF)
                                 ),
-                                modifier = Modifier.fillMaxWidth().height(20.dp)
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(20.dp)
                             )
 
                             Row(
-                                modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(top = 4.dp),
                                 horizontalArrangement = Arrangement.SpaceBetween
                             ) {
                                 Text(
@@ -4489,7 +4728,6 @@ fun SonoraPlayerScreen(
                                 Icon(imageVector = Icons.Rounded.Shuffle, contentDescription = "Shuffle", tint = Color.White, modifier = Modifier.size(18.dp))
                             }
 
-                            // Equalizer Button (opens EqualizerSheet)
                             Box(
                                 modifier = Modifier
                                     .size(46.dp)

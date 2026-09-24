@@ -9,6 +9,8 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import androidx.core.content.ContextCompat
+import androidx.media3.common.AudioAttributes
+import androidx.media3.common.C
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.session.CommandButton
@@ -46,7 +48,7 @@ class PlaybackService : MediaSessionService() {
             controller: MediaSession.ControllerInfo,
             customCommand: SessionCommand,
             args: Bundle
-        ): ListenableFuture<SessionResult> {
+        ): ListenableFuture {
             if (customCommand.customAction == ACTION_CLOSE_APP) {
                 Log.d("Sonora", "Close button tapped in notification")
                 exitApp()
@@ -67,7 +69,17 @@ class PlaybackService : MediaSessionService() {
     override fun onCreate() {
         super.onCreate()
 
-        val player = ExoPlayer.Builder(this).build()
+        // 1. Audio attributes for music media playback
+        val audioAttributes = AudioAttributes.Builder()
+            .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
+            .setUsage(C.USAGE_MEDIA)
+            .build()
+
+        // 2. Build ExoPlayer with automated audio focus & headphone disconnect handling
+        val player = ExoPlayer.Builder(this)
+            .setAudioAttributes(audioAttributes, /* handleAudioFocus = */ true)
+            .setHandleAudioBecomingNoisy(true)
+            .build()
 
         // Attach EqualizerManager to the audio session
         EqualizerManager.init(this, player.audioSessionId)
@@ -79,10 +91,10 @@ class PlaybackService : MediaSessionService() {
             .setSessionCommand(closeCommand)
             .build()
 
-            mediaSession = MediaSession.Builder(this, player)
-                .setCallback(sessionCallback)
-                .setCustomLayout(ImmutableList.of(closeButton))
-                .build()
+        mediaSession = MediaSession.Builder(this, player)
+            .setCallback(sessionCallback)
+            .setCustomLayout(ImmutableList.of(closeButton))
+            .build()
 
         ContextCompat.registerReceiver(
             this,
