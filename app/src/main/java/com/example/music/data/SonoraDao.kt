@@ -29,6 +29,12 @@ interface SonoraDao {
     // --- Search History ---
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertSearchQuery(search: SearchHistoryEntity)
+    
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertPlaylist(playlist: PlaylistEntity): Long
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertPlaylistSong(song: PlaylistSongEntity)
 
     @Query("DELETE FROM search_history WHERE query = :queryText")
     suspend fun deleteSearchQuery(queryText: String)

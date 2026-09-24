@@ -140,7 +140,6 @@ import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -161,7 +160,6 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
-import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
@@ -170,7 +168,6 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
-import androidx.core.view.WindowCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.media3.common.C
@@ -1633,350 +1630,6 @@ fun SwipeablePlaylistTrackRow(
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-fun AboutDeveloperSheet(
-    isDarkTheme: Boolean,
-    onDismiss: () -> Unit
-) {
-    val context = LocalContext.current
-    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-
-    val surfaceBg = if (isDarkTheme) Color(0xFF0F1722) else Color(0xFFFFFFFF)
-    val cardBg = if (isDarkTheme) Color(0xFF16212E) else Color(0xFFF1F5F9)
-    val primaryText = if (isDarkTheme) Color.White else Color(0xFF0F172A)
-    val secondaryText = if (isDarkTheme) Color(0xFF94A3B8) else Color(0xFF64748B)
-    val accentPurple = Color(0xFF7C4DFF)
-
-    ModalBottomSheet(
-        onDismissRequest = onDismiss,
-        sheetState = sheetState,
-        containerColor = surfaceBg,
-        shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
-        dragHandle = {
-            Box(
-                modifier = Modifier
-                    .padding(vertical = 12.dp)
-                    .width(42.dp)
-                    .height(4.dp)
-                    .clip(CircleShape)
-                    .background(if (isDarkTheme) Color(0xFF334155) else Color(0xFFCBD5E1))
-            )
-        }
-    ) {
-        LazyColumn(
-            modifier = Modifier
-                .fillMaxWidth()
-                .navigationBarsPadding()
-                .padding(horizontal = 20.dp),
-            contentPadding = PaddingValues(bottom = 32.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
-        ) {
-            // Hero Developer Header
-            item {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(vertical = 8.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally
-                ) {
-                    // Profile Avatar with Gradient Ring
-                    Box(
-                        modifier = Modifier
-                            .size(86.dp)
-                            .clip(CircleShape)
-                            .background(
-                                Brush.sweepGradient(
-                                    listOf(accentPurple, Color(0xFF38BDF8), Color(0xFFEC4899), accentPurple)
-                                )
-                            )
-                            .padding(3.dp),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .clip(CircleShape)
-                                .background(if (isDarkTheme) Color(0xFF0A0F16) else Color(0xFFF8FAFC)),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Text(
-                                text = "AM",
-                                fontSize = 28.sp,
-                                fontWeight = FontWeight.ExtraBold,
-                                color = accentPurple
-                            )
-                        }
-                    }
-
-                    Spacer(modifier = Modifier.height(12.dp))
-
-                    Text(
-                        text = "Aryan Mourya",
-                        fontSize = 22.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = primaryText
-                    )
-
-                    Text(
-                        text = "Lead Developer & Architect",
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.Medium,
-                        color = accentPurple
-                    )
-
-                    Spacer(modifier = Modifier.height(8.dp))
-
-                    Text(
-                        text = "Crafted Sonora to deliver an uncompromised, ad-free music streaming & offline experience combining modern Media3 streaming with refined audio fidelity.",
-                        fontSize = 13.sp,
-                        color = secondaryText,
-                        textAlign = TextAlign.Center,
-                        lineHeight = 18.sp,
-                        modifier = Modifier.padding(horizontal = 16.dp)
-                    )
-
-                    Spacer(modifier = Modifier.height(14.dp))
-
-                    // Action Buttons (GitHub Profile & Share App)
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(10.dp)
-                    ) {
-                        Button(
-                            onClick = {
-                                val intent = Intent(
-                                    Intent.ACTION_VIEW,
-                                    Uri.parse("https://github.com/Aryanmourya1912")
-                                )
-                                context.startActivity(intent)
-                            },
-                            colors = ButtonDefaults.buttonColors(containerColor = accentPurple),
-                            shape = RoundedCornerShape(14.dp),
-                            modifier = Modifier.weight(1f).height(44.dp)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Rounded.Link,
-                                contentDescription = "GitHub",
-                                tint = Color.White,
-                                modifier = Modifier.size(18.dp)
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text("GitHub Profile", fontSize = 13.sp, fontWeight = FontWeight.Bold)
-                        }
-
-                        Button(
-                            onClick = {
-                                val shareIntent = Intent(Intent.ACTION_SEND).apply {
-                                    type = "text/plain"
-                                    putExtra(Intent.EXTRA_SUBJECT, "Sonora Music Player")
-                                    putExtra(
-                                        Intent.EXTRA_TEXT,
-                                        "Experience Sonora Music Player — Modern, ad-free streaming with synchronized lyrics and lossless offline audio built by Aryan Mourya."
-                                    )
-                                }
-                                context.startActivity(Intent.createChooser(shareIntent, "Share Sonora"))
-                            },
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = cardBg,
-                                contentColor = primaryText
-                            ),
-                            shape = RoundedCornerShape(14.dp),
-                            modifier = Modifier.weight(1f).height(44.dp)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Rounded.Share,
-                                contentDescription = "Share",
-                                modifier = Modifier.size(16.dp)
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text("Share Sonora", fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-                        }
-                    }
-                }
-            }
-
-            // Key Engineering Innovations
-            item {
-                Text(
-                    text = "Key Engine Features",
-                    fontSize = 16.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = primaryText,
-                    modifier = Modifier.padding(top = 8.dp, bottom = 4.dp)
-                )
-            }
-
-            item {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    DeveloperFeatureRow(
-                        icon = Icons.Rounded.GraphicEq,
-                        title = "Real-Time 30-Band Visualizer",
-                        desc = "Custom hardware-rendered audio spectrum synced with low-latency ExoPlayer frame dispatch.",
-                        iconBg = Color(0xFF6366F1),
-                        cardBg = cardBg,
-                        primaryColor = primaryText,
-                        secondaryColor = secondaryText
-                    )
-                    DeveloperFeatureRow(
-                        icon = Icons.Rounded.Notes,
-                        title = "Dual-Engine Synced Karaoke",
-                        desc = "Sub-second synchronized lyric line matching powered by LrcLib and KuGou parsers.",
-                        iconBg = Color(0xFFEC4899),
-                        cardBg = cardBg,
-                        primaryColor = primaryText,
-                        secondaryColor = secondaryText
-                    )
-                    DeveloperFeatureRow(
-                        icon = Icons.Rounded.Album,
-                        title = "Analog Vinyl Turntable",
-                        desc = "Fluid rotational physics running continuous 33 RPM album disc simulation with animated mode switching.",
-                        iconBg = Color(0xFFF59E0B),
-                        cardBg = cardBg,
-                        primaryColor = primaryText,
-                        secondaryColor = secondaryText
-                    )
-                    DeveloperFeatureRow(
-                        icon = Icons.Rounded.Download,
-                        title = "Atomic Offline Vault",
-                        desc = "Interruption-proof downloads utilizing staged .part buffering with storage management & duplicate prevention.",
-                        iconBg = Color(0xFF10B981),
-                        cardBg = cardBg,
-                        primaryColor = primaryText,
-                        secondaryColor = secondaryText
-                    )
-                    DeveloperFeatureRow(
-                        icon = Icons.Rounded.Radio,
-                        title = "Endless Automix Radio",
-                        desc = "Contextual recommendation loop featuring duplicate-proof queue insertion and background replenishment.",
-                        iconBg = Color(0xFF8B5CF6),
-                        cardBg = cardBg,
-                        primaryColor = primaryText,
-                        secondaryColor = secondaryText
-                    )
-                }
-            }
-
-            // Architectural Tech Stack Pills
-            item {
-                Text(
-                    text = "Core Tech Stack",
-                    fontSize = 16.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = primaryText,
-                    modifier = Modifier.padding(top = 8.dp, bottom = 4.dp)
-                )
-
-                val techTags = listOf(
-                    "Jetpack Compose",
-                    "Media3 ExoPlayer",
-                    "Kotlin Coroutines",
-                    "Room SQLite",
-                    "AndroidX Palette",
-                    "Coil Image Engine",
-                    "Dynamic AudioFocus",
-                    "Material 3"
-                )
-
-                LazyRow(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    items(techTags) { tag ->
-                        Box(
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(20.dp))
-                                .background(cardBg)
-                                .padding(horizontal = 14.dp, vertical = 6.dp)
-                        ) {
-                            Text(
-                                text = tag,
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                color = if (isDarkTheme) Color(0xFFCBD5E1) else Color(0xFF334155)
-                            )
-                        }
-                    }
-                }
-            }
-
-            // Version & Copyright Tag
-            item {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(top = 10.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        text = "Sonora • Version 1.3 • Developed by Aryan Mourya",
-                        fontSize = 11.sp,
-                        color = secondaryText.copy(alpha = 0.7f),
-                        fontWeight = FontWeight.Medium
-                    )
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun DeveloperFeatureRow(
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
-    title: String,
-    desc: String,
-    iconBg: Color,
-    cardBg: Color,
-    primaryColor: Color,
-    secondaryColor: Color
-) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(14.dp),
-        colors = CardDefaults.cardColors(containerColor = cardBg)
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(12.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Box(
-                modifier = Modifier
-                    .size(40.dp)
-                    .clip(RoundedCornerShape(10.dp))
-                    .background(iconBg.copy(alpha = 0.18f)),
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(
-                    imageVector = icon,
-                    contentDescription = null,
-                    tint = iconBg,
-                    modifier = Modifier.size(20.dp)
-                )
-            }
-
-            Spacer(modifier = Modifier.width(12.dp))
-
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = title,
-                    fontSize = 14.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = primaryColor
-                )
-                Spacer(modifier = Modifier.height(2.dp))
-                Text(
-                    text = desc,
-                    fontSize = 12.sp,
-                    color = secondaryColor,
-                    lineHeight = 16.sp
-                )
-            }
-        }
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Main screen
 // ---------------------------------------------------------------------------
@@ -1998,24 +1651,6 @@ fun SonoraPlayerScreen(
     onToggleTheme: () -> Unit
 ) {
     val context = LocalContext.current
-    val context = LocalContext.current
-    val view = LocalView.current
-
-    // Dynamically controls status bar & navigation bar icon colors
-    if (!view.isInEditMode) {
-        SideEffect {
-            val window = (context as? Activity)?.window ?: return@SideEffect
-            val insetsController = WindowCompat.getInsetsController(window, view)
-
-            // When in light theme and collapsed: dark icons (slate-black) on light background.
-            // When player is expanded: light icons (white) on dark gradient player background.
-            val useDarkStatusBarIcons = !isDarkTheme && !isPlayerExpanded
-            val useDarkNavBarIcons = !isDarkTheme && !isPlayerExpanded
-
-            insetsController.isAppearanceLightStatusBars = useDarkStatusBarIcons
-            insetsController.isAppearanceLightNavigationBars = useDarkNavBarIcons
-        }
-    }
     val lifecycleOwner = LocalLifecycleOwner.current
     val coroutineScope = rememberCoroutineScope()
     val audioManager = remember { context.getSystemService(Context.AUDIO_SERVICE) as AudioManager }
@@ -2050,7 +1685,6 @@ fun SonoraPlayerScreen(
     var isLyricsLoading by remember { mutableStateOf(false) }
 
     var showEqualizerSheet by remember { mutableStateOf(false) }
-    var showDeveloperProfileDialog by remember { mutableStateOf(false) }
 
     var selectedTrackForOptions by remember { mutableStateOf<FullTrackItem?>(null) }
     val bottomSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
@@ -3423,23 +3057,6 @@ fun SonoraPlayerScreen(
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.background)
     ) {
-        // Subtle top gradient scrim for status bar readability in Light Mode
-        if (!isDarkTheme && !isPlayerExpanded) {
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(48.dp)
-                    .background(
-                        Brush.verticalGradient(
-                            colors = listOf(
-                                Color(0x18000000),
-                                Color.Transparent
-                            )
-                        )
-                    )
-            )
-        }
-
         Column(modifier = Modifier.fillMaxSize()) {
             Box(
                 modifier = Modifier
@@ -3496,13 +3113,8 @@ fun SonoraPlayerScreen(
                                     IconButton(onClick = { showQueueDialog = true }) {
                                         Icon(imageVector = Icons.Rounded.TrendingUp, contentDescription = "Queue", tint = MaterialTheme.colorScheme.onBackground, modifier = Modifier.size(22.dp))
                                     }
-                                    IconButton(onClick = { showDeveloperProfileDialog = true }) {
-                                        Icon(
-                                            imageVector = Icons.Rounded.Person,
-                                            contentDescription = "About Developer",
-                                            tint = MaterialTheme.colorScheme.onBackground,
-                                            modifier = Modifier.size(22.dp)
-                                        )
+                                    IconButton(onClick = {}) {
+                                        Icon(imageVector = Icons.Rounded.Person, contentDescription = "Profile", tint = MaterialTheme.colorScheme.onBackground, modifier = Modifier.size(22.dp))
                                     }
                                     IconButton(onClick = onToggleTheme) {
                                         Icon(
@@ -5177,13 +4789,6 @@ fun SonoraPlayerScreen(
         EqualizerSheet(
             isDarkTheme = isDarkTheme,
             onDismiss = { showEqualizerSheet = false }
-        )
-    }
-    
-    if (showDeveloperProfileDialog) {
-        AboutDeveloperSheet(
-            isDarkTheme = isDarkTheme,
-            onDismiss = { showDeveloperProfileDialog = false }
         )
     }
 }

@@ -11,7 +11,6 @@ import android.util.Log
 import androidx.core.content.ContextCompat
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
-import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.session.CommandButton
 import androidx.media3.session.MediaSession
@@ -48,7 +47,7 @@ class PlaybackService : MediaSessionService() {
             controller: MediaSession.ControllerInfo,
             customCommand: SessionCommand,
             args: Bundle
-        ): ListenableFuture {
+        ): ListenableFuture<SessionResult> {
             if (customCommand.customAction == ACTION_CLOSE_APP) {
                 Log.d("Sonora", "Close button tapped in notification")
                 exitApp()
@@ -69,22 +68,18 @@ class PlaybackService : MediaSessionService() {
     override fun onCreate() {
         super.onCreate()
 
-        // 1. Audio attributes for music media playback
         val audioAttributes = AudioAttributes.Builder()
             .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
             .setUsage(C.USAGE_MEDIA)
             .build()
 
-        // 2. Build ExoPlayer with automated audio focus & headphone disconnect handling
         val player = ExoPlayer.Builder(this)
-            .setAudioAttributes(audioAttributes, /* handleAudioFocus = */ true)
+            .setAudioAttributes(audioAttributes, true)
             .setHandleAudioBecomingNoisy(true)
             .build()
 
-        // Attach EqualizerManager to the audio session
         EqualizerManager.init(this, player.audioSessionId)
 
-        // "Close" (X) button shown in the playback notification.
         val closeButton = CommandButton.Builder()
             .setDisplayName("Close")
             .setIconResId(R.drawable.ic_close)
