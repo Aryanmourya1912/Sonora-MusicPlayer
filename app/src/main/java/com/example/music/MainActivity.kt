@@ -1744,7 +1744,7 @@ fun AboutDeveloperSheet(
                             onClick = {
                                 val intent = Intent(
                                     Intent.ACTION_VIEW,
-                                    Uri.parse("https://github.com/aryanmourya")
+                                    Uri.parse("https://github.com/Aryanmourya1912")
                                 )
                                 context.startActivity(intent)
                             },
@@ -2505,19 +2505,30 @@ fun SonoraPlayerScreen(
     }
 
     LaunchedEffect(isPlaying, isDraggingSlider) {
+        var lastSavedAt = 0L
+
         while (isPlaying && !isDraggingSlider) {
             controller?.let { player ->
                 val pos = max(0L, player.currentPosition)
                 currentPosition = pos
-                val dur = player.duration
-                if (dur > 0) totalDuration = dur
 
-                prefs.edit()
-                    .putLong(KEY_LAST_POSITION_MS, pos)
-                    .putLong(KEY_LAST_DURATION_MS, totalDuration)
-                    .apply()
+                val dur = player.duration
+                if (dur > 0L && dur != totalDuration) {
+                    totalDuration = dur
+                }
+
+                // Update the lyrics/UI frequently, but avoid writing SharedPreferences
+                // on every UI tick.
+                val now = android.os.SystemClock.elapsedRealtime()
+                if (now - lastSavedAt >= 1000L) {
+                    prefs.edit()
+                        .putLong(KEY_LAST_POSITION_MS, pos)
+                        .putLong(KEY_LAST_DURATION_MS, totalDuration)
+                        .apply()
+                    lastSavedAt = now
+                }
             }
-            delay(1000L)
+            delay(120L)
         }
     }
 
@@ -4709,11 +4720,16 @@ fun SonoraPlayerScreen(
                     )
                     .statusBarsPadding()
                     .navigationBarsPadding()
-                    .pointerInput(Unit) {
-                        detectVerticalDragGestures { _, dragAmount ->
-                            if (dragAmount > 60f) {
-                                isPlayerExpanded = false
-                                showLiveLyrics = false
+                    // The expanded-player swipe gesture must not consume vertical
+                    // drag events while the lyrics screen is open. Otherwise the
+                    // LazyColumn below never receives the user's scroll gesture.
+                    .pointerInput(showLiveLyrics) {
+                        if (!showLiveLyrics) {
+                            detectVerticalDragGestures { _, dragAmount ->
+                                if (dragAmount > 60f) {
+                                    isPlayerExpanded = false
+                                    showLiveLyrics = false
+                                }
                             }
                         }
                     }
