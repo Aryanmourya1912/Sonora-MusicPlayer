@@ -37,6 +37,7 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.Orientation
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.gestures.draggable
 import androidx.compose.foundation.gestures.rememberDraggableState
@@ -155,6 +156,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.awaitPointerEvent
+import androidx.compose.ui.input.pointer.awaitPointerEventScope
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -1269,21 +1272,30 @@ fun SyncedLyricsView(
         }
     }
 
-    LaunchedEffect(listState.isScrollInProgress) {
-        if (listState.isScrollInProgress) {
-            isManualScrolling = true
-        } else if (isManualScrolling) {
-            delay(3500L)
-            isManualScrolling = false
-        }
+    var isAutoScrolling by remember { mutableStateOf(false) }
+
+    LaunchedEffect(listState) {
+        snapshotFlow { listState.isScrollInProgress }
+            .collect { scrolling ->
+                if (!scrolling && isManualScrolling) {
+                    delay(3500L)
+                    isManualScrolling = false
+                }
+            }
     }
 
     LaunchedEffect(activeIndex, isManualScrolling) {
         if (!isManualScrolling && activeIndex >= 0 && lyrics.isNotEmpty()) {
-            listState.animateScrollToItem(
-                index = activeIndex,
-                scrollOffset = -140
-            )
+            isAutoScrolling = true
+
+            try {
+                listState.animateScrollToItem(
+                    index = activeIndex,
+                    scrollOffset = -140
+                )
+            } finally {
+                isAutoScrolling = false
+            }
         }
     }
 
@@ -1352,7 +1364,22 @@ fun SyncedLyricsView(
                     state = listState,
                     modifier = Modifier
                         .weight(1f)
-                        .fillMaxWidth(),
+                        .fillMaxWidth()
+                        .pointerInput(Unit) {
+                            detectDragGestures(
+                                onDragStart = {
+                                    isManualScrolling = true
+                                },
+                                onDragEnd = {
+                                    // Keep manual-scroll state for the existing 3.5 second timeout
+                                },
+                                onDragCancel = {
+                                    // Keep manual-scroll state for the existing 3.5 second timeout
+                                }
+                            ) { _, _ ->
+                                // Drag detected
+                            }
+                        },
                     contentPadding = PaddingValues(top = 180.dp, bottom = 220.dp),
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.spacedBy(28.dp)
@@ -1457,11 +1484,18 @@ fun SyncedLyricsView(
                 elevation = CardDefaults.cardElevation(defaultElevation = 6.dp),
                 modifier = Modifier.clickable {
                     isManualScrolling = false
+
                     coroutineScope.launch {
-                        listState.animateScrollToItem(
-                            index = activeIndex,
-                            scrollOffset = -140
-                        )
+                        isAutoScrolling = true
+
+                        try {
+                            listState.animateScrollToItem(
+                                index = activeIndex,
+                                scrollOffset = -140
+                            )
+                        } finally {
+                            isAutoScrolling = false
+                        }
                     }
                 }
             ) {
@@ -2564,10 +2598,13 @@ fun SonoraPlayerScreen(
     }
 
     LaunchedEffect(isPlaying, isDraggingSlider, showLiveLyrics, crossfadeSeconds, isFadingIn) {
+        var lastSavedPositionTime = 0L
+
         while (isPlaying && !isDraggingSlider) {
             controller?.let { player ->
                 val pos = max(0L, player.currentPosition)
                 currentPosition = pos
+
                 val dur = player.duration
                 if (dur > 0) totalDuration = dur
 
@@ -2582,18 +2619,29 @@ fun SonoraPlayerScreen(
                     val fadeDurationMs = crossfadeSeconds * 1000L
 
                     if (remainingMs in 1L..fadeDurationMs) {
-                        val fraction = (remainingMs.toFloat() / fadeDurationMs.toFloat()).coerceIn(0.05f, 1.0f)
+                        val fraction =
+                            (remainingMs.toFloat() / fadeDurationMs.toFloat())
+                                .coerceIn(0.05f, 1.0f)
+
                         player.volume = fraction
                     } else if (remainingMs > fadeDurationMs && player.volume < 1.0f) {
                         player.volume = 1.0f
                     }
                 }
 
-                prefs.edit()
-                    .putLong(KEY_LAST_POSITION_MS, pos)
-                    .putLong(KEY_LAST_DURATION_MS, totalDuration)
-                    .apply()
+                // Save playback position only once per second
+                val now = android.os.SystemClock.elapsedRealtime()
+
+                if (now - lastSavedPositionTime >= 1000L) {
+                    prefs.edit()
+                        .putLong(KEY_LAST_POSITION_MS, pos)
+                        .putLong(KEY_LAST_DURATION_MS, totalDuration)
+                        .apply()
+
+                    lastSavedPositionTime = now
+                }
             }
+
             delay(if (showLiveLyrics || crossfadeSeconds > 0) 100L else 500L)
         }
     }
