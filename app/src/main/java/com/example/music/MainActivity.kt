@@ -1987,6 +1987,9 @@ private const val KEY_LAST_ARTWORK_URL = "last_artwork_url"
 private const val KEY_LAST_DURATION_TXT = "last_duration_txt"
 private const val KEY_LAST_POSITION_MS = "last_position_ms"
 private const val KEY_LAST_DURATION_MS = "last_duration_ms"
+private const val KEY_CROSSFADE_SEC = "crossfade_seconds"
+private const val KEY_GAPLESS_ENABLED = "gapless_enabled"
+private const val KEY_NORM_ENABLED = "volume_normalization"
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
@@ -2051,6 +2054,17 @@ fun SonoraPlayerScreen(
     var failedDownloadTracks by remember { mutableStateOf<Map<String, FullTrackItem>>(emptyMap()) }
     var showClearAllDownloadsDialog by remember { mutableStateOf(false) }
     var showDeveloperProfileDialog by remember { mutableStateOf(false) }
+    var showAudioTransitionsDialog by remember { mutableStateOf(false) }
+    var crossfadeSeconds by remember {
+        mutableIntStateOf(prefs.getInt(KEY_CROSSFADE_SEC, 3)) // Default: 3s
+    }
+    var gaplessEnabled by remember {
+        mutableStateOf(prefs.getBoolean(KEY_GAPLESS_ENABLED, true))
+    }
+    var volumeNormalizationEnabled by remember {
+        mutableStateOf(prefs.getBoolean(KEY_NORM_ENABLED, true))
+    }
+    var isFadingIn by remember { mutableStateOf(false) }
 
     var searchQuery by remember { mutableStateOf("") }
     var searchResults by remember { mutableStateOf<List<FullTrackItem>>(emptyList()) }
@@ -2266,6 +2280,36 @@ fun SonoraPlayerScreen(
             }
         }
     }
+    
+    fun prebufferNextTrackIfGapless(player: Player) {
+        if (!gaplessEnabled) return
+        val currentIdx = player.currentMediaItemIndex
+        val nextIdx = currentIdx + 1
+        if (nextIdx < player.mediaItemCount && nextIdx < queueList.size) {
+            val nextTrack = queueList[nextIdx]
+            val currentNextMediaItem = player.getMediaItemAt(nextIdx)
+            val streamUri = currentNextMediaItem.requestMetadata.mediaUri?.toString() ?: ""
+
+            // Only resolve if stream URL is not already warm
+            if (streamUri.isBlank() || streamUri.startsWith("http://dummy")) {
+                coroutineScope.launch {
+                    try {
+                        val downloaded = dao.getDownloadedSongById(nextTrack.id)
+                        val streamUrl = if (downloaded != null && File(downloaded.localFilePath).exists()) {
+                            downloaded.localFilePath
+                        } else {
+                            resolveTrackAudioStream(nextTrack)
+                        }
+
+                        if (streamUrl.isNotBlank()) {
+                            nextTrack.audioUrl = streamUrl
+                            player.replaceMediaItem(nextIdx, buildMediaItem(nextTrack))
+                        }
+                    } catch (_: Exception) {}
+                }
+            }
+        }
+    }
 
     fun triggerDownload(track: FullTrackItem) {
         if (track.id in downloadingSongIds) return
@@ -2441,6 +2485,21 @@ fun SonoraPlayerScreen(
 
                     override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
                         if (disposed) return
+                        if (crossfadeSeconds > 0) {
+                            isFadingIn = true
+                            mediaController.volume = 0.05f
+                            coroutineScope.launch {
+                                val steps = 20
+                                val stepDelay = (crossfadeSeconds * 1000L) / steps
+                                for (step in 1..steps) {
+                                    delay(stepDelay.coerceAtLeast(30L))
+                                    if (disposed) break
+                                    mediaController.volume = (step.toFloat() / steps.toFloat()).coerceIn(0.05f, 1.0f)
+                                }
+                                mediaController.volume = 1.0f
+                                isFadingIn = false
+                            }
+                        }
                         if (stopAfterCurrentTrack && reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO) {
                             mediaController.pause()
                         }
@@ -2504,31 +2563,38 @@ fun SonoraPlayerScreen(
         }
     }
 
-    LaunchedEffect(isPlaying, isDraggingSlider) {
-        var lastSavedAt = 0L
-
+    LaunchedEffect(isPlaying, isDraggingSlider, showLiveLyrics, crossfadeSeconds, isFadingIn) {
         while (isPlaying && !isDraggingSlider) {
             controller?.let { player ->
                 val pos = max(0L, player.currentPosition)
                 currentPosition = pos
-
                 val dur = player.duration
-                if (dur > 0L && dur != totalDuration) {
-                    totalDuration = dur
+                if (dur > 0) totalDuration = dur
+
+                // 1. Proactive Gapless Pre-buffer trigger
+                if (dur > 0 && (dur - pos <= 18_000L || pos.toFloat() / dur.toFloat() >= 0.80f)) {
+                    prebufferNextTrackIfGapless(player)
                 }
 
-                // Update the lyrics/UI frequently, but avoid writing SharedPreferences
-                // on every UI tick.
-                val now = android.os.SystemClock.elapsedRealtime()
-                if (now - lastSavedAt >= 1000L) {
-                    prefs.edit()
-                        .putLong(KEY_LAST_POSITION_MS, pos)
-                        .putLong(KEY_LAST_DURATION_MS, totalDuration)
-                        .apply()
-                    lastSavedAt = now
+                // 2. Crossfade Fade-Out Ramp
+                if (crossfadeSeconds > 0 && dur > 0 && !isFadingIn) {
+                    val remainingMs = dur - pos
+                    val fadeDurationMs = crossfadeSeconds * 1000L
+
+                    if (remainingMs in 1L..fadeDurationMs) {
+                        val fraction = (remainingMs.toFloat() / fadeDurationMs.toFloat()).coerceIn(0.05f, 1.0f)
+                        player.volume = fraction
+                    } else if (remainingMs > fadeDurationMs && player.volume < 1.0f) {
+                        player.volume = 1.0f
+                    }
                 }
+
+                prefs.edit()
+                    .putLong(KEY_LAST_POSITION_MS, pos)
+                    .putLong(KEY_LAST_DURATION_MS, totalDuration)
+                    .apply()
             }
-            delay(120L)
+            delay(if (showLiveLyrics || crossfadeSeconds > 0) 100L else 500L)
         }
     }
 
@@ -5104,6 +5170,22 @@ fun SonoraPlayerScreen(
                             ) {
                                 Icon(imageVector = Icons.Rounded.Tune, contentDescription = "Equalizer", tint = Color.White, modifier = Modifier.size(18.dp))
                             }
+                            
+                            Box(
+                                modifier = Modifier
+                                    .size(46.dp)
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(if (crossfadeSeconds > 0 || gaplessEnabled) Color(0xFF7C4DFF) else Color(0x30FFFFFF))
+                                    .clickable { showAudioTransitionsDialog = true },
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.GraphicEq,
+                                    contentDescription = "Audio Transitions",
+                                    tint = Color.White,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
 
                             Box(
                                 modifier = Modifier
@@ -5149,6 +5231,116 @@ fun SonoraPlayerScreen(
                 }
             }
         }
+    }
+    
+    if (showAudioTransitionsDialog) {
+        AlertDialog(
+            onDismissRequest = { showAudioTransitionsDialog = false },
+            title = {
+                Text(
+                    text = "Audio Transitions & Polish",
+                    fontWeight = FontWeight.Bold,
+                    color = if (isDarkTheme) Color.White else Color(0xFF0F172A)
+                )
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                    // Gapless Playback Toggle
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Gapless Pre-buffering",
+                                fontWeight = FontWeight.SemiBold,
+                                fontSize = 14.sp,
+                                color = if (isDarkTheme) Color.White else Color(0xFF0F172A)
+                            )
+                            Text(
+                                text = "Pre-loads next track to eliminate pauses between songs.",
+                                fontSize = 12.sp,
+                                color = if (isDarkTheme) Color(0xFF94A3B8) else Color(0xFF64748B)
+                            )
+                        }
+                        Switch(
+                            checked = gaplessEnabled,
+                            onCheckedChange = {
+                                gaplessEnabled = it
+                                prefs.edit().putBoolean(KEY_GAPLESS_ENABLED, it).apply()
+                            }
+                        )
+                    }
+
+                    // Volume Normalization Toggle
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Volume Normalization",
+                                fontWeight = FontWeight.SemiBold,
+                                fontSize = 14.sp,
+                                color = if (isDarkTheme) Color.White else Color(0xFF0F172A)
+                            )
+                            Text(
+                                text = "Balances track gain to prevent sudden loudness jumps.",
+                                fontSize = 12.sp,
+                                color = if (isDarkTheme) Color(0xFF94A3B8) else Color(0xFF64748B)
+                            )
+                        }
+                        Switch(
+                            checked = volumeNormalizationEnabled,
+                            onCheckedChange = {
+                                volumeNormalizationEnabled = it
+                                prefs.edit().putBoolean(KEY_NORM_ENABLED, it).apply()
+                                Toast.makeText(context, if (it) "Normalization Enabled" else "Normalization Disabled", Toast.LENGTH_SHORT).show()
+                            }
+                        )
+                    }
+
+                    // Crossfade Slider
+                    Column {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(
+                                text = "Crossfade",
+                                fontWeight = FontWeight.SemiBold,
+                                fontSize = 14.sp,
+                                color = if (isDarkTheme) Color.White else Color(0xFF0F172A)
+                            )
+                            Text(
+                                text = if (crossfadeSeconds == 0) "Off" else "${crossfadeSeconds}s",
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFF7C4DFF),
+                                fontSize = 14.sp
+                            )
+                        }
+                        Slider(
+                            value = crossfadeSeconds.toFloat(),
+                            onValueChange = {
+                                crossfadeSeconds = it.roundToInt()
+                                prefs.edit().putInt(KEY_CROSSFADE_SEC, crossfadeSeconds).apply()
+                            },
+                            valueRange = 0f..10f,
+                            steps = 9
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showAudioTransitionsDialog = false }) {
+                    Text("Done", fontWeight = FontWeight.Bold)
+                }
+            },
+            containerColor = if (isDarkTheme) Color(0xFF161F29) else Color(0xFFFFFFFF),
+            shape = RoundedCornerShape(16.dp)
+        )
     }
 
     if (showEqualizerSheet) {

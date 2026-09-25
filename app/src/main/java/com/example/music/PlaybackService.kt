@@ -9,6 +9,7 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import androidx.core.content.ContextCompat
+import android.media.audiofx.LoudnessEnhancer
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.exoplayer.ExoPlayer
@@ -24,6 +25,7 @@ import com.google.common.util.concurrent.ListenableFuture
 class PlaybackService : MediaSessionService() {
 
     private var mediaSession: MediaSession? = null
+    private var loudnessEnhancer: LoudnessEnhancer? = null
     private val closeCommand = SessionCommand(ACTION_CLOSE_APP, Bundle.EMPTY)
 
     private val sessionCallback = object : MediaSession.Callback {
@@ -79,6 +81,17 @@ class PlaybackService : MediaSessionService() {
             .build()
 
         EqualizerManager.init(this, player.audioSessionId)
+        
+        // 🟢 Initialize Hardware Volume Normalization
+        try {
+            loudnessEnhancer = LoudnessEnhancer(player.audioSessionId).apply {
+                // Target boost (in millibels, 250 mB = 2.5 dB leveling target)
+                setTargetGain(250)
+                enabled = true
+            }
+        } catch (e: Exception) {
+            Log.e("Sonora", "LoudnessEnhancer initialization error: ${e.message}")
+        }
 
         val closeButton = CommandButton.Builder()
             .setDisplayName("Close")
@@ -124,6 +137,12 @@ class PlaybackService : MediaSessionService() {
 
     private fun terminatePlayback() {
         EqualizerManager.release()
+        
+        // 🟢 Release LoudnessEnhancer
+        try {
+            loudnessEnhancer?.release()
+            loudnessEnhancer = null
+        } catch (_: Exception) {}
 
         mediaSession?.let { session ->
             try {
