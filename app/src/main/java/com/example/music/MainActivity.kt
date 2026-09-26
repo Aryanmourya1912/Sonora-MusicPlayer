@@ -727,35 +727,188 @@ suspend fun searchYouTubeMusic(query: String): Pair<List<FullTrackItem>, String?
     }
 }
 
+suspend fun fetchYouTubeAutomixRadio(
+    videoId: String
+): List<FullTrackItem> = withContext(Dispatchers.IO) {
+
+    val results = mutableListOf<FullTrackItem>()
+
+    if (videoId.isBlank()) {
+        return@withContext results
+    }
+
+    try {
+        val url = URL("https://music.youtube.com/youtubei/v1/next")
+        val conn = url.openConnection() as HttpURLConnection
+
+        conn.requestMethod = "POST"
+        conn.connectTimeout = 7000
+        conn.readTimeout = 7000
+        conn.doOutput = true
+        conn.setRequestProperty("Content-Type", "application/json")
+        conn.setRequestProperty(
+            "User-Agent",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        )
+        conn.setRequestProperty(
+            "Referer",
+            "https://music.youtube.com/"
+        )
+
+        val payload = JSONObject().apply {
+            put("videoId", videoId)
+            put("playlistId", "RDAMVM$videoId")
+
+            put("context", JSONObject().apply {
+                put("client", JSONObject().apply {
+                    put("clientName", "WEB_REMIX")
+                    put("clientVersion", "1.20231204.01.00")
+                    put("hl", "en")
+                    put("gl", "IN")
+                })
+            })
+        }
+
+        conn.outputStream.use {
+            it.write(payload.toString().toByteArray(Charsets.UTF_8))
+        }
+
+        if (conn.responseCode == HttpURLConnection.HTTP_OK) {
+
+            val respText =
+                conn.inputStream.bufferedReader().use { it.readText() }
+
+            val root = JSONObject(respText)
+
+            val renderers = mutableListOf<JSONObject>()
+
+            findRenderersRecursive(
+                root,
+                "playlistPanelVideoRenderer",
+                renderers
+            )
+
+            for (item in renderers) {
+
+                val vId = extractVideoIdFromRenderer(item)
+
+                if (vId.isBlank()) continue
+
+                val title = sanitizeText(
+                    item.optJSONObject("title")
+                        ?.optJSONArray("runs")
+                        ?.optJSONObject(0)
+                        ?.optString("text", "Unknown Track")
+                        ?: "Unknown Track"
+                )
+
+                var radioArtist = "Unknown Artist"
+
+                val bylineRuns =
+                    item.optJSONObject("longBylineText")
+                        ?.optJSONArray("runs")
+                        ?: item.optJSONObject("shortBylineText")
+                            ?.optJSONArray("runs")
+
+                if (bylineRuns != null) {
+                    for (r in 0 until bylineRuns.length()) {
+                        val t = bylineRuns
+                            .optJSONObject(r)
+                            ?.optString("text", "")
+                            ?.trim()
+                            ?: ""
+
+                        if (
+                            t.isNotBlank() &&
+                            t != "•" &&
+                            t != "Song" &&
+                            t != "Video"
+                        ) {
+                            radioArtist = t
+                            break
+                        }
+                    }
+                }
+
+                val duration =
+                    item.optJSONObject("lengthText")
+                        ?.optJSONArray("runs")
+                        ?.optJSONObject(0)
+                        ?.optString("text", "")
+                        ?: ""
+
+                val thumbArray =
+                    item.optJSONObject("thumbnail")
+                        ?.optJSONArray("thumbnails")
+
+                val artworkUrl =
+                    if (thumbArray != null && thumbArray.length() > 0) {
+                        thumbArray
+                            .getJSONObject(thumbArray.length() - 1)
+                            .optString("url", "")
+                    } else {
+                        ""
+                    }
+
+                results.add(
+                    FullTrackItem(
+                        id = vId,
+                        title = title,
+                        artist = radioArtist,
+                        audioUrl = "",
+                        artworkUrl = artworkUrl,
+                        durationFormatted = duration
+                    )
+                )
+            }
+        }
+
+    } catch (e: Exception) {
+        e.printStackTrace()
+    }
+
+    results
+}
+
 // ---------------------------------------------------------------------------
 // Search Suggestions & Artist Data Fetchers
 // ---------------------------------------------------------------------------
 
-suspend fun fetchSearchSuggestions(query: String): List<String> = withContext(Dispatchers.IO) {
-    if (query.trim().isBlank()) return@withContext emptyList()
-    try {
-        val encoded = URLEncoder.encode(query.trim(), "UTF-8")
-        val endpoint = "https://suggestqueries.google.com/complete/search?client=firefox&ds=yt&q=$encoded"
-        val conn = (URL(endpoint).openConnection() as HttpURLConnection).apply {
-            connectTimeout = 3000
-            readTimeout = 3000
-            setRequestProperty("User-Agent", "Mozilla/5.0")
-        }
-        if (conn.responseCode == HttpURLConnection.HTTP_OK) {
-            val resp = conn.inputStream.bufferedReader().use { it.readText() }
-            val root = JSONArray(resp)
-            val suggestionsArray = root.optJSONArray(1)
-            if (suggestionsArray != null) {
-                val list = mutableListOf()
-                for (i in 0 until suggestionsArray.length()) {
-                    list.add(suggestionsArray.getString(i))
-                }
-                return@withContext list
+suspend fun fetchSearchSuggestions(query: String): List<String> =
+    withContext<List<String>>(Dispatchers.IO) {
+        if (query.trim().isBlank()) return@withContext emptyList()
+
+        try {
+            val encoded = URLEncoder.encode(query.trim(), "UTF-8")
+            val endpoint =
+                "https://suggestqueries.google.com/complete/search?client=firefox&ds=yt&q=$encoded"
+
+            val conn = (URL(endpoint).openConnection() as HttpURLConnection).apply {
+                connectTimeout = 3000
+                readTimeout = 3000
+                setRequestProperty("User-Agent", "Mozilla/5.0")
             }
+
+            if (conn.responseCode == HttpURLConnection.HTTP_OK) {
+                val resp = conn.inputStream.bufferedReader().use { it.readText() }
+                val root = JSONArray(resp)
+                val suggestionsArray = root.optJSONArray(1)
+
+                if (suggestionsArray != null) {
+                    val list = mutableListOf<String>()
+
+                    for (i in 0 until suggestionsArray.length()) {
+                        list.add(suggestionsArray.getString(i))
+                    }
+
+                    return@withContext list
+                }
+            }
+        } catch (_: Exception) {
         }
-    } catch (_: Exception) {}
-    emptyList()
-}
+
+        emptyList()
+    }
 
 suspend fun fetchArtistCatalog(
     artistName: String
