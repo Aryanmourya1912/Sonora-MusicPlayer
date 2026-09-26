@@ -324,17 +324,20 @@ suspend fun extractArtworkPaletteColors(context: Context, imageUrl: String): Pai
     }
 
 // ---------------------------------------------------------------------------
-// Lyrics
+// Lyrics Parsers & Multi-Provider Engine
+// Priority: LrcLib -> Better Lyrics -> KuGou -> Paxsenix -> LyricsPlus -> Zemer
 // ---------------------------------------------------------------------------
 
-// Matches a leading LRC time tag such as [01:23.45] or [01:23.456] or [01:23]
-private val LRC_TIME_TAG = Regex("""\[(\d{1,3}):(\d{2})(?:[.:](\d{1,3}))?]""")
+private val LRC_TIME_TAG =
+    Regex("""\[(\d{1,3}):(\d{2})(?:[.:](\d{1,3}))?]""")
 
 fun parseLrcLyrics(lrcString: String): List<SyncedLyricLine> {
     val lines = mutableListOf<SyncedLyricLine>()
+
     lrcString.lines().forEach { rawLine ->
         val line = rawLine.trim()
         val tags = LRC_TIME_TAG.findAll(line).toList()
+
         if (tags.isEmpty()) return@forEach
 
         val text = line.substring(tags.last().range.last + 1).trim()
@@ -344,136 +347,830 @@ fun parseLrcLyrics(lrcString: String): List<SyncedLyricLine> {
             val min = tag.groupValues[1].toLongOrNull() ?: 0L
             val sec = tag.groupValues[2].toLongOrNull() ?: 0L
             val fraction = tag.groupValues[3]
+
             val ms = when (fraction.length) {
                 0 -> 0L
                 1 -> (fraction.toLongOrNull() ?: 0L) * 100L
                 2 -> (fraction.toLongOrNull() ?: 0L) * 10L
                 else -> fraction.take(3).toLongOrNull() ?: 0L
             }
-            lines.add(SyncedLyricLine(timeMs = (min * 60 + sec) * 1000 + ms, text = text))
+
+            lines.add(
+                SyncedLyricLine(
+                    timeMs = (min * 60 + sec) * 1000L + ms,
+                    text = text
+                )
+            )
         }
     }
+
     return lines.sortedBy { it.timeMs }
 }
 
-fun convertPlainLyricsToTimed(plainText: String, durationSec: Int): List<SyncedLyricLine> {
+fun parseTtmlTimestamp(tag: String): Long {
+    val clean = tag.trim().removeSuffix("s")
+
+    if (clean.contains(":")) {
+        val parts = clean.split(":")
+
+        if (parts.size == 2) {
+            val min = parts[0].toLongOrNull() ?: 0L
+            val secParts = parts[1].split(".")
+
+            val sec = secParts[0].toLongOrNull() ?: 0L
+
+            val ms = if (secParts.size > 1) {
+                secParts[1]
+                    .padEnd(3, '0')
+                    .take(3)
+                    .toLongOrNull() ?: 0L
+            } else {
+                0L
+            }
+
+            return (min * 60L + sec) * 1000L + ms
+        }
+
+        if (parts.size == 3) {
+            val hr = parts[0].toLongOrNull() ?: 0L
+            val min = parts[1].toLongOrNull() ?: 0L
+
+            val secParts = parts[2].split(".")
+            val sec = secParts[0].toLongOrNull() ?: 0L
+
+            val ms = if (secParts.size > 1) {
+                secParts[1]
+                    .padEnd(3, '0')
+                    .take(3)
+                    .toLongOrNull() ?: 0L
+            } else {
+                0L
+            }
+
+            return ((hr * 3600L) + (min * 60L) + sec) * 1000L + ms
+        }
+    } else {
+        val secs = clean.toDoubleOrNull() ?: return 0L
+        return (secs * 1000.0).toLong()
+    }
+
+    return 0L
+}
+
+fun parseTtmlLyrics(ttml: String): List<SyncedLyricLine> {
+    val lines = mutableListOf<SyncedLyricLine>()
+
+    val pRegex = Regex(
+        """<[^>]*begin=["']([^"']+)["'][^>]*>(.*?)</[^>]+>""",
+        RegexOption.DOT_MATCHES_ALL
+    )
+
+    for (match in pRegex.findAll(ttml)) {
+        val begin = match.groupValues[1]
+        val rawText = match.groupValues[2]
+
+        val cleanText = sanitizeText(
+            rawText.replace(Regex("<[^>]+>"), "")
+        ).trim()
+
+        if (cleanText.isNotBlank()) {
+            val timeMs = parseTtmlTimestamp(begin)
+
+            lines.add(
+                SyncedLyricLine(
+                    timeMs = timeMs,
+                    text = cleanText
+                )
+            )
+        }
+    }
+
+    return lines.sortedBy { it.timeMs }
+}
+
+fun parseJsonLyricLines(array: JSONArray): List<SyncedLyricLine> {
+    val lines = mutableListOf<SyncedLyricLine>()
+
+    for (i in 0 until array.length()) {
+        val item = array.optJSONObject(i) ?: continue
+
+        val words = item.optStringOrEmpty("words").ifEmpty {
+            item.optStringOrEmpty("text").ifEmpty {
+                item.optStringOrEmpty("line")
+            }
+        }
+
+        if (words.isBlank()) continue
+
+        var timeMs = item.optLong("timeMs", -1L)
+
+        if (timeMs < 0) {
+            val time = item.optLong("time", -1L)
+            timeMs = if (time >= 0) time else -1L
+        }
+
+        if (timeMs < 0) {
+            val tag = item.optStringOrEmpty("timeTag")
+
+            if (tag.isNotBlank()) {
+                val parsed = parseLrcLyrics("[$tag]$words")
+
+                if (parsed.isNotEmpty()) {
+                    lines.addAll(parsed)
+                    continue
+                }
+            }
+        }
+
+        if (timeMs >= 0) {
+            lines.add(
+                SyncedLyricLine(
+                    timeMs = timeMs,
+                    text = sanitizeText(words)
+                )
+            )
+        }
+    }
+
+    return lines.sortedBy { it.timeMs }
+}
+
+fun convertPlainLyricsToTimed(
+    plainText: String,
+    durationSec: Int
+): List<SyncedLyricLine> {
+
     val cleanLines = plainText.lines()
         .map { it.trim() }
-        .filter { it.isNotBlank() && !it.startsWith("[") }
+        .filter {
+            it.isNotBlank() && !it.startsWith("[")
+        }
+
     if (cleanLines.isEmpty()) return emptyList()
-    val totalMs = if (durationSec > 10) durationSec * 1000L else cleanLines.size * 3500L
+
+    val totalMs =
+        if (durationSec > 10) {
+            durationSec * 1000L
+        } else {
+            cleanLines.size * 3500L
+        }
+
     val intervalMs = totalMs / cleanLines.size
 
     return cleanLines.mapIndexed { index, text ->
-        SyncedLyricLine(timeMs = index * intervalMs, text = text)
+        SyncedLyricLine(
+            timeMs = index * intervalMs,
+            text = text
+        )
     }
 }
 
-// org.json returns the *string* "null" from optString() for JSON null, so guard it.
 private fun JSONObject.optStringOrEmpty(key: String): String =
     if (isNull(key)) "" else optString(key, "")
+
+// ---------------------------------------------------------------------------
+// Multi-Provider Chain Dispatcher
+// ---------------------------------------------------------------------------
 
 suspend fun fetchLyricsFromPriorityProviders(
     songTitle: String,
     artistName: String,
     durationSeconds: Int = 0
 ): Pair<String, List<SyncedLyricLine>> = withContext(Dispatchers.IO) {
+
     val cleanTitle = cleanSongTitle(songTitle)
+
     val artistClean =
-        if (artistName.equals("Song", ignoreCase = true) || artistName.equals("Unknown Artist", ignoreCase = true)) ""
-        else cleanArtist(artistName)
+        if (
+            artistName.equals("Song", ignoreCase = true) ||
+            artistName.equals("Unknown Artist", ignoreCase = true)
+        ) {
+            ""
+        } else {
+            cleanArtist(artistName)
+        }
 
-    try {
-        val result = fetchFromLrcLib(cleanTitle, artistClean, durationSeconds)
-        if (result.isNotEmpty()) return@withContext Pair("LrcLib", result)
-    } catch (e: Exception) {
+    val providers: List<Pair<String, suspend () -> List<SyncedLyricLine>>> =
+        listOf(
+            "LrcLib" to {
+                fetchFromLrcLib(
+                    cleanTitle,
+                    artistClean,
+                    durationSeconds
+                )
+            },
+
+            "Better Lyrics" to {
+                fetchFromBetterLyrics(
+                    cleanTitle,
+                    artistClean,
+                    durationSeconds
+                )
+            },
+
+            "KuGou" to {
+                fetchFromKuGou(
+                    cleanTitle,
+                    artistClean,
+                    durationSeconds
+                )
+            },
+
+            "Paxsenix" to {
+                fetchFromPaxsenix(
+                    cleanTitle,
+                    artistClean,
+                    durationSeconds
+                )
+            },
+
+            "LyricsPlus" to {
+                fetchFromLyricsPlus(
+                    cleanTitle,
+                    artistClean,
+                    durationSeconds
+                )
+            },
+
+            "Zemer" to {
+                fetchFromZemer(
+                    cleanTitle,
+                    artistClean,
+                    durationSeconds
+                )
+            }
+        )
+
+    for ((name, fetcher) in providers) {
+        try {
+            val result = fetcher()
+
+            if (result.isNotEmpty()) {
+                return@withContext Pair(name, result)
+            }
+        } catch (_: Exception) {
+            // Continue to the next provider.
+        }
     }
 
-    try {
-        val result = fetchFromKuGou(cleanTitle, artistClean, durationSeconds)
-        if (result.isNotEmpty()) return@withContext Pair("KuGou", result)
-    } catch (e: Exception) {
-    }
-
-    Pair("Sonora", emptyList<SyncedLyricLine>())
+    Pair("Sonora", emptyList())
 }
 
-private fun fetchFromLrcLib(title: String, artist: String, duration: Int): List<SyncedLyricLine> {
+// ---------------------------------------------------------------------------
+// 1. LrcLib
+// ---------------------------------------------------------------------------
+
+private suspend fun fetchFromLrcLib(
+    title: String,
+    artist: String,
+    duration: Int
+): List<SyncedLyricLine> {
+
     val queries = listOfNotNull(
         if (artist.isNotBlank()) "$title $artist" else null,
         title
     )
+
     for (q in queries) {
         try {
             val encodedQuery = URLEncoder.encode(q, "UTF-8")
-            val endpoint = "https://lrclib.net/api/search?q=$encodedQuery"
-            val conn = (URL(endpoint).openConnection() as HttpURLConnection).apply {
-                requestMethod = "GET"
-                connectTimeout = 4000
-                readTimeout = 4000
-                setRequestProperty("User-Agent", "SonoraMusicPlayer/1.0")
-            }
+            val endpoint =
+                "https://lrclib.net/api/search?q=$encodedQuery"
+
+            val conn =
+                (URL(endpoint).openConnection() as HttpURLConnection).apply {
+                    requestMethod = "GET"
+                    connectTimeout = 3500
+                    readTimeout = 3500
+                    setRequestProperty(
+                        "User-Agent",
+                        "SonoraMusicPlayer/1.0"
+                    )
+                }
 
             if (conn.responseCode == HttpURLConnection.HTTP_OK) {
-                val resp = conn.inputStream.bufferedReader().use { it.readText() }
+                val resp =
+                    conn.inputStream.bufferedReader().use {
+                        it.readText()
+                    }
+
                 val array = JSONArray(resp)
+
+                // Prefer synced lyrics.
                 for (i in 0 until array.length()) {
                     val item = array.getJSONObject(i)
-                    val synced = item.optStringOrEmpty("syncedLyrics")
+
+                    val synced =
+                        item.optStringOrEmpty("syncedLyrics")
+
                     if (synced.isNotBlank()) {
                         val parsed = parseLrcLyrics(synced)
-                        if (parsed.isNotEmpty()) return parsed
+
+                        if (parsed.isNotEmpty()) {
+                            return parsed
+                        }
                     }
                 }
+
+                // Fall back to plain lyrics.
                 for (i in 0 until array.length()) {
-                    val plain = array.getJSONObject(i).optStringOrEmpty("plainLyrics")
+                    val item = array.getJSONObject(i)
+
+                    val plain =
+                        item.optStringOrEmpty("plainLyrics")
+
                     if (plain.isNotBlank()) {
-                        return convertPlainLyricsToTimed(plain, duration)
+                        return convertPlainLyricsToTimed(
+                            plain,
+                            duration
+                        )
                     }
                 }
             }
-        } catch (e: Exception) {
+
+            conn.disconnect()
+        } catch (_: Exception) {
         }
     }
+
     return emptyList()
 }
 
-private fun fetchFromKuGou(title: String, artist: String, duration: Int): List<SyncedLyricLine> {
+// ---------------------------------------------------------------------------
+// 2. Better Lyrics
+// ---------------------------------------------------------------------------
+
+private suspend fun fetchFromBetterLyrics(
+    title: String,
+    artist: String,
+    duration: Int
+): List<SyncedLyricLine> {
+
     try {
-        val query = URLEncoder.encode("$title $artist".trim(), "UTF-8")
-        val searchUrl = "http://lyrics.kugou.com/search?ver=1&man=yes&client=pc&keyword=$query&duration=&hash="
-        val conn = (URL(searchUrl).openConnection() as HttpURLConnection).apply {
-            requestMethod = "GET"
-            connectTimeout = 3000
-            readTimeout = 3000
-        }
+        val encodedTitle =
+            URLEncoder.encode(title.trim(), "UTF-8")
+
+        val encodedArtist =
+            URLEncoder.encode(artist.trim(), "UTF-8")
+
+        val endpoint =
+            "https://lyrics-api.boidu.dev/getLyrics?s=$encodedTitle&a=$encodedArtist"
+
+        val conn =
+            (URL(endpoint).openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                connectTimeout = 3500
+                readTimeout = 3500
+                setRequestProperty(
+                    "User-Agent",
+                    "SonoraMusicPlayer/1.0"
+                )
+            }
+
         if (conn.responseCode == HttpURLConnection.HTTP_OK) {
-            val resp = conn.inputStream.bufferedReader().use { it.readText() }
-            val root = JSONObject(resp)
-            val candidates = root.optJSONArray("candidates")
-            if (candidates != null && candidates.length() > 0) {
-                val id = candidates.getJSONObject(0).optString("id")
-                val accesskey = candidates.getJSONObject(0).optString("accesskey")
-                val lrcUrl =
-                    "http://lyrics.kugou.com/download?ver=1&client=pc&id=$id&accesskey=$accesskey&fmt=lrc&charset=utf8"
-                val dlConn = (URL(lrcUrl).openConnection() as HttpURLConnection).apply {
-                    connectTimeout = 3000
-                    readTimeout = 3000
-                }
-                if (dlConn.responseCode == HttpURLConnection.HTTP_OK) {
-                    val dlResp = dlConn.inputStream.bufferedReader().use { it.readText() }
-                    val b64 = JSONObject(dlResp).optStringOrEmpty("content")
-                    if (b64.isNotBlank()) {
-                        val lrcText = String(Base64.decode(b64, Base64.DEFAULT), Charsets.UTF_8)
-                        val parsed = parseLrcLyrics(lrcText)
-                        if (parsed.isNotEmpty()) return parsed
-                        return convertPlainLyricsToTimed(lrcText, duration)
+            val resp =
+                conn.inputStream.bufferedReader()
+                    .use { it.readText() }
+                    .trim()
+
+            if (resp.startsWith("{")) {
+                val obj = JSONObject(resp)
+
+                val lyricsStr =
+                    obj.optStringOrEmpty("lyrics")
+                        .ifEmpty {
+                            obj.optStringOrEmpty("lrc")
+                        }
+
+                if (lyricsStr.isNotBlank()) {
+                    val parsed = parseLrcLyrics(lyricsStr)
+
+                    if (parsed.isNotEmpty()) {
+                        return parsed
+                    }
+
+                    // Some providers may return plain lyrics.
+                    if (!lyricsStr.contains("[00:") &&
+                        !lyricsStr.contains("[01:")
+                    ) {
+                        return convertPlainLyricsToTimed(
+                            lyricsStr,
+                            duration
+                        )
                     }
                 }
             }
         }
-    } catch (e: Exception) {
+
+        conn.disconnect()
+    } catch (_: Exception) {
     }
+
+    return emptyList()
+}
+
+// ---------------------------------------------------------------------------
+// 3. KuGou
+// ---------------------------------------------------------------------------
+
+private suspend fun fetchFromKuGou(
+    title: String,
+    artist: String,
+    duration: Int
+): List<SyncedLyricLine> {
+
+    try {
+        val query =
+            URLEncoder.encode(
+                "$title $artist".trim(),
+                "UTF-8"
+            )
+
+        val searchUrl =
+            "http://lyrics.kugou.com/search" +
+                "?ver=1&man=yes&client=pc" +
+                "&keyword=$query&duration=&hash="
+
+        val conn =
+            (URL(searchUrl).openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                connectTimeout = 3500
+                readTimeout = 3500
+            }
+
+        if (conn.responseCode == HttpURLConnection.HTTP_OK) {
+            val resp =
+                conn.inputStream.bufferedReader().use {
+                    it.readText()
+                }
+
+            val root = JSONObject(resp)
+            val candidates = root.optJSONArray("candidates")
+
+            if (candidates != null && candidates.length() > 0) {
+                val candidate = candidates.getJSONObject(0)
+
+                val id =
+                    candidate.optString("id")
+
+                val accesskey =
+                    candidate.optString("accesskey")
+
+                val lrcUrl =
+                    "http://lyrics.kugou.com/download" +
+                        "?ver=1&client=pc" +
+                        "&id=$id" +
+                        "&accesskey=$accesskey" +
+                        "&fmt=lrc&charset=utf8"
+
+                val dlConn =
+                    (URL(lrcUrl).openConnection() as HttpURLConnection).apply {
+                        connectTimeout = 3500
+                        readTimeout = 3500
+                    }
+
+                if (dlConn.responseCode == HttpURLConnection.HTTP_OK) {
+                    val dlResp =
+                        dlConn.inputStream.bufferedReader().use {
+                            it.readText()
+                        }
+
+                    val b64 =
+                        JSONObject(dlResp)
+                            .optStringOrEmpty("content")
+
+                    if (b64.isNotBlank()) {
+                        val lrcText =
+                            String(
+                                Base64.decode(
+                                    b64,
+                                    Base64.DEFAULT
+                                ),
+                                Charsets.UTF_8
+                            )
+
+                        val parsed = parseLrcLyrics(lrcText)
+
+                        if (parsed.isNotEmpty()) {
+                            return parsed
+                        }
+
+                        return convertPlainLyricsToTimed(
+                            lrcText,
+                            duration
+                        )
+                    }
+                }
+
+                dlConn.disconnect()
+            }
+        }
+
+        conn.disconnect()
+    } catch (_: Exception) {
+    }
+
+    return emptyList()
+}
+
+// ---------------------------------------------------------------------------
+// 4. Paxsenix
+// ---------------------------------------------------------------------------
+
+private suspend fun fetchFromPaxsenix(
+    title: String,
+    artist: String,
+    duration: Int
+): List<SyncedLyricLine> {
+
+    val encodedTitle =
+        URLEncoder.encode(title.trim(), "UTF-8")
+
+    val encodedArtist =
+        URLEncoder.encode(artist.trim(), "UTF-8")
+
+    val encodedQuery =
+        URLEncoder.encode(
+            "$title $artist".trim(),
+            "UTF-8"
+        )
+
+    val endpoints = listOf(
+        "https://lyrics.paxsenix.org/lyrics" +
+            "?title=$encodedTitle&artist=$encodedArtist",
+
+        "https://api.paxsenix.biz.id/lyrics" +
+            "?q=$encodedQuery"
+    )
+
+    for (endpoint in endpoints) {
+        try {
+            val conn =
+                (URL(endpoint).openConnection() as HttpURLConnection).apply {
+                    requestMethod = "GET"
+                    connectTimeout = 3500
+                    readTimeout = 3500
+                    setRequestProperty(
+                        "User-Agent",
+                        "SonoraMusicPlayer/1.0"
+                    )
+                }
+
+            if (conn.responseCode == HttpURLConnection.HTTP_OK) {
+                val resp =
+                    conn.inputStream.bufferedReader()
+                        .use { it.readText() }
+                        .trim()
+
+                if (resp.startsWith("{")) {
+                    val root = JSONObject(resp)
+
+                    val dataObj =
+                        root.optJSONObject("data") ?: root
+
+                    val lrc =
+                        dataObj.optStringOrEmpty("lyrics")
+                            .ifEmpty {
+                                dataObj.optStringOrEmpty("lrc")
+                            }
+
+                    if (lrc.isNotBlank()) {
+                        val parsed = parseLrcLyrics(lrc)
+
+                        if (parsed.isNotEmpty()) {
+                            return parsed
+                        }
+                    }
+
+                    val linesArr =
+                        dataObj.optJSONArray("lines")
+
+                    if (linesArr != null) {
+                        val parsed =
+                            parseJsonLyricLines(linesArr)
+
+                        if (parsed.isNotEmpty()) {
+                            return parsed
+                        }
+                    }
+                } else if (
+                    resp.contains("[00:") ||
+                    resp.contains("[01:")
+                ) {
+                    val parsed = parseLrcLyrics(resp)
+
+                    if (parsed.isNotEmpty()) {
+                        return parsed
+                    }
+                }
+            }
+
+            conn.disconnect()
+        } catch (_: Exception) {
+        }
+    }
+
+    return emptyList()
+}
+
+// ---------------------------------------------------------------------------
+// 5. LyricsPlus
+// ---------------------------------------------------------------------------
+
+private suspend fun fetchFromLyricsPlus(
+    title: String,
+    artist: String,
+    duration: Int
+): List<SyncedLyricLine> {
+
+    try {
+        val qTitle =
+            URLEncoder.encode(title.trim(), "UTF-8")
+
+        val qArtist =
+            URLEncoder.encode(artist.trim(), "UTF-8")
+
+        val endpoint =
+            "https://lyricsplus.prjktla.my.id/v2/lyrics" +
+                "?title=$qTitle&artist=$qArtist"
+
+        val conn =
+            (URL(endpoint).openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                connectTimeout = 3500
+                readTimeout = 3500
+                setRequestProperty(
+                    "User-Agent",
+                    "SonoraMusicPlayer/1.0"
+                )
+            }
+
+        if (conn.responseCode == HttpURLConnection.HTTP_OK) {
+            val resp =
+                conn.inputStream.bufferedReader()
+                    .use { it.readText() }
+                    .trim()
+
+            if (resp.startsWith("{")) {
+                val root = JSONObject(resp)
+
+                val data =
+                    root.optJSONObject("data") ?: root
+
+                val lrc =
+                    data.optStringOrEmpty("lyrics")
+                        .ifEmpty {
+                            data.optStringOrEmpty("lrc")
+                        }
+
+                if (lrc.isNotBlank()) {
+                    val parsed = parseLrcLyrics(lrc)
+
+                    if (parsed.isNotEmpty()) {
+                        return parsed
+                    }
+
+                    return convertPlainLyricsToTimed(
+                        lrc,
+                        duration
+                    )
+                }
+
+                val lines =
+                    data.optJSONArray("lines")
+
+                if (lines != null) {
+                    val parsed =
+                        parseJsonLyricLines(lines)
+
+                    if (parsed.isNotEmpty()) {
+                        return parsed
+                    }
+                }
+            } else if (
+                resp.contains("[00:") ||
+                resp.contains("[01:")
+            ) {
+                return parseLrcLyrics(resp)
+            }
+        }
+
+        conn.disconnect()
+    } catch (_: Exception) {
+    }
+
+    return emptyList()
+}
+
+// ---------------------------------------------------------------------------
+// 6. Zemer
+// ---------------------------------------------------------------------------
+
+private suspend fun fetchFromZemer(
+    title: String,
+    artist: String,
+    duration: Int
+): List<SyncedLyricLine> {
+
+    val encodedTitle =
+        URLEncoder.encode(title.trim(), "UTF-8")
+
+    val encodedArtist =
+        URLEncoder.encode(artist.trim(), "UTF-8")
+
+    val encodedQuery =
+        URLEncoder.encode(
+            "$title $artist".trim(),
+            "UTF-8"
+        )
+
+    val endpoints = listOf(
+        "https://api.zemer.app/lyrics" +
+            "?title=$encodedTitle&artist=$encodedArtist",
+
+        "https://zemer.hamafitz.com/api/lyrics" +
+            "?q=$encodedQuery"
+    )
+
+    for (endpoint in endpoints) {
+        try {
+            val conn =
+                (URL(endpoint).openConnection() as HttpURLConnection).apply {
+                    requestMethod = "GET"
+                    connectTimeout = 3500
+                    readTimeout = 3500
+                    setRequestProperty(
+                        "User-Agent",
+                        "SonoraMusicPlayer/1.0"
+                    )
+                }
+
+            if (conn.responseCode == HttpURLConnection.HTTP_OK) {
+                val resp =
+                    conn.inputStream.bufferedReader()
+                        .use { it.readText() }
+                        .trim()
+
+                if (resp.startsWith("{")) {
+                    val root = JSONObject(resp)
+
+                    val lyricsStr =
+                        root.optStringOrEmpty("lyrics")
+                            .ifEmpty {
+                                root.optStringOrEmpty("lrc")
+                            }
+                            .ifEmpty {
+                                root.optStringOrEmpty("syncedLyrics")
+                            }
+
+                    if (lyricsStr.isNotBlank()) {
+                        val parsed =
+                            parseLrcLyrics(lyricsStr)
+
+                        if (parsed.isNotEmpty()) {
+                            return parsed
+                        }
+                    }
+
+                    val lines =
+                        root.optJSONArray("lines")
+
+                    if (lines != null) {
+                        val parsed =
+                            parseJsonLyricLines(lines)
+
+                        if (parsed.isNotEmpty()) {
+                            return parsed
+                        }
+                    }
+
+                    val plain =
+                        root.optStringOrEmpty("plainLyrics")
+
+                    if (plain.isNotBlank()) {
+                        return convertPlainLyricsToTimed(
+                            plain,
+                            duration
+                        )
+                    }
+                } else if (
+                    resp.contains("[00:") ||
+                    resp.contains("[01:")
+                ) {
+                    val parsed =
+                        parseLrcLyrics(resp)
+
+                    if (parsed.isNotEmpty()) {
+                        return parsed
+                    }
+                }
+            }
+
+            conn.disconnect()
+        } catch (_: Exception) {
+        }
+    }
+
     return emptyList()
 }
 
