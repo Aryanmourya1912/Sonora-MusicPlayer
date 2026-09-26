@@ -681,7 +681,17 @@ suspend fun searchYouTubeMusic(query: String): Pair<List<FullTrackItem>, String?
             val flexCols = item.optJSONArray("flexColumns") ?: continue
             val col0Runs = flexCols.optJSONObject(0)?.optJSONObject("musicResponsiveListItemFlexColumnRenderer")
                 ?.optJSONObject("text")?.optJSONArray("runs")
-            val title = sanitizeText(col0Runs?.optJSONObject(0)?.optString("text", "Unknown Track") ?: "Unknown Track")
+            val title = sanitizeText(
+                if (col0Runs != null && col0Runs.length() > 0) {
+                    buildString {
+                        for (i in 0 until col0Runs.length()) {
+                            append(col0Runs.optJSONObject(i)?.optString("text", "") ?: "")
+                        }
+                    }.trim()
+                } else {
+                    "Unknown Track"
+                }
+            )
 
             val col1Runs = flexCols.optJSONObject(1)?.optJSONObject("musicResponsiveListItemFlexColumnRenderer")
                 ?.optJSONObject("text")?.optJSONArray("runs")
@@ -800,8 +810,17 @@ suspend fun fetchYouTubeAutomixRadio(
                 val title = sanitizeText(
                     item.optJSONObject("title")
                         ?.optJSONArray("runs")
-                        ?.optJSONObject(0)
-                        ?.optString("text", "Unknown Track")
+                        ?.let { runs ->
+                            if (runs.length() > 0) {
+                                buildString {
+                                    for (i in 0 until runs.length()) {
+                                        append(runs.optJSONObject(i)?.optString("text", "") ?: "")
+                                    }
+                                }.trim()
+                            } else {
+                                "Unknown Track"
+                            }
+                        }
                         ?: "Unknown Track"
                 )
 
@@ -1381,39 +1400,185 @@ fun cleanArtist(rawArtist: String): String {
         .replace(Regex("\\s+"), " ")
 }
 
-fun areTracksSimilar(trackA: FullTrackItem, trackB: FullTrackItem): Boolean {
-    if (trackA.id.isNotBlank() && trackA.id == trackB.id) return true
+private fun parseDurationSeconds(duration: String): Int {
+    if (duration.isBlank()) return 0
 
-    val titleA = cleanSongTitle(trackA.title)
-    val titleB = cleanSongTitle(trackB.title)
-    if (titleA.isBlank() || titleB.isBlank()) return false
+    val parts = duration.trim().split(":")
+
+    return try {
+        when (parts.size) {
+            2 -> {
+                val minutes = parts[0].toInt()
+                val seconds = parts[1].toInt()
+                minutes * 60 + seconds
+            }
+
+            3 -> {
+                val hours = parts[0].toInt()
+                val minutes = parts[1].toInt()
+                val seconds = parts[2].toInt()
+                hours * 3600 + minutes * 60 + seconds
+            }
+
+            else -> 0
+        }
+    } catch (_: Exception) {
+        0
+    }
+}
+
+/**
+ * Normalizes a title ONLY for duplicate detection.
+ *
+ * IMPORTANT:
+ * This does NOT modify the actual track.title.
+ * The original title remains available for display.
+ */
+private fun normalizeTitleForDuplicate(rawTitle: String): String {
+    var title = sanitizeText(rawTitle).lowercase(Locale.ROOT)
+
+    // Remove only known upload/version noise.
+    title = title.replace(
+        Regex(
+            """\b(official\s+(audio|video)|official\s+music\s+video|"
+                    + "lyrics?\s+video|lyric\s+video|music\s+video|"
+                    + "full\s+video|full\s+audio|visualizer|"
+                    + "slowed\s*(\+|and)?\s*reverb|"
+                    + "sped\s*up|speed\s*up|"
+                    + "remastered|remaster|acoustic|"
+                    + "instrumental|lofi|live\s+version|"
+                    + "official)\b""",
+            RegexOption.IGNORE_CASE
+        ),
+        " "
+    )
+
+    // Remove bracketed content ONLY when it is clearly version/noise text.
+    title = title.replace(
+        Regex(
+            """[\(\[\{][^)\]}]*(official|audio|video|lyrics?|"
+                    + "remix|slowed|reverb|acoustic|live|"
+                    + "sped\s*up|speed\s*up|remaster(ed)?|"
+                    + "instrumental|lofi|visualizer)[^)\]}]*[\)\]\}]""",
+            RegexOption.IGNORE_CASE
+        ),
+        " "
+    )
+
+    // Remove "feat." / "ft." from title identity.
+    title = title.replace(
+        Regex("""\b(feat|ft)\.?\s+.*$""", RegexOption.IGNORE_CASE),
+        " "
+    )
+
+    // Punctuation is irrelevant for identity.
+    title = title.replace(
+        Regex("""[^\p{L}\p{N}\s]"""),
+        " "
+    )
+
+    return title
+        .trim()
+        .replace(Regex("""\s+"""), " ")
+}
+
+/**
+ * Determines whether two tracks represent the same song.
+ *
+ * Priority:
+ * 1. Exact YouTube video ID = definitely same upload.
+ * 2. Normalized title + artist = same song candidate.
+ * 3. Duration is used to reject obviously different recordings.
+ *
+ * Deliberately DOES NOT use title.contains(otherTitle).
+ */
+fun areTracksSimilar(
+    trackA: FullTrackItem,
+    trackB: FullTrackItem
+): Boolean {
+
+    // The strongest possible match.
+    if (
+        trackA.id.isNotBlank() &&
+        trackB.id.isNotBlank() &&
+        trackA.id == trackB.id
+    ) {
+        return true
+    }
+
+    val titleA = normalizeTitleForDuplicate(trackA.title)
+    val titleB = normalizeTitleForDuplicate(trackB.title)
+
+    if (titleA.isBlank() || titleB.isBlank()) {
+        return false
+    }
+
+    // Different complete titles = different songs.
+    if (titleA != titleB) {
+        return false
+    }
 
     val artistA = cleanArtist(trackA.artist)
     val artistB = cleanArtist(trackB.artist)
-    val artistsMatch = artistA.isBlank() || artistB.isBlank() || artistA == artistB ||
-            artistA.contains(artistB) || artistB.contains(artistA)
 
-    if (titleA == titleB && artistsMatch) return true
+    val unknownArtistA =
+        artistA.isBlank() ||
+        artistA.equals("unknown artist", ignoreCase = true) ||
+        artistA.equals("song", ignoreCase = true)
 
-    if (titleA.length >= 5 && titleB.length >= 5) {
-        if ((titleA.contains(titleB) || titleB.contains(titleA)) && artistsMatch) {
-            return true
+    val unknownArtistB =
+        artistB.isBlank() ||
+        artistB.equals("unknown artist", ignoreCase = true) ||
+        artistB.equals("song", ignoreCase = true)
+
+    // If both artists are known, require an actual artist match.
+    if (!unknownArtistA && !unknownArtistB && artistA != artistB) {
+        return false
+    }
+
+    // If both durations are available, reject clearly different recordings.
+    val durationA = parseDurationSeconds(trackA.durationFormatted)
+    val durationB = parseDurationSeconds(trackB.durationFormatted)
+
+    if (durationA > 0 && durationB > 0) {
+        val difference = kotlin.math.abs(durationA - durationB)
+
+        // Small differences are normal between uploads.
+        // Large differences usually indicate a different recording/version.
+        if (difference > 12) {
+            return false
         }
     }
-    return false
+
+    return true
 }
 
-fun filterSimilarTracks(incoming: List<FullTrackItem>, existingQueue: List<FullTrackItem>): List<FullTrackItem> {
+/**
+ * Removes duplicates from incoming tracks while also checking
+ * everything that is already in the queue.
+ */
+fun filterSimilarTracks(
+    incoming: List<FullTrackItem>,
+    existingQueue: List<FullTrackItem>
+): List<FullTrackItem> {
+
     val result = mutableListOf<FullTrackItem>()
+
+    // Existing queue is part of the duplicate pool.
     val pool = existingQueue.toMutableList()
 
     for (candidate in incoming) {
-        val isDuplicate = pool.any { existing -> areTracksSimilar(candidate, existing) || candidate.id == existing.id }
-        if (!isDuplicate) {
+
+        val duplicate = pool.any { existing ->
+            areTracksSimilar(candidate, existing)
+        }
+
+        if (!duplicate) {
             result.add(candidate)
             pool.add(candidate)
         }
     }
+
     return result
 }
 
@@ -2022,8 +2187,14 @@ fun SwipeablePlaylistTrackRow(
 @Composable
 fun AboutDeveloperSheet(
     isDarkTheme: Boolean,
+    gaplessEnabled: Boolean,
+    onToggleGapless: (Boolean) -> Unit,
+    volumeNormalizationEnabled: Boolean,
+    onToggleNormalization: (Boolean) -> Unit,
+    crossfadeSeconds: Int,
+    onCrossfadeChange: (Int) -> Unit,
     onDismiss: () -> Unit
-) {
+){
     val context = LocalContext.current
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
@@ -2176,6 +2347,114 @@ fun AboutDeveloperSheet(
                             )
                             Spacer(modifier = Modifier.width(8.dp))
                             Text("Share Sonora", fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                        }
+                    }
+                }
+            }
+            
+            // 🟢 Settings Section
+            item {
+                Text(
+                    text = "Settings",
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = primaryText,
+                    modifier = Modifier.padding(top = 4.dp, bottom = 4.dp)
+                )
+            }
+
+            item {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(16.dp),
+                    colors = CardDefaults.cardColors(containerColor = cardBg)
+                ) {
+                    Column(
+                        modifier = Modifier.padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(16.dp)
+                    ) {
+                        Text(
+                            text = "Audio Transitions & Polish",
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = accentPurple
+                        )
+
+                        // Gapless Pre-buffering
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "Gapless Pre-buffering",
+                                    fontWeight = FontWeight.SemiBold,
+                                    fontSize = 13.sp,
+                                    color = primaryText
+                                )
+                                Text(
+                                    text = "Pre-loads next track to eliminate pauses between songs.",
+                                    fontSize = 11.sp,
+                                    color = secondaryText
+                                )
+                            }
+                            Switch(
+                                checked = gaplessEnabled,
+                                onCheckedChange = onToggleGapless
+                            )
+                        }
+
+                        // Volume Normalization
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "Volume Normalization",
+                                    fontWeight = FontWeight.SemiBold,
+                                    fontSize = 13.sp,
+                                    color = primaryText
+                                )
+                                Text(
+                                    text = "Balances track gain to prevent sudden loudness jumps.",
+                                    fontSize = 11.sp,
+                                    color = secondaryText
+                                )
+                            }
+                            Switch(
+                                checked = volumeNormalizationEnabled,
+                                onCheckedChange = onToggleNormalization
+                            )
+                        }
+
+                        // Crossfade Slider
+                        Column {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text(
+                                    text = "Crossfade",
+                                    fontWeight = FontWeight.SemiBold,
+                                    fontSize = 13.sp,
+                                    color = primaryText
+                                )
+                                Text(
+                                    text = if (crossfadeSeconds == 0) "Off" else "${crossfadeSeconds}s",
+                                    fontWeight = FontWeight.Bold,
+                                    color = accentPurple,
+                                    fontSize = 13.sp
+                                )
+                            }
+                            Slider(
+                                value = crossfadeSeconds.toFloat(),
+                                onValueChange = { onCrossfadeChange(it.roundToInt()) },
+                                valueRange = 0f..10f,
+                                steps = 9
+                            )
                         }
                     }
                 }
@@ -2460,7 +2739,6 @@ fun SonoraPlayerScreen(
     var failedDownloadTracks by remember { mutableStateOf<Map<String, FullTrackItem>>(emptyMap()) }
     var showClearAllDownloadsDialog by remember { mutableStateOf(false) }
     var showDeveloperProfileDialog by remember { mutableStateOf(false) }
-    var showAudioTransitionsDialog by remember { mutableStateOf(false) }
     var crossfadeSeconds by remember {
         mutableIntStateOf(prefs.getInt(KEY_CROSSFADE_SEC, 3)) // Default: 3s
     }
@@ -3129,7 +3407,10 @@ fun SonoraPlayerScreen(
         // 2. Reject if the song is already currently playing
         if (currentIndex != C.INDEX_UNSET && currentIndex < ctrl.mediaItemCount) {
             val currentItem = ctrl.getMediaItemAt(currentIndex)
-            if (currentItem.mediaId == track.id) {
+            if (
+                currentItem.mediaId == track.id ||
+                areTracksSimilar(track, mediaItemToTrack(currentItem))
+            ) {
                 Toast.makeText(context, "\"${track.title}\" is already playing", Toast.LENGTH_SHORT).show()
                 return
             }
@@ -3138,7 +3419,10 @@ fun SonoraPlayerScreen(
         // 3. Reject if the song is ALREADY the immediate next track
         if (nextIndex < ctrl.mediaItemCount) {
             val nextItem = ctrl.getMediaItemAt(nextIndex)
-            if (nextItem.mediaId == track.id) {
+            if (
+                nextItem.mediaId == track.id ||
+                areTracksSimilar(track, mediaItemToTrack(nextItem))
+            ) {
                 Toast.makeText(context, "\"${track.title}\" is already next in queue", Toast.LENGTH_SHORT).show()
                 return
             }
@@ -3146,7 +3430,10 @@ fun SonoraPlayerScreen(
 
         // 4. If the track already exists further down in the queue, move it instead of duplicating
         val existingIndex = (nextIndex until ctrl.mediaItemCount).firstOrNull { idx ->
-            ctrl.getMediaItemAt(idx).mediaId == track.id
+            val existingTrack = mediaItemToTrack(ctrl.getMediaItemAt(idx))
+
+            existingTrack.id == track.id ||
+                areTracksSimilar(track, existingTrack)
         }
 
         if (existingIndex != null) {
@@ -3181,7 +3468,10 @@ fun SonoraPlayerScreen(
                     }
 
                     val isAlreadyPresent = (0 until ctrl.mediaItemCount).any { idx ->
-                        ctrl.getMediaItemAt(idx).mediaId == track.id
+                        val existingTrack = mediaItemToTrack(ctrl.getMediaItemAt(idx))
+
+                        existingTrack.id == track.id ||
+                            areTracksSimilar(track, existingTrack)
                     }
 
                     if (!isAlreadyPresent) {
@@ -3211,7 +3501,12 @@ fun SonoraPlayerScreen(
             coroutineScope.launch {
                 dao.insertSearchQuery(SearchHistoryEntity(query = queryToSearch.trim()))
                 val (results, _) = searchYouTubeMusic(queryToSearch)
-                searchResults = results
+
+                searchResults = filterSimilarTracks(
+                    incoming = results,
+                    existingQueue = emptyList()
+                )
+
                 isSearching = false
             }
         }
@@ -5674,22 +5969,6 @@ fun SonoraPlayerScreen(
                                 modifier = Modifier
                                     .size(46.dp)
                                     .clip(RoundedCornerShape(12.dp))
-                                    .background(if (crossfadeSeconds > 0 || gaplessEnabled) Color(0xFF7C4DFF) else Color(0x30FFFFFF))
-                                    .clickable { showAudioTransitionsDialog = true },
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Rounded.GraphicEq,
-                                    contentDescription = "Audio Transitions",
-                                    tint = Color.White,
-                                    modifier = Modifier.size(18.dp)
-                                )
-                            }
-
-                            Box(
-                                modifier = Modifier
-                                    .size(46.dp)
-                                    .clip(RoundedCornerShape(12.dp))
                                     .background(if (isRepeatActive) Color(0xFF7C4DFF) else Color(0x30FFFFFF))
                                     .clickable {
                                         isRepeatActive = !isRepeatActive
@@ -5732,116 +6011,6 @@ fun SonoraPlayerScreen(
         }
     }
     
-    if (showAudioTransitionsDialog) {
-        AlertDialog(
-            onDismissRequest = { showAudioTransitionsDialog = false },
-            title = {
-                Text(
-                    text = "Audio Transitions & Polish",
-                    fontWeight = FontWeight.Bold,
-                    color = if (isDarkTheme) Color.White else Color(0xFF0F172A)
-                )
-            },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
-                    // Gapless Playback Toggle
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = "Gapless Pre-buffering",
-                                fontWeight = FontWeight.SemiBold,
-                                fontSize = 14.sp,
-                                color = if (isDarkTheme) Color.White else Color(0xFF0F172A)
-                            )
-                            Text(
-                                text = "Pre-loads next track to eliminate pauses between songs.",
-                                fontSize = 12.sp,
-                                color = if (isDarkTheme) Color(0xFF94A3B8) else Color(0xFF64748B)
-                            )
-                        }
-                        Switch(
-                            checked = gaplessEnabled,
-                            onCheckedChange = {
-                                gaplessEnabled = it
-                                prefs.edit().putBoolean(KEY_GAPLESS_ENABLED, it).apply()
-                            }
-                        )
-                    }
-
-                    // Volume Normalization Toggle
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = "Volume Normalization",
-                                fontWeight = FontWeight.SemiBold,
-                                fontSize = 14.sp,
-                                color = if (isDarkTheme) Color.White else Color(0xFF0F172A)
-                            )
-                            Text(
-                                text = "Balances track gain to prevent sudden loudness jumps.",
-                                fontSize = 12.sp,
-                                color = if (isDarkTheme) Color(0xFF94A3B8) else Color(0xFF64748B)
-                            )
-                        }
-                        Switch(
-                            checked = volumeNormalizationEnabled,
-                            onCheckedChange = {
-                                volumeNormalizationEnabled = it
-                                prefs.edit().putBoolean(KEY_NORM_ENABLED, it).apply()
-                                Toast.makeText(context, if (it) "Normalization Enabled" else "Normalization Disabled", Toast.LENGTH_SHORT).show()
-                            }
-                        )
-                    }
-
-                    // Crossfade Slider
-                    Column {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Text(
-                                text = "Crossfade",
-                                fontWeight = FontWeight.SemiBold,
-                                fontSize = 14.sp,
-                                color = if (isDarkTheme) Color.White else Color(0xFF0F172A)
-                            )
-                            Text(
-                                text = if (crossfadeSeconds == 0) "Off" else "${crossfadeSeconds}s",
-                                fontWeight = FontWeight.Bold,
-                                color = Color(0xFF7C4DFF),
-                                fontSize = 14.sp
-                            )
-                        }
-                        Slider(
-                            value = crossfadeSeconds.toFloat(),
-                            onValueChange = {
-                                crossfadeSeconds = it.roundToInt()
-                                prefs.edit().putInt(KEY_CROSSFADE_SEC, crossfadeSeconds).apply()
-                            },
-                            valueRange = 0f..10f,
-                            steps = 9
-                        )
-                    }
-                }
-            },
-            confirmButton = {
-                TextButton(onClick = { showAudioTransitionsDialog = false }) {
-                    Text("Done", fontWeight = FontWeight.Bold)
-                }
-            },
-            containerColor = if (isDarkTheme) Color(0xFF161F29) else Color(0xFFFFFFFF),
-            shape = RoundedCornerShape(16.dp)
-        )
-    }
-
     if (showEqualizerSheet) {
         EqualizerSheet(
             isDarkTheme = isDarkTheme,
@@ -5852,6 +6021,22 @@ fun SonoraPlayerScreen(
     if (showDeveloperProfileDialog) {
         AboutDeveloperSheet(
             isDarkTheme = isDarkTheme,
+            gaplessEnabled = gaplessEnabled,
+            onToggleGapless = {
+                gaplessEnabled = it
+                prefs.edit().putBoolean(KEY_GAPLESS_ENABLED, it).apply()
+            },
+            volumeNormalizationEnabled = volumeNormalizationEnabled,
+            onToggleNormalization = {
+                volumeNormalizationEnabled = it
+                prefs.edit().putBoolean(KEY_NORM_ENABLED, it).apply()
+                Toast.makeText(context, if (it) "Normalization Enabled" else "Normalization Disabled", Toast.LENGTH_SHORT).show()
+            },
+            crossfadeSeconds = crossfadeSeconds,
+            onCrossfadeChange = {
+                crossfadeSeconds = it
+                prefs.edit().putInt(KEY_CROSSFADE_SEC, it).apply()
+            },
             onDismiss = { showDeveloperProfileDialog = false }
         )
     }
