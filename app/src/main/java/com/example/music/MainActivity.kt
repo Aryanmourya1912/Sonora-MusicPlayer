@@ -1504,7 +1504,7 @@ suspend fun fetchYouTubeAutomixRadio(
 
                 if (vId.isBlank()) continue
 
-                val titleRuns = renderer
+                val titleRuns = item
                     .optJSONObject("title")
                     ?.optJSONArray("runs")
 
@@ -1515,7 +1515,7 @@ suspend fun fetchYouTubeAutomixRadio(
                         }
                     }.trim()
                 } else {
-                    renderer
+                    item
                         .optJSONObject("title")
                         ?.optString("simpleText", "")
                         ?.trim()
