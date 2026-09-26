@@ -2668,6 +2668,9 @@ fun SonoraPlayerScreen(
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val coroutineScope = rememberCoroutineScope()
+    val view = LocalView.current
+    
+    var isPlayerExpanded by remember { mutableStateOf(false) }
 
     // 🟢 Dynamic Status & Navigation Bar Icon Controller
     if (!view.isInEditMode) {
@@ -2706,8 +2709,6 @@ fun SonoraPlayerScreen(
 
     var controller by remember { mutableStateOf<MediaController?>(null) }
     var isPlaying by remember { mutableStateOf(false) }
-
-    var isPlayerExpanded by remember { mutableStateOf(false) }
     
     var showLiveLyrics by remember { mutableStateOf(false) }
     var activeLyricsProvider by remember { mutableStateOf("") }
