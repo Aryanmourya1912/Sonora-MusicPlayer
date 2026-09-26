@@ -3371,7 +3371,9 @@ fun SonoraPlayerScreen(
             // When player expanded or dark theme: light icons on dark background.
             val useDarkIcons = !isDarkTheme && !isPlayerExpanded
             insetsController.isAppearanceLightStatusBars = useDarkIcons
-            insetsController.isAppearanceLightNavigationBars = useDarkIcons
+            // Navigation bar: Reverted to false (keeps system navigation buttons/pill white on dark)
+            insetsController.isAppearanceLightNavigationBars = false
+            window.navigationBarColor = android.graphics.Color.BLACK
         }
     }
     val audioManager = remember { context.getSystemService(Context.AUDIO_SERVICE) as AudioManager }
