@@ -728,7 +728,7 @@ suspend fun searchYouTubeMusic(query: String): Pair<List<FullTrackItem>, String?
 }
 
 // ---------------------------------------------------------------------------
-// Search Suggestions & Artist Data Fetcher
+// Search Suggestions & Artist Data Fetchers
 // ---------------------------------------------------------------------------
 
 suspend fun fetchSearchSuggestions(query: String): List = withContext(Dispatchers.IO) {
@@ -765,86 +765,245 @@ suspend fun fetchArtistCatalog(artistName: String): Pair, List> = withContext(Di
     Pair(topSongs, uniqueHits)
 }
 
-suspend fun fetchYouTubeAutomixRadio(videoId: String): List<FullTrackItem> = withContext(Dispatchers.IO) {
-    val results = mutableListOf<FullTrackItem>()
-    if (videoId.isBlank()) return@withContext results as List<FullTrackItem>
-    try {
-        val url = URL("https://music.youtube.com/youtubei/v1/next")
-        val conn = url.openConnection() as HttpURLConnection
-        conn.requestMethod = "POST"
-        conn.connectTimeout = 7000
-        conn.readTimeout = 7000
-        conn.doOutput = true
-        conn.setRequestProperty("Content-Type", "application/json")
-        conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-        conn.setRequestProperty("Referer", "https://music.youtube.com/")
+// ---------------------------------------------------------------------------
+// Artist Detail Screen
+// ---------------------------------------------------------------------------
 
-        val payload = JSONObject().apply {
-            put("videoId", videoId)
-            put("playlistId", "RDAMVM$videoId")
-            put("context", JSONObject().apply {
-                put("client", JSONObject().apply {
-                    put("clientName", "WEB_REMIX")
-                    put("clientVersion", "1.20231204.01.00")
-                    put("hl", "en")
-                    put("gl", "IN")
-                })
-            })
+@Composable
+fun ArtistDetailScreen(
+    artistName: String,
+    isDarkTheme: Boolean,
+    downloadedSongs: List,
+    downloadingSongIds: Set,
+    onBack: () -> Unit,
+    onPlayTrack: (List, Int) -> Unit,
+    onDownloadTrack: (FullTrackItem) -> Unit,
+    onOptionsClick: (FullTrackItem) -> Unit
+) {
+    var isLoading by remember { mutableStateOf(true) }
+    var topSongs by remember { mutableStateOf>(emptyList()) }
+    var catalogHits by remember { mutableStateOf>(emptyList()) }
+
+    LaunchedEffect(artistName) {
+        isLoading = true
+        val (top, hits) = fetchArtistCatalog(artistName)
+        topSongs = top
+        catalogHits = hits
+        isLoading = false
+    }
+
+    val bannerArtwork = remember(topSongs) {
+        topSongs.firstOrNull { it.artworkUrl.isNotBlank() }?.artworkUrl ?: ""
+    }
+
+    val primaryTextColor = if (isDarkTheme) Color.White else Color(0xFF0F172A)
+    val secondaryTextColor = if (isDarkTheme) Color(0xFF94A3B8) else Color(0xFF64748B)
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .statusBarsPadding()
+            .padding(horizontal = 16.dp)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            IconButton(onClick = onBack) {
+                Icon(
+                    imageVector = Icons.Rounded.ArrowBack,
+                    contentDescription = "Back",
+                    tint = primaryTextColor,
+                    modifier = Modifier.size(24.dp)
+                )
+            }
+            Text(
+                text = "Artist",
+                fontSize = 18.sp,
+                fontWeight = FontWeight.Bold,
+                color = primaryTextColor
+            )
         }
 
-        conn.outputStream.use { it.write(payload.toString().toByteArray(Charsets.UTF_8)) }
+        if (isLoading) {
+            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
+            }
+        } else {
+            LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(bottom = 90.dp)
+            ) {
+                item {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 12.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        AsyncImage(
+                            model = bannerArtwork,
+                            contentDescription = artistName,
+                            modifier = Modifier
+                                .size(140.dp)
+                                .clip(CircleShape),
+                            contentScale = ContentScale.Crop
+                        )
 
-        if (conn.responseCode == HttpURLConnection.HTTP_OK) {
-            val respText = conn.inputStream.bufferedReader().use { it.readText() }
-            val root = JSONObject(respText)
+                        Spacer(modifier = Modifier.height(14.dp))
 
-            val renderers = mutableListOf<JSONObject>()
-            findRenderersRecursive(root, "playlistPanelVideoRenderer", renderers)
+                        Text(
+                            text = artistName,
+                            fontSize = 26.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = primaryTextColor,
+                            textAlign = TextAlign.Center
+                        )
 
-            for (item in renderers) {
-                val vId = extractVideoIdFromRenderer(item)
-                if (vId.isBlank()) continue
+                        Text(
+                            text = "Verified Artist • ${topSongs.size + catalogHits.size} Releases",
+                            fontSize = 13.sp,
+                            color = secondaryTextColor,
+                            fontWeight = FontWeight.Medium
+                        )
 
-                val title = sanitizeText(
-                    item.optJSONObject("title")?.optJSONArray("runs")?.optJSONObject(0)
-                        ?.optString("text", "Unknown Track") ?: "Unknown Track"
-                )
-                var radioArtist = "Unknown Artist"
-                val bylineRuns = item.optJSONObject("longBylineText")?.optJSONArray("runs")
-                    ?: item.optJSONObject("shortBylineText")?.optJSONArray("runs")
-                if (bylineRuns != null) {
-                    for (r in 0 until bylineRuns.length()) {
-                        val t = bylineRuns.optJSONObject(r)?.optString("text", "")?.trim() ?: ""
-                        if (t.isNotBlank() && t != "•" && t != "Song" && t != "Video") {
-                            radioArtist = t
-                            break
+                        Spacer(modifier = Modifier.height(16.dp))
+
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                            modifier = Modifier.padding(horizontal = 16.dp)
+                        ) {
+                            Button(
+                                onClick = {
+                                    if (topSongs.isNotEmpty()) onPlayTrack(topSongs, 0)
+                                },
+                                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
+                                shape = RoundedCornerShape(24.dp),
+                                modifier = Modifier.weight(1f).height(44.dp)
+                            ) {
+                                Icon(Icons.Rounded.PlayArrow, contentDescription = null, modifier = Modifier.size(18.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("Play All", fontWeight = FontWeight.Bold)
+                            }
+
+                            Button(
+                                onClick = {
+                                    if (topSongs.isNotEmpty()) onPlayTrack(topSongs.shuffled(), 0)
+                                },
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = if (isDarkTheme) Color(0xFF1E2836) else Color(0xFFE2E8F0),
+                                    contentColor = primaryTextColor
+                                ),
+                                shape = RoundedCornerShape(24.dp),
+                                modifier = Modifier.weight(1f).height(44.dp)
+                            ) {
+                                Icon(Icons.Rounded.Shuffle, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("Shuffle", fontWeight = FontWeight.Bold)
+                            }
                         }
                     }
                 }
-                val duration = item.optJSONObject("lengthText")?.optJSONArray("runs")?.optJSONObject(0)
-                    ?.optString("text", "") ?: ""
 
-                val thumbArray = item.optJSONObject("thumbnail")?.optJSONArray("thumbnails")
-                val artworkUrl = if (thumbArray != null && thumbArray.length() > 0) {
-                    thumbArray.getJSONObject(thumbArray.length() - 1).optString("url", "")
-                } else ""
-
-                results.add(
-                    FullTrackItem(
-                        id = vId,
-                        title = title,
-                        artist = radioArtist,
-                        audioUrl = "",
-                        artworkUrl = artworkUrl,
-                        durationFormatted = duration
+                item {
+                    Text(
+                        text = "Top Songs",
+                        fontSize = 20.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = primaryTextColor,
+                        modifier = Modifier.padding(top = 16.dp, bottom = 8.dp)
                     )
-                )
+                }
+
+                itemsIndexed(topSongs) { idx, track ->
+                    val isDownloaded = downloadedSongs.any { it.id == track.id }
+                    val isDownloading = track.id in downloadingSongIds
+
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 6.dp)
+                            .clickable { onPlayTrack(topSongs, idx) },
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "${idx + 1}",
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = secondaryTextColor,
+                            modifier = Modifier.width(24.dp)
+                        )
+                        AsyncImage(
+                            model = track.artworkUrl,
+                            contentDescription = track.title,
+                            modifier = Modifier.size(48.dp).clip(RoundedCornerShape(8.dp)),
+                            contentScale = ContentScale.Crop
+                        )
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(track.title, fontWeight = FontWeight.SemiBold, fontSize = 14.sp, color = primaryTextColor, maxLines = 1)
+                            Text(track.artist, color = secondaryTextColor, fontSize = 12.sp, maxLines = 1)
+                        }
+                        RefinedDownloadMark(
+                            isDownloaded = isDownloaded,
+                            isDownloading = isDownloading,
+                            onClick = { onDownloadTrack(track) }
+                        )
+                        IconButton(onClick = { onOptionsClick(track) }) {
+                            Icon(Icons.Rounded.MoreVert, contentDescription = "Options", tint = secondaryTextColor, modifier = Modifier.size(20.dp))
+                        }
+                    }
+                }
+
+                if (catalogHits.isNotEmpty()) {
+                    item {
+                        Text(
+                            text = "More from ${artistName.split(" ").firstOrNull() ?: artistName}",
+                            fontSize = 20.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = primaryTextColor,
+                            modifier = Modifier.padding(top = 22.dp, bottom = 8.dp)
+                        )
+                    }
+
+                    itemsIndexed(catalogHits) { idx, track ->
+                        val isDownloaded = downloadedSongs.any { it.id == track.id }
+                        val isDownloading = track.id in downloadingSongIds
+
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 6.dp)
+                                .clickable { onPlayTrack(catalogHits, idx) },
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            AsyncImage(
+                                model = track.artworkUrl,
+                                contentDescription = track.title,
+                                modifier = Modifier.size(48.dp).clip(RoundedCornerShape(8.dp)),
+                                contentScale = ContentScale.Crop
+                            )
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(track.title, fontWeight = FontWeight.SemiBold, fontSize = 14.sp, color = primaryTextColor, maxLines = 1)
+                                Text(track.artist, color = secondaryTextColor, fontSize = 12.sp, maxLines = 1)
+                            }
+                            RefinedDownloadMark(
+                                isDownloaded = isDownloaded,
+                                isDownloading = isDownloading,
+                                onClick = { onDownloadTrack(track) }
+                            )
+                            IconButton(onClick = { onOptionsClick(track) }) {
+                                Icon(Icons.Rounded.MoreVert, contentDescription = "Options", tint = secondaryTextColor, modifier = Modifier.size(20.dp))
+                            }
+                        }
+                    }
+                }
             }
         }
-    } catch (e: Exception) {
-        e.printStackTrace()
     }
-    results as List<FullTrackItem>
 }
 
 // ---------------------------------------------------------------------------
@@ -2045,250 +2204,6 @@ private fun DeveloperFeatureRow(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Artist Detail Screen
-// ---------------------------------------------------------------------------
-
-@Composable
-fun ArtistDetailScreen(
-    artistName: String,
-    isDarkTheme: Boolean,
-    downloadedSongs: List,
-    downloadingSongIds: Set,
-    onBack: () -> Unit,
-    onPlayTrack: (List, Int) -> Unit,
-    onDownloadTrack: (FullTrackItem) -> Unit,
-    onOptionsClick: (FullTrackItem) -> Unit
-) {
-    var isLoading by remember { mutableStateOf(true) }
-    var topSongs by remember { mutableStateOf>(emptyList()) }
-    var catalogHits by remember { mutableStateOf>(emptyList()) }
-
-    LaunchedEffect(artistName) {
-        isLoading = true
-        val (top, hits) = fetchArtistCatalog(artistName)
-        topSongs = top
-        catalogHits = hits
-        isLoading = false
-    }
-
-    val bannerArtwork = remember(topSongs) {
-        topSongs.firstOrNull { it.artworkUrl.isNotBlank() }?.artworkUrl ?: ""
-    }
-
-    val primaryTextColor = if (isDarkTheme) Color.White else Color(0xFF0F172A)
-    val secondaryTextColor = if (isDarkTheme) Color(0xFF94A3B8) else Color(0xFF64748B)
-
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .statusBarsPadding()
-            .padding(horizontal = 16.dp)
-    ) {
-        // Navigation Header
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            IconButton(onClick = onBack) {
-                Icon(
-                    imageVector = Icons.Rounded.ArrowBack,
-                    contentDescription = "Back",
-                    tint = primaryTextColor,
-                    modifier = Modifier.size(24.dp)
-                )
-            }
-            Text(
-                text = "Artist",
-                fontSize = 18.sp,
-                fontWeight = FontWeight.Bold,
-                color = primaryTextColor
-            )
-        }
-
-        if (isLoading) {
-            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
-            }
-        } else {
-            LazyColumn(
-                modifier = Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(bottom = 90.dp)
-            ) {
-                // Hero Section: Artist Banner, Name & Action Buttons
-                item {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 12.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally
-                    ) {
-                        AsyncImage(
-                            model = bannerArtwork,
-                            contentDescription = artistName,
-                            modifier = Modifier
-                                .size(140.dp)
-                                .clip(CircleShape),
-                            contentScale = ContentScale.Crop
-                        )
-
-                        Spacer(modifier = Modifier.height(14.dp))
-
-                        Text(
-                            text = artistName,
-                            fontSize = 26.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = primaryTextColor,
-                            textAlign = TextAlign.Center
-                        )
-
-                        Text(
-                            text = "Verified Artist • ${topSongs.size + catalogHits.size} Releases",
-                            fontSize = 13.sp,
-                            color = secondaryTextColor,
-                            fontWeight = FontWeight.Medium
-                        )
-
-                        Spacer(modifier = Modifier.height(16.dp))
-
-                        Row(
-                            horizontalArrangement = Arrangement.spacedBy(12.dp),
-                            modifier = Modifier.padding(horizontal = 16.dp)
-                        ) {
-                            Button(
-                                onClick = {
-                                    if (topSongs.isNotEmpty()) onPlayTrack(topSongs, 0)
-                                },
-                                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
-                                shape = RoundedCornerShape(24.dp),
-                                modifier = Modifier.weight(1f).height(44.dp)
-                            ) {
-                                Icon(Icons.Rounded.PlayArrow, contentDescription = null, modifier = Modifier.size(18.dp))
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text("Play All", fontWeight = FontWeight.Bold)
-                            }
-
-                            Button(
-                                onClick = {
-                                    if (topSongs.isNotEmpty()) onPlayTrack(topSongs.shuffled(), 0)
-                                },
-                                colors = ButtonDefaults.buttonColors(
-                                    containerColor = if (isDarkTheme) Color(0xFF1E2836) else Color(0xFFE2E8F0),
-                                    contentColor = primaryTextColor
-                                ),
-                                shape = RoundedCornerShape(24.dp),
-                                modifier = Modifier.weight(1f).height(44.dp)
-                            ) {
-                                Icon(Icons.Rounded.Shuffle, contentDescription = null, modifier = Modifier.size(16.dp))
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text("Shuffle", fontWeight = FontWeight.Bold)
-                            }
-                        }
-                    }
-                }
-
-                // Section 1: Top Songs
-                item {
-                    Text(
-                        text = "Top Songs",
-                        fontSize = 20.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = primaryTextColor,
-                        modifier = Modifier.padding(top = 16.dp, bottom = 8.dp)
-                    )
-                }
-
-                itemsIndexed(topSongs) { idx, track ->
-                    val isDownloaded = downloadedSongs.any { it.id == track.id }
-                    val isDownloading = track.id in downloadingSongIds
-
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 6.dp)
-                            .clickable { onPlayTrack(topSongs, idx) },
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = "${idx + 1}",
-                            fontSize = 14.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = secondaryTextColor,
-                            modifier = Modifier.width(24.dp)
-                        )
-                        AsyncImage(
-                            model = track.artworkUrl,
-                            contentDescription = track.title,
-                            modifier = Modifier.size(48.dp).clip(RoundedCornerShape(8.dp)),
-                            contentScale = ContentScale.Crop
-                        )
-                        Spacer(modifier = Modifier.width(12.dp))
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(track.title, fontWeight = FontWeight.SemiBold, fontSize = 14.sp, color = primaryTextColor, maxLines = 1)
-                            Text(track.artist, color = secondaryTextColor, fontSize = 12.sp, maxLines = 1)
-                        }
-                        RefinedDownloadMark(
-                            isDownloaded = isDownloaded,
-                            isDownloading = isDownloading,
-                            onClick = { onDownloadTrack(track) }
-                        )
-                        IconButton(onClick = { onOptionsClick(track) }) {
-                            Icon(Icons.Rounded.MoreVert, contentDescription = "Options", tint = secondaryTextColor, modifier = Modifier.size(20.dp))
-                        }
-                    }
-                }
-
-                // Section 2: More Releases & Hits
-                if (catalogHits.isNotEmpty()) {
-                    item {
-                        Text(
-                            text = "More from ${artistName.split(" ").firstOrNull() ?: artistName}",
-                            fontSize = 20.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = primaryTextColor,
-                            modifier = Modifier.padding(top = 22.dp, bottom = 8.dp)
-                        )
-                    }
-
-                    itemsIndexed(catalogHits) { idx, track ->
-                        val isDownloaded = downloadedSongs.any { it.id == track.id }
-                        val isDownloading = track.id in downloadingSongIds
-
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(vertical = 6.dp)
-                                .clickable { onPlayTrack(catalogHits, idx) },
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            AsyncImage(
-                                model = track.artworkUrl,
-                                contentDescription = track.title,
-                                modifier = Modifier.size(48.dp).clip(RoundedCornerShape(8.dp)),
-                                contentScale = ContentScale.Crop
-                            )
-                            Spacer(modifier = Modifier.width(12.dp))
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(track.title, fontWeight = FontWeight.SemiBold, fontSize = 14.sp, color = primaryTextColor, maxLines = 1)
-                                Text(track.artist, color = secondaryTextColor, fontSize = 12.sp, maxLines = 1)
-                            }
-                            RefinedDownloadMark(
-                                isDownloaded = isDownloaded,
-                                isDownloading = isDownloading,
-                                onClick = { onDownloadTrack(track) }
-                            )
-                            IconButton(onClick = { onOptionsClick(track) }) {
-                                Icon(Icons.Rounded.MoreVert, contentDescription = "Options", tint = secondaryTextColor, modifier = Modifier.size(20.dp))
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Main screen
