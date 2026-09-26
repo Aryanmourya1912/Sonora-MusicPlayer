@@ -2666,7 +2666,6 @@ fun SonoraPlayerScreen(
     onToggleTheme: () -> Unit
 ) {
     val context = LocalContext.current
-    val view = LocalView.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val coroutineScope = rememberCoroutineScope()
 
@@ -2709,19 +2708,7 @@ fun SonoraPlayerScreen(
     var isPlaying by remember { mutableStateOf(false) }
 
     var isPlayerExpanded by remember { mutableStateOf(false) }
-
-    // 🟢 Status bar & navigation bar theme contrast controller
-    val view = LocalView.current
-    if (!view.isInEditMode) {
-        SideEffect {
-            val window = (context as? Activity)?.window ?: return@SideEffect
-            val insetsController = WindowCompat.getInsetsController(window, view)
-
-            val useDarkIcons = !isDarkTheme && !isPlayerExpanded
-            insetsController.isAppearanceLightStatusBars = useDarkIcons
-            insetsController.isAppearanceLightNavigationBars = useDarkIcons
-        }
-    }
+    
     var showLiveLyrics by remember { mutableStateOf(false) }
     var activeLyricsProvider by remember { mutableStateOf("") }
     var activeSyncedLyrics by remember { mutableStateOf<List<SyncedLyricLine>>(emptyList()) }
