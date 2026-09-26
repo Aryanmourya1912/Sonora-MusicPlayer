@@ -1504,22 +1504,25 @@ suspend fun fetchYouTubeAutomixRadio(
 
                 if (vId.isBlank()) continue
 
-                val title = sanitizeText(
-                    item.optJSONObject("title")
-                        ?.optJSONArray("runs")
-                        ?.let { runs ->
-                            if (runs.length() > 0) {
-                                buildString {
-                                    for (i in 0 until runs.length()) {
-                                        append(runs.optJSONObject(i)?.optString("text", "") ?: "")
-                                    }
-                                }.trim()
-                            } else {
-                                "Unknown Track"
-                            }
+                val titleRuns = renderer
+                    .optJSONObject("title")
+                    ?.optJSONArray("runs")
+
+                val title = if (titleRuns != null && titleRuns.length() > 0) {
+                    buildString {
+                        for (i in 0 until titleRuns.length()) {
+                            append(titleRuns.optJSONObject(i)?.optString("text", "") ?: "")
                         }
-                        ?: "Unknown Track"
-                )
+                    }.trim()
+                } else {
+                    renderer
+                        .optJSONObject("title")
+                        ?.optString("simpleText", "")
+                        ?.trim()
+                        .orEmpty()
+                }
+
+                val finalTitle = title.ifBlank { "Unknown" }
 
                 var radioArtist = "Unknown Artist"
 
@@ -1572,7 +1575,7 @@ suspend fun fetchYouTubeAutomixRadio(
                 results.add(
                     FullTrackItem(
                         id = vId,
-                        title = title,
+                        title = finalTitle,
                         artist = radioArtist,
                         audioUrl = "",
                         artworkUrl = artworkUrl,
@@ -2137,26 +2140,15 @@ private fun normalizeTitleForDuplicate(rawTitle: String): String {
     // Remove only known upload/version noise.
     title = title.replace(
         Regex(
-            """\b(official\s+(audio|video)|official\s+music\s+video|"
-                    + "lyrics?\s+video|lyric\s+video|music\s+video|"
-                    + "full\s+video|full\s+audio|visualizer|"
-                    + "slowed\s*(\+|and)?\s*reverb|"
-                    + "sped\s*up|speed\s*up|"
-                    + "remastered|remaster|acoustic|"
-                    + "instrumental|lofi|live\s+version|"
-                    + "official)\b""",
+            """\b(official\s+(audio|video)|official\s+music\s+video|lyrics?\s+video|lyric\s+video|music\s+video|full\s+video|full\s+audio|visualizer|slowed\s*(\+|and)?\s*reverb|sped\s*up|speed\s*up|remastered|remaster|acoustic|instrumental|lofi|live\s+version|official)\b""",
             RegexOption.IGNORE_CASE
         ),
         " "
     )
 
-    // Remove bracketed content ONLY when it is clearly version/noise text.
     title = title.replace(
         Regex(
-            """[\(\[\{][^)\]}]*(official|audio|video|lyrics?|"
-                    + "remix|slowed|reverb|acoustic|live|"
-                    + "sped\s*up|speed\s*up|remaster(ed)?|"
-                    + "instrumental|lofi|visualizer)[^)\]}]*[\)\]\}]""",
+            """[\(\[\{][^)\]}]*(official|audio|video|lyrics?|remix|slowed|reverb|acoustic|live|sped\s*up|speed\s*up|remaster(ed)?|instrumental|lofi|visualizer)[^)\]}]*[\)\]\}]""",
             RegexOption.IGNORE_CASE
         ),
         " "
