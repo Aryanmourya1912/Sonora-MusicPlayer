@@ -757,7 +757,9 @@ suspend fun fetchSearchSuggestions(query: String): List = withContext(Dispatcher
     emptyList()
 }
 
-suspend fun fetchArtistCatalog(artistName: String): Pair, List> = withContext(Dispatchers.IO) {
+suspend fun fetchArtistCatalog(
+    artistName: String
+): Pair<List<FullTrackItem>, List<FullTrackItem>> = withContext(Dispatchers.IO) {
     val clean = cleanArtist(artistName)
     val (topSongs, _) = searchYouTubeMusic("$clean top songs")
     val (popularHits, _) = searchYouTubeMusic("$clean all hits")
