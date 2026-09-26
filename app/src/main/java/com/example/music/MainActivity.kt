@@ -141,6 +141,7 @@ import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -162,6 +163,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
@@ -170,6 +172,7 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import androidx.core.view.WindowCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.media3.common.C
@@ -2379,13 +2382,30 @@ private const val KEY_NORM_ENABLED = "volume_normalization"
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
+@Composable
 fun SonoraPlayerScreen(
     isDarkTheme: Boolean,
     onToggleTheme: () -> Unit
 ) {
     val context = LocalContext.current
+    val view = LocalView.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val coroutineScope = rememberCoroutineScope()
+
+    // 🟢 Dynamic Status & Navigation Bar Icon Controller
+    if (!view.isInEditMode) {
+        SideEffect {
+            val window = (context as? Activity)?.window ?: return@SideEffect
+            val insetsController = WindowCompat.getInsetsController(window, view)
+
+            // When light theme & player collapsed: dark icons on light background.
+            // When player expanded or dark theme: light icons on dark background.
+            val useDarkIcons = !isDarkTheme && !isPlayerExpanded
+            insetsController.isAppearanceLightStatusBars = useDarkIcons
+            insetsController.isAppearanceLightNavigationBars = useDarkIcons
+        }
+    }
     val audioManager = remember { context.getSystemService(Context.AUDIO_SERVICE) as AudioManager }
     val keyboardController = LocalSoftwareKeyboardController.current
     val prefs: SharedPreferences = remember {
@@ -3892,6 +3912,22 @@ fun SonoraPlayerScreen(
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.background)
     ) {
+        // 🟢 Soft gradient scrim behind status bar in Light Mode
+        if (!isDarkTheme && !isPlayerExpanded) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(48.dp)
+                    .background(
+                        Brush.verticalGradient(
+                            colors = listOf(
+                                Color(0x18000000),
+                                Color.Transparent
+                            )
+                        )
+                    )
+            )
+        }
         Column(modifier = Modifier.fillMaxSize()) {
             Box(
                 modifier = Modifier
