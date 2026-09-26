@@ -731,7 +731,7 @@ suspend fun searchYouTubeMusic(query: String): Pair<List<FullTrackItem>, String?
 // Search Suggestions & Artist Data Fetchers
 // ---------------------------------------------------------------------------
 
-suspend fun fetchSearchSuggestions(query: String): List = withContext(Dispatchers.IO) {
+suspend fun fetchSearchSuggestions(query: String): List<String> = withContext(Dispatchers.IO) {
     if (query.trim().isBlank()) return@withContext emptyList()
     try {
         val encoded = URLEncoder.encode(query.trim(), "UTF-8")
@@ -775,16 +775,16 @@ suspend fun fetchArtistCatalog(
 fun ArtistDetailScreen(
     artistName: String,
     isDarkTheme: Boolean,
-    downloadedSongs: List,
-    downloadingSongIds: Set,
+    downloadedSongs: List<DownloadedSongEntity>,
+    downloadingSongIds: Set<String>,
     onBack: () -> Unit,
-    onPlayTrack: (List, Int) -> Unit,
+    onPlayTrack: (List<FullTrackItem>, Int) -> Unit,
     onDownloadTrack: (FullTrackItem) -> Unit,
     onOptionsClick: (FullTrackItem) -> Unit
 ) {
     var isLoading by remember { mutableStateOf(true) }
-    var topSongs by remember { mutableStateOf>(emptyList()) }
-    var catalogHits by remember { mutableStateOf>(emptyList()) }
+    var topSongs by remember { mutableStateOf<List<FullTrackItem>>(emptyList()) }
+    var catalogHits by remember { mutableStateOf<List<FullTrackItem>>(emptyList()) }
 
     LaunchedEffect(artistName) {
         isLoading = true
@@ -2302,8 +2302,8 @@ fun SonoraPlayerScreen(
     var searchQuery by remember { mutableStateOf("") }
     var searchResults by remember { mutableStateOf<List<FullTrackItem>>(emptyList()) }
     var isSearching by remember { mutableStateOf(false) }
-    var searchSuggestions by remember { mutableStateOf>(emptyList()) }
-    var viewingArtistName by remember { mutableStateOf(null) }
+    var searchSuggestions by remember { mutableStateOf<List<String>>(emptyList()) }
+    var viewingArtistName by remember { mutableStateOf<String?>(null) }
     
     // Debounced live search autocomplete as the user types
     LaunchedEffect(searchQuery) {
