@@ -2387,7 +2387,7 @@ suspend fun resolveTrackAudioStream(
         )
         for (base in pipedInstances) {
             try {
-                val url = URL("\(base/streams/\)videoId")
+                val url = URL("$base/streams/$videoId")
                 val conn = url.openConnection() as HttpURLConnection
                 conn.requestMethod = "GET"
                 conn.connectTimeout = 4000
@@ -2419,7 +2419,10 @@ suspend fun resolveTrackAudioStream(
     }
 
     try {
-        val queryText = URLEncoder.encode("\({track.title}\){track.artist}".trim(), "UTF-8")
+        val queryText = URLEncoder.encode(
+            "${track.title} ${track.artist}".trim(),
+            "UTF-8"
+        )
         val saavnUrl = URL(
             "https://www.jiosaavn.com/api.php?__call=search.getResults&_format=json&_marker=0&api_version=4&ctx=web6dot0&n=3&p=1&q=$queryText"
         )
