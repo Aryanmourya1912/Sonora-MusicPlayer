@@ -6762,21 +6762,21 @@ fun SonoraPlayerScreen(
     if (showDeveloperProfileDialog) {
         AboutDeveloperSheet(
             isDarkTheme = isDarkTheme,
+
             gaplessEnabled = gaplessEnabled,
             onToggleGapless = {
                 gaplessEnabled = it
-                prefs.edit().putBoolean(KEY_GAPLESS_ENABLED, it).apply()
+                prefs.edit()
+                    .putBoolean(KEY_GAPLESS_ENABLED, it)
+                    .apply()
             },
-                
-            gaplessEnabled = gaplessEnabled,
-            onToggleGapless = {
-                gaplessEnabled = it
-                prefs.edit().putBoolean(KEY_GAPLESS_ENABLED, it).apply()
-            },
+
             volumeNormalizationEnabled = volumeNormalizationEnabled,
             onToggleNormalization = {
                 volumeNormalizationEnabled = it
-                prefs.edit().putBoolean(KEY_NORM_ENABLED, it).apply()
+                prefs.edit()
+                    .putBoolean(KEY_NORM_ENABLED, it)
+                    .apply()
                 Toast.makeText(
                     context,
                     if (it) "Normalization Enabled" else "Normalization Disabled",
@@ -6795,9 +6795,14 @@ fun SonoraPlayerScreen(
             crossfadeSeconds = crossfadeSeconds,
             onCrossfadeChange = {
                 crossfadeSeconds = it
-                prefs.edit().putInt(KEY_CROSSFADE_SEC, it).apply()
+                prefs.edit()
+                    .putInt(KEY_CROSSFADE_SEC, it)
+                    .apply()
             },
-            onDismiss = { showDeveloperProfileDialog = false }
+
+            onDismiss = {
+                showDeveloperProfileDialog = false
+            }
         )
     }
 }
