@@ -75,6 +75,7 @@ import androidx.compose.material.icons.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.ArrowDownward
 import androidx.compose.material.icons.rounded.ArrowUpward
 import androidx.compose.material.icons.rounded.Bedtime
+import androidx.compose.material.icons.rounded.Bluetooth
 import androidx.compose.material.icons.rounded.BookmarkAdd
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Close
@@ -2876,14 +2877,12 @@ fun SwipeablePlaylistTrackRow(
 @Composable
 fun AboutDeveloperSheet(
     isDarkTheme: Boolean,
-
-    autoResumeOnReconnect: Boolean,
-    onToggleAutoResume: (Boolean) -> Unit,
-
     gaplessEnabled: Boolean,
     onToggleGapless: (Boolean) -> Unit,
     volumeNormalizationEnabled: Boolean,
     onToggleNormalization: (Boolean) -> Unit,
+    autoResumeOnReconnect: Boolean,
+    onToggleAutoResume: (Boolean) -> Unit,
     crossfadeSeconds: Int,
     onCrossfadeChange: (Int) -> Unit,
     onDismiss: () -> Unit
@@ -3122,6 +3121,46 @@ fun AboutDeveloperSheet(
                                 onCheckedChange = onToggleNormalization
                             )
                         }
+                        
+                        // Auto Resume on Bluetooth / Headset Reconnect
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(
+                                modifier = Modifier.weight(1f),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.Bluetooth,
+                                    contentDescription = null,
+                                    tint = accentPurple,
+                                    modifier = Modifier
+                                        .size(22.dp)
+                                        .padding(end = 4.dp)
+                                )
+
+                                Column {
+                                    Text(
+                                        text = "Auto Resume on Reconnect",
+                                        fontWeight = FontWeight.SemiBold,
+                                        fontSize = 13.sp,
+                                        color = primaryText
+                                    )
+                                    Text(
+                                        text = "Automatically resumes music when your earbuds reconnect.",
+                                        fontSize = 11.sp,
+                                        color = secondaryText
+                                    )
+                                }
+                            }
+
+                            Switch(
+                                checked = autoResumeOnReconnect,
+                                onCheckedChange = onToggleAutoResume
+                            )
+                        }
 
                         // Crossfade Slider
                         Column {
@@ -3147,86 +3186,6 @@ fun AboutDeveloperSheet(
                                 onValueChange = { onCrossfadeChange(it.roundToInt()) },
                                 valueRange = 0f..10f,
                                 steps = 9
-                            )
-                        }
-                        
-                        // Auto Resume on Bluetooth / Earbud Reconnect
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(14.dp))
-                                .background(
-                                    if (autoResumeOnReconnect)
-                                        accentPurple.copy(alpha = 0.08f)
-                                    else
-                                        Color.Transparent
-                                )
-                                .padding(vertical = 6.dp),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-
-                            Row(
-                                modifier = Modifier.weight(1f),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-
-                                Box(
-                                    modifier = Modifier
-                                        .size(42.dp)
-                                        .clip(RoundedCornerShape(12.dp))
-                                        .background(
-                                            if (autoResumeOnReconnect)
-                                                accentPurple.copy(alpha = 0.15f)
-                                            else
-                                                secondaryText.copy(alpha = 0.10f)
-                                        ),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Rounded.Bluetooth,
-                                        contentDescription = null,
-                                        tint = if (autoResumeOnReconnect)
-                                            accentPurple
-                                        else
-                                            secondaryText,
-                                        modifier = Modifier.size(21.dp)
-                                    )
-                                }
-
-                                Spacer(modifier = Modifier.width(12.dp))
-
-                                Column(
-                                    modifier = Modifier.weight(1f)
-                                ) {
-                                    Text(
-                                        text = "Auto-resume on reconnect",
-                                        fontWeight = FontWeight.SemiBold,
-                                        fontSize = 13.sp,
-                                        color = primaryText
-                                    )
-
-                                    Text(
-                                        text = "Continue playback when earbuds or Bluetooth audio reconnect.",
-                                        fontSize = 11.sp,
-                                        color = secondaryText
-                                    )
-                                }
-                            }
-
-                            Switch(
-                                checked = autoResumeOnReconnect,
-                                onCheckedChange = {
-                                    autoResumeOnReconnect = it
-
-                                    prefs.edit()
-                                        .putBoolean(KEY_AUTO_RESUME_ON_RECONNECT, it)
-                                        .apply()
-                                },
-                                colors = SwitchDefaults.colors(
-                                    checkedThumbColor = Color.White,
-                                    checkedTrackColor = accentPurple
-                                )
                             )
                         }
                     }
@@ -6803,13 +6762,10 @@ fun SonoraPlayerScreen(
     if (showDeveloperProfileDialog) {
         AboutDeveloperSheet(
             isDarkTheme = isDarkTheme,
-
-            autoResumeOnReconnect = autoResumeOnReconnect,
-            onToggleAutoResume = {
-                autoResumeOnReconnect = it
-                prefs.edit()
-                    .putBoolean(KEY_AUTO_RESUME_ON_RECONNECT, it)
-                    .apply()
+            gaplessEnabled = gaplessEnabled,
+            onToggleGapless = {
+                gaplessEnabled = it
+                prefs.edit().putBoolean(KEY_GAPLESS_ENABLED, it).apply()
             },
                 
             gaplessEnabled = gaplessEnabled,
@@ -6821,8 +6777,21 @@ fun SonoraPlayerScreen(
             onToggleNormalization = {
                 volumeNormalizationEnabled = it
                 prefs.edit().putBoolean(KEY_NORM_ENABLED, it).apply()
-                Toast.makeText(context, if (it) "Normalization Enabled" else "Normalization Disabled", Toast.LENGTH_SHORT).show()
+                Toast.makeText(
+                    context,
+                    if (it) "Normalization Enabled" else "Normalization Disabled",
+                    Toast.LENGTH_SHORT
+                ).show()
             },
+
+            autoResumeOnReconnect = autoResumeOnReconnect,
+            onToggleAutoResume = { enabled: Boolean ->
+                autoResumeOnReconnect = enabled
+                prefs.edit()
+                    .putBoolean(KEY_AUTO_RESUME_ON_RECONNECT, enabled)
+                    .apply()
+            },
+
             crossfadeSeconds = crossfadeSeconds,
             onCrossfadeChange = {
                 crossfadeSeconds = it
