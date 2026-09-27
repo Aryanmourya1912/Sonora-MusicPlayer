@@ -2188,6 +2188,50 @@ fun ArtistDetailScreen(
 }
 
 // ---------------------------------------------------------------------------
+// Audio Quality & Storage Management Helpers
+// ---------------------------------------------------------------------------
+
+enum class AudioQuality(val title: String, val maxBitrateKbps: Long) {
+    LOW("Low (48 kbps)", 50_000L),
+    NORMAL("Normal (128 kbps)", 135_000L),
+    HIGH("High (160 kbps)", 175_000L),
+    EXTREME("Extreme (Max)", Long.MAX_VALUE)
+}
+
+const val KEY_AUDIO_QUALITY = "audio_streaming_quality"
+
+fun getAppCacheSizeBytes(context: Context): Long {
+    var size = 0L
+    context.cacheDir?.let { size += calculateDirectorySize(it) }
+    context.externalCacheDir?.let { size += calculateDirectorySize(it) }
+    return size
+}
+
+private fun calculateDirectorySize(dir: File): Long {
+    var bytes = 0L
+    dir.listFiles()?.forEach { file ->
+        bytes += if (file.isDirectory) calculateDirectorySize(file) else file.length()
+    }
+    return bytes
+}
+
+fun clearAppCache(context: Context) {
+    try {
+        context.cacheDir?.deleteRecursively()
+        context.externalCacheDir?.deleteRecursively()
+    } catch (e: Exception) {
+        e.printStackTrace()
+    }
+}
+
+fun clearListeningHistory(context: Context) {
+    context.getSharedPreferences("sonora_play_counts", Context.MODE_PRIVATE)
+        .edit()
+        .clear()
+        .apply()
+}
+
+// ---------------------------------------------------------------------------
 // Audio stream resolution
 // ---------------------------------------------------------------------------
 
@@ -2216,30 +2260,49 @@ fun decryptMediaUrl(encryptedUrl: String): String {
     }
 }
 
-private fun bestAudioUrlFromFormats(formats: JSONArray?): String {
+private fun bestAudioUrlFromFormats(
+    formats: JSONArray?,
+    targetQuality: AudioQuality = AudioQuality.HIGH
+): String {
     if (formats == null) return ""
-    var bestUrl = ""
-    var maxBitrate = 0L
+    var selectedUrl = ""
+    var bestBitrateMatch = -1L
+
     for (i in 0 until formats.length()) {
         val fmt = formats.getJSONObject(i)
         val mime = fmt.optString("mimeType", "")
         val streamUrl = fmt.optString("url", "")
         if (mime.startsWith("audio/") && streamUrl.isNotBlank()) {
             val bitrate = fmt.optLong("bitrate", 0L)
-            if (bitrate > maxBitrate) {
-                maxBitrate = bitrate
-                bestUrl = streamUrl
+            if (bitrate <= targetQuality.maxBitrateKbps && bitrate > bestBitrateMatch) {
+                bestBitrateMatch = bitrate
+                selectedUrl = streamUrl
             }
         }
     }
-    return bestUrl
+
+    // Fallback: If no format matches below the ceiling, choose lowest available
+    if (selectedUrl.isBlank()) {
+        var minBitrate = Long.MAX_VALUE
+        for (i in 0 until formats.length()) {
+            val fmt = formats.getJSONObject(i)
+            val streamUrl = fmt.optString("url", "")
+            val bitrate = fmt.optLong("bitrate", 0L)
+            if (streamUrl.isNotBlank() && bitrate in 1 until minBitrate) {
+                minBitrate = bitrate
+                selectedUrl = streamUrl
+            }
+        }
+    }
+    return selectedUrl
 }
 
 private fun requestYouTubePlayerAudio(
     videoId: String,
     userAgent: String,
     client: JSONObject,
-    thirdParty: JSONObject? = null
+    thirdParty: JSONObject? = null,
+    targetQuality: AudioQuality = AudioQuality.HIGH
 ): String {
     return try {
         val conn = URL("https://www.youtube.com/youtubei/v1/player").openConnection() as HttpURLConnection
@@ -2265,7 +2328,10 @@ private fun requestYouTubePlayerAudio(
         if (conn.responseCode == HttpURLConnection.HTTP_OK) {
             val resp = conn.inputStream.bufferedReader().use { it.readText() }
             val root = JSONObject(resp)
-            bestAudioUrlFromFormats(root.optJSONObject("streamingData")?.optJSONArray("adaptiveFormats"))
+            bestAudioUrlFromFormats(
+                root.optJSONObject("streamingData")?.optJSONArray("adaptiveFormats"),
+                targetQuality
+            )
         } else {
             ""
         }
@@ -2274,8 +2340,19 @@ private fun requestYouTubePlayerAudio(
     }
 }
 
-suspend fun resolveTrackAudioStream(track: FullTrackItem): String = withContext(Dispatchers.IO) {
+suspend fun resolveTrackAudioStream(
+    track: FullTrackItem,
+    context: Context? = null
+): String = withContext(Dispatchers.IO) {
     val videoId = track.id
+
+    val targetQuality = if (context != null) {
+        val prefs = context.getSharedPreferences(PREFS_SONORA, Context.MODE_PRIVATE)
+        val qualityOrdinal = prefs.getInt(KEY_AUDIO_QUALITY, AudioQuality.HIGH.ordinal)
+        AudioQuality.values().getOrElse(qualityOrdinal) { AudioQuality.HIGH }
+    } else {
+        AudioQuality.HIGH
+    }
 
     if (videoId.isNotBlank()) {
         val androidTestClient = JSONObject().apply {
@@ -2285,7 +2362,7 @@ suspend fun resolveTrackAudioStream(track: FullTrackItem): String = withContext(
             put("hl", "en")
             put("gl", "US")
         }
-        val first = requestYouTubePlayerAudio(videoId, "GoogleTest/1.0", androidTestClient)
+        val first = requestYouTubePlayerAudio(videoId, "GoogleTest/1.0", androidTestClient, targetQuality = targetQuality)
         if (first.isNotBlank()) return@withContext first
 
         val tvClient = JSONObject().apply {
@@ -2298,7 +2375,8 @@ suspend fun resolveTrackAudioStream(track: FullTrackItem): String = withContext(
             videoId,
             "Mozilla/5.0 (SMART-TV; Linux; Tizen 5.0) AppleWebKit/538.1 (KHTML, like Gecko) Version/5.0 TV Safari/538.1",
             tvClient,
-            tvThirdParty
+            tvThirdParty,
+            targetQuality = targetQuality
         )
         if (second.isNotBlank()) return@withContext second
 
@@ -2309,7 +2387,7 @@ suspend fun resolveTrackAudioStream(track: FullTrackItem): String = withContext(
         )
         for (base in pipedInstances) {
             try {
-                val url = URL("$base/streams/$videoId")
+                val url = URL("\(base/streams/\)videoId")
                 val conn = url.openConnection() as HttpURLConnection
                 conn.requestMethod = "GET"
                 conn.connectTimeout = 4000
@@ -2321,13 +2399,13 @@ suspend fun resolveTrackAudioStream(track: FullTrackItem): String = withContext(
                     val audioStreams = root.optJSONArray("audioStreams")
                     if (audioStreams != null && audioStreams.length() > 0) {
                         var bestUrl = ""
-                        var maxBitrate = 0L
+                        var bestBitrate = -1L
                         for (i in 0 until audioStreams.length()) {
                             val s = audioStreams.getJSONObject(i)
                             val sUrl = s.optString("url", "")
                             val bitrate = s.optLong("bitrate", 0L)
-                            if (sUrl.isNotBlank() && bitrate >= maxBitrate) {
-                                maxBitrate = bitrate
+                            if (sUrl.isNotBlank() && bitrate <= targetQuality.maxBitrateKbps && bitrate > bestBitrate) {
+                                bestBitrate = bitrate
                                 bestUrl = sUrl
                             }
                         }
@@ -2341,7 +2419,7 @@ suspend fun resolveTrackAudioStream(track: FullTrackItem): String = withContext(
     }
 
     try {
-        val queryText = URLEncoder.encode("${track.title} ${track.artist}".trim(), "UTF-8")
+        val queryText = URLEncoder.encode("\({track.title}\){track.artist}".trim(), "UTF-8")
         val saavnUrl = URL(
             "https://www.jiosaavn.com/api.php?__call=search.getResults&_format=json&_marker=0&api_version=4&ctx=web6dot0&n=3&p=1&q=$queryText"
         )
@@ -3188,8 +3266,14 @@ fun AboutDeveloperSheet(
     onToggleAutoResume: (Boolean) -> Unit,
     crossfadeSeconds: Int,
     onCrossfadeChange: (Int) -> Unit,
+    // --- New Arguments ---
+    currentAudioQuality: AudioQuality,
+    onAudioQualityChange: (AudioQuality) -> Unit,
+    cacheSizeBytes: Long,
+    onClearCache: () -> Unit,
+    onClearHistory: () -> Unit,
     onDismiss: () -> Unit
-){
+) {
     val context = LocalContext.current
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
@@ -3491,6 +3575,98 @@ fun AboutDeveloperSheet(
                                 steps = 9
                             )
                         }
+                        
+                        // NEW: Audio Streaming Quality Toggle ---
+                        Column {
+                            Text(
+                                text = "Streaming Quality",
+                                fontWeight = FontWeight.SemiBold,
+                                fontSize = 13.sp,
+                                color = primaryText
+                            )
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                AudioQuality.values().forEach { quality ->
+                                    val isSelected = quality == currentAudioQuality
+                                    Box(
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .clip(RoundedCornerShape(10.dp))
+                                            .background(
+                                                if (isSelected) accentPurple
+                                                else (if (isDarkTheme) Color(0xFF1E2836) else Color(0xFFE2E8F0))
+                                            )
+                                            .clickable { onAudioQualityChange(quality) }
+                                            .padding(vertical = 8.dp),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Text(
+                                            text = quality.name.lowercase().replaceFirstChar { it.uppercase() },
+                                            fontSize = 11.sp,
+                                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                                            color = if (isSelected) Color.White else secondaryText
+                                        )
+                                    }
+                                }
+                            }
+                        }
+
+                        // NEW: Cache Cleaner Row ---
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "App & Image Cache",
+                                    fontWeight = FontWeight.SemiBold,
+                                    fontSize = 13.sp,
+                                    color = primaryText
+                                )
+                                Text(
+                                    text = "Occupying ${formatStorageSize(cacheSizeBytes)}",
+                                    fontSize = 11.sp,
+                                    color = secondaryText
+                                )
+                            }
+                            TextButton(
+                                onClick = onClearCache,
+                                colors = ButtonDefaults.textButtonColors(contentColor = Color(0xFFFF5252))
+                            ) {
+                                Text("Clear Cache", fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                            }
+                        }
+
+                        // NEW: Clear Listening History Row ---
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "Listening History",
+                                    fontWeight = FontWeight.SemiBold,
+                                    fontSize = 13.sp,
+                                    color = primaryText
+                                )
+                                Text(
+                                    text = "Resets play counts & recently played tracks",
+                                    fontSize = 11.sp,
+                                    color = secondaryText
+                                )
+                            }
+                            TextButton(
+                                onClick = onClearHistory,
+                                colors = ButtonDefaults.textButtonColors(contentColor = Color(0xFFFF5252))
+                            ) {
+                                Text("Clear History", fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                            }
+                        }
                     }
                 }
             }
@@ -3791,6 +3967,14 @@ fun SonoraPlayerScreen(
             prefs.getBoolean(KEY_AUTO_RESUME_ON_RECONNECT, true)
         )
     }
+    var currentAudioQuality by remember {
+        mutableStateOf(
+            AudioQuality.values().getOrElse(
+                prefs.getInt(KEY_AUDIO_QUALITY, AudioQuality.HIGH.ordinal)
+            ) { AudioQuality.HIGH }
+        )
+    }
+    var cacheSizeBytes by remember { mutableLongStateOf(getAppCacheSizeBytes(context)) }
     
     var isFadingIn by remember { mutableStateOf(false) }
 
@@ -4041,7 +4225,7 @@ fun SonoraPlayerScreen(
                         val streamUrl = if (downloaded != null && File(downloaded.localFilePath).exists()) {
                             downloaded.localFilePath
                         } else {
-                            resolveTrackAudioStream(nextTrack)
+                            resolveTrackAudioStream(nextTrack, context)
                         }
 
                         if (streamUrl.isNotBlank()) {
@@ -4365,7 +4549,7 @@ fun SonoraPlayerScreen(
             val effectiveUrl = if (downloadedLocal != null && File(downloadedLocal.localFilePath).exists()) {
                 downloadedLocal.localFilePath
             } else {
-                resolveTrackAudioStream(targetTrack)
+                resolveTrackAudioStream(targetTrack, context)
             }
 
             if (effectiveUrl.isBlank()) {
@@ -4498,7 +4682,7 @@ fun SonoraPlayerScreen(
                 } else if (track.audioUrl.isNotBlank() && !track.audioUrl.startsWith("http")) {
                     track.audioUrl
                 } else {
-                    resolveTrackAudioStream(track)
+                    resolveTrackAudioStream(track, context)
                 }
 
                 if (finalAudioUrl.isNotBlank()) {
@@ -7121,6 +7305,24 @@ fun SonoraPlayerScreen(
                 prefs.edit()
                     .putInt(KEY_CROSSFADE_SEC, it)
                     .apply()
+            },
+                
+            currentAudioQuality = currentAudioQuality,
+            onAudioQualityChange = { newQuality ->
+                currentAudioQuality = newQuality
+                prefs.edit().putInt(KEY_AUDIO_QUALITY, newQuality.ordinal).apply()
+                Toast.makeText(context, "Streaming quality: ${newQuality.title}", Toast.LENGTH_SHORT).show()
+            },
+            cacheSizeBytes = cacheSizeBytes,
+            onClearCache = {
+                clearAppCache(context)
+                cacheSizeBytes = getAppCacheSizeBytes(context)
+                Toast.makeText(context, "Cache cleared", Toast.LENGTH_SHORT).show()
+            },
+            onClearHistory = {
+                clearListeningHistory(context)
+                refreshListeningStats()
+                Toast.makeText(context, "Listening history cleared", Toast.LENGTH_SHORT).show()
             },
 
             onDismiss = {
