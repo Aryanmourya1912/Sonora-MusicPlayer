@@ -15,6 +15,7 @@ import android.util.Log
 import androidx.core.content.ContextCompat
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
+import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.session.CommandButton
@@ -239,10 +240,31 @@ class PlaybackService : MediaSessionService() {
             .setHandleAudioBecomingNoisy(true)
             .build()
             
+        SonoraWidgetProvider.updateAllWidgets(
+            this,
+            player
+        )
+            
         player.addListener(object : Player.Listener {
 
             override fun onIsPlayingChanged(isPlaying: Boolean) {
                 lastKnownPlayingState = isPlaying
+
+                SonoraWidgetProvider.updateAllWidgets(
+                    this@PlaybackService,
+                    player
+                )
+            }
+
+            override fun onMediaItemTransition(
+                mediaItem: MediaItem?,
+                reason: Int
+            ) {
+
+                SonoraWidgetProvider.updateAllWidgets(
+                    this@PlaybackService,
+                    player
+                )
             }
         })
 
