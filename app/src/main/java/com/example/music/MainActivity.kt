@@ -1332,109 +1332,412 @@ fun extractVideoIdFromRenderer(item: JSONObject): String {
     return ""
 }
 
-suspend fun searchYouTubeMusic(query: String): Pair<List<FullTrackItem>, String?> = withContext(Dispatchers.IO) {
-    val results = mutableListOf<FullTrackItem>()
-    try {
-        val url = URL("https://music.youtube.com/youtubei/v1/search")
-        val conn = url.openConnection() as HttpURLConnection
-        conn.requestMethod = "POST"
-        conn.connectTimeout = 8000
-        conn.readTimeout = 8000
-        conn.doOutput = true
-        conn.setRequestProperty("Content-Type", "application/json")
-        conn.setRequestProperty(
-            "User-Agent",
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-        )
-        conn.setRequestProperty("Referer", "https://music.youtube.com/")
+private fun findContinuationToken(
+    root: JSONObject
+): String? {
 
-        val payload = JSONObject().apply {
-            put("query", query.trim())
-            put("context", JSONObject().apply {
-                put("client", JSONObject().apply {
-                    put("clientName", "WEB_REMIX")
-                    put("clientVersion", "1.20231204.01.00")
-                    put("hl", "en")
-                    put("gl", "IN")
-                })
-            })
-        }
+    fun searchObject(obj: JSONObject): String? {
 
-        conn.outputStream.use { it.write(payload.toString().toByteArray(Charsets.UTF_8)) }
+        // ---------------------------------------------------------
+        // Direct continuation data
+        // ---------------------------------------------------------
 
-        if (conn.responseCode != HttpURLConnection.HTTP_OK) {
-            return@withContext Pair(emptyList<FullTrackItem>(), "YouTube status: ${conn.responseCode}")
-        }
-
-        val respText = conn.inputStream.bufferedReader().use { it.readText() }
-        val root = JSONObject(respText)
-
-        val renderers = mutableListOf<JSONObject>()
-        findRenderersRecursive(root, "musicResponsiveListItemRenderer", renderers)
-
-        for (item in renderers) {
-            val videoId = extractVideoIdFromRenderer(item)
-            if (videoId.isBlank()) continue
-
-            val flexCols = item.optJSONArray("flexColumns") ?: continue
-            val col0Runs = flexCols.optJSONObject(0)?.optJSONObject("musicResponsiveListItemFlexColumnRenderer")
-                ?.optJSONObject("text")?.optJSONArray("runs")
-            val title = sanitizeText(
-                if (col0Runs != null && col0Runs.length() > 0) {
-                    buildString {
-                        for (i in 0 until col0Runs.length()) {
-                            append(col0Runs.optJSONObject(i)?.optString("text", "") ?: "")
-                        }
-                    }.trim()
-                } else {
-                    "Unknown Track"
-                }
+        val continuation =
+            obj.optString(
+                "continuation",
+                ""
             )
 
-            val col1Runs = flexCols.optJSONObject(1)?.optJSONObject("musicResponsiveListItemFlexColumnRenderer")
-                ?.optJSONObject("text")?.optJSONArray("runs")
-            var artist = "Unknown Artist"
-            if (col1Runs != null && col1Runs.length() > 0) {
-                for (r in 0 until col1Runs.length()) {
-                    val t = col1Runs.optJSONObject(r)?.optString("text", "")?.trim() ?: ""
-                    if (t.isNotBlank() && t != "•" && t != "Song" && t != "Video" && t != "Single" && t != "EP" && t != "Album") {
-                        artist = t
-                        break
+        if (continuation.isNotBlank()) {
+            return continuation
+        }
+
+        // ---------------------------------------------------------
+        // nextContinuationData
+        // ---------------------------------------------------------
+
+        val nextContinuation =
+            obj.optJSONObject(
+                "nextContinuationData"
+            )
+
+        if (nextContinuation != null) {
+
+            val token =
+                nextContinuation.optString(
+                    "continuation",
+                    ""
+                )
+
+            if (token.isNotBlank()) {
+                return token
+            }
+        }
+
+        // ---------------------------------------------------------
+        // Walk every JSON object
+        // ---------------------------------------------------------
+
+        val keys = obj.keys()
+
+        while (keys.hasNext()) {
+
+            val key = keys.next()
+
+            when (val value = obj.opt(key)) {
+
+                is JSONObject -> {
+
+                    val found =
+                        searchObject(value)
+
+                    if (!found.isNullOrBlank()) {
+                        return found
+                    }
+                }
+
+                is JSONArray -> {
+
+                    for (i in 0 until value.length()) {
+
+                        val item =
+                            value.opt(i)
+
+                        if (item is JSONObject) {
+
+                            val found =
+                                searchObject(item)
+
+                            if (!found.isNullOrBlank()) {
+                                return found
+                            }
+                        }
                     }
                 }
             }
-            artist = sanitizeText(artist)
-
-            var duration = ""
-            val fixedCols = item.optJSONArray("fixedColumns")
-            if (fixedCols != null && fixedCols.length() > 0) {
-                duration = fixedCols.optJSONObject(0)?.optJSONObject("musicResponsiveListItemFixedColumnRenderer")
-                    ?.optJSONObject("text")?.optJSONArray("runs")?.optJSONObject(0)?.optString("text", "") ?: ""
-            }
-            if (duration.isBlank() && col1Runs != null && col1Runs.length() > 2) {
-                duration = col1Runs.optJSONObject(col1Runs.length() - 1)?.optString("text", "") ?: ""
-            }
-
-            val thumbArray = item.optJSONObject("thumbnail")?.optJSONObject("musicThumbnailRenderer")
-                ?.optJSONObject("thumbnail")?.optJSONArray("thumbnails")
-            val artworkUrl = if (thumbArray != null && thumbArray.length() > 0) {
-                thumbArray.getJSONObject(thumbArray.length() - 1).optString("url", "")
-            } else ""
-
-            results.add(
-                FullTrackItem(
-                    id = videoId,
-                    title = title,
-                    artist = artist,
-                    audioUrl = "",
-                    artworkUrl = artworkUrl,
-                    durationFormatted = duration
-                )
-            )
         }
-        Pair(results as List<FullTrackItem>, null as String?)
+
+        return null
+    }
+
+    return searchObject(root)
+}
+
+suspend fun searchYouTubeMusic(
+    query: String
+): Pair<List<FullTrackItem>, String?> = withContext(Dispatchers.IO) {
+
+    val results = mutableListOf<FullTrackItem>()
+
+    try {
+
+        val maxPages = 3
+        var continuationToken: String? = null
+
+        for (page in 0 until maxPages) {
+
+            val url = URL("https://music.youtube.com/youtubei/v1/search")
+            val conn = url.openConnection() as HttpURLConnection
+
+            conn.requestMethod = "POST"
+            conn.connectTimeout = 8000
+            conn.readTimeout = 8000
+            conn.doOutput = true
+
+            conn.setRequestProperty(
+                "Content-Type",
+                "application/json"
+            )
+
+            conn.setRequestProperty(
+                "User-Agent",
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+                        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+            )
+
+            conn.setRequestProperty(
+                "Referer",
+                "https://music.youtube.com/"
+            )
+
+            val payload = JSONObject().apply {
+
+                put(
+                    "context",
+                    JSONObject().apply {
+                        put(
+                            "client",
+                            JSONObject().apply {
+                                put("clientName", "WEB_REMIX")
+                                put("clientVersion", "1.20231204.01.00")
+                                put("hl", "en")
+                                put("gl", "IN")
+                            }
+                        )
+                    }
+                )
+
+                if (continuationToken == null) {
+                    put("query", query.trim())
+                } else {
+                    put("continuation", continuationToken)
+                }
+            }
+
+            conn.outputStream.use {
+                it.write(
+                    payload.toString()
+                        .toByteArray(Charsets.UTF_8)
+                )
+            }
+
+            if (conn.responseCode != HttpURLConnection.HTTP_OK) {
+
+                if (page == 0) {
+                    return@withContext Pair(
+                        emptyList<FullTrackItem>(),
+                        "YouTube status: ${conn.responseCode}"
+                    )
+                }
+
+                break
+            }
+
+            val respText =
+                conn.inputStream
+                    .bufferedReader()
+                    .use { it.readText() }
+
+            val root = JSONObject(respText)
+
+            // ---------------------------------------------------------
+            // Extract search result renderers
+            // ---------------------------------------------------------
+
+            val renderers = mutableListOf<JSONObject>()
+
+            findRenderersRecursive(
+                root,
+                "musicResponsiveListItemRenderer",
+                renderers
+            )
+
+            for (item in renderers) {
+
+                val videoId =
+                    extractVideoIdFromRenderer(item)
+
+                if (videoId.isBlank()) continue
+
+                // Prevent duplicate video IDs when continuation
+                // pages overlap.
+                if (results.any { it.id == videoId }) {
+                    continue
+                }
+
+                val flexCols =
+                    item.optJSONArray("flexColumns")
+                        ?: continue
+
+                // -----------------------------------------------------
+                // Title
+                // -----------------------------------------------------
+
+                val col0Runs =
+                    flexCols
+                        .optJSONObject(0)
+                        ?.optJSONObject(
+                            "musicResponsiveListItemFlexColumnRenderer"
+                        )
+                        ?.optJSONObject("text")
+                        ?.optJSONArray("runs")
+
+                val title = sanitizeText(
+                    if (
+                        col0Runs != null &&
+                        col0Runs.length() > 0
+                    ) {
+                        buildString {
+
+                            for (i in 0 until col0Runs.length()) {
+
+                                append(
+                                    col0Runs
+                                        .optJSONObject(i)
+                                        ?.optString("text", "")
+                                        ?: ""
+                                )
+                            }
+
+                        }.trim()
+
+                    } else {
+                        "Unknown Track"
+                    }
+                )
+
+                // -----------------------------------------------------
+                // Artist
+                // -----------------------------------------------------
+
+                val col1Runs =
+                    flexCols
+                        .optJSONObject(1)
+                        ?.optJSONObject(
+                            "musicResponsiveListItemFlexColumnRenderer"
+                        )
+                        ?.optJSONObject("text")
+                        ?.optJSONArray("runs")
+
+                var artist = "Unknown Artist"
+
+                if (
+                    col1Runs != null &&
+                    col1Runs.length() > 0
+                ) {
+
+                    for (r in 0 until col1Runs.length()) {
+
+                        val text =
+                            col1Runs
+                                .optJSONObject(r)
+                                ?.optString("text", "")
+                                ?.trim()
+                                ?: ""
+
+                        if (
+                            text.isNotBlank() &&
+                            text != "•" &&
+                            text != "Song" &&
+                            text != "Video" &&
+                            text != "Single" &&
+                            text != "EP" &&
+                            text != "Album"
+                        ) {
+
+                            artist = text
+                            break
+                        }
+                    }
+                }
+
+                artist = sanitizeText(artist)
+
+                // -----------------------------------------------------
+                // Duration
+                // -----------------------------------------------------
+
+                var duration = ""
+
+                val fixedCols =
+                    item.optJSONArray("fixedColumns")
+
+                if (
+                    fixedCols != null &&
+                    fixedCols.length() > 0
+                ) {
+
+                    duration =
+                        fixedCols
+                            .optJSONObject(0)
+                            ?.optJSONObject(
+                                "musicResponsiveListItemFixedColumnRenderer"
+                            )
+                            ?.optJSONObject("text")
+                            ?.optJSONArray("runs")
+                            ?.optJSONObject(0)
+                            ?.optString("text", "")
+                            ?: ""
+                }
+
+                if (
+                    duration.isBlank() &&
+                    col1Runs != null &&
+                    col1Runs.length() > 2
+                ) {
+
+                    duration =
+                        col1Runs
+                            .optJSONObject(
+                                col1Runs.length() - 1
+                            )
+                            ?.optString("text", "")
+                            ?: ""
+                }
+
+                // -----------------------------------------------------
+                // Artwork
+                // -----------------------------------------------------
+
+                val thumbArray =
+                    item
+                        .optJSONObject("thumbnail")
+                        ?.optJSONObject(
+                            "musicThumbnailRenderer"
+                        )
+                        ?.optJSONObject("thumbnail")
+                        ?.optJSONArray("thumbnails")
+
+                val artworkUrl =
+                    if (
+                        thumbArray != null &&
+                        thumbArray.length() > 0
+                    ) {
+
+                        thumbArray
+                            .getJSONObject(
+                                thumbArray.length() - 1
+                            )
+                            .optString("url", "")
+
+                    } else {
+                        ""
+                    }
+
+                // -----------------------------------------------------
+                // Add result
+                // -----------------------------------------------------
+
+                results.add(
+                    FullTrackItem(
+                        id = videoId,
+                        title = title,
+                        artist = artist,
+                        audioUrl = "",
+                        artworkUrl = artworkUrl,
+                        durationFormatted = duration
+                    )
+                )
+            }
+
+            // ---------------------------------------------------------
+            // Find continuation token for the NEXT page
+            // ---------------------------------------------------------
+
+            continuationToken = findContinuationToken(root)
+
+            if (continuationToken.isNullOrBlank()) {
+                break
+            }
+
+            // Small pause between continuation requests.
+            // Helps avoid firing multiple requests immediately.
+            if (page < maxPages - 1) {
+                delay(150)
+            }
+        }
+
+        Pair(
+            results,
+            null
+        )
+
     } catch (e: Exception) {
-        Pair(results as List<FullTrackItem>, (e.localizedMessage ?: "Network error occurred") as String?)
+
+        Pair(
+            results,
+            e.localizedMessage ?: "Network error occurred"
+        )
     }
 }
 
@@ -4905,9 +5208,16 @@ fun SonoraPlayerScreen(
                                         fontWeight = if (isCurrent) FontWeight.Bold else FontWeight.SemiBold,
                                         fontSize = 14.sp,
                                         color = Color.White,
-                                        maxLines = 1
+                                        maxLines = 2,
+                                        overflow = TextOverflow.Clip
                                     )
-                                    Text(track.artist, color = Color(0xFF94A3B8), fontSize = 12.sp, maxLines = 1)
+                                    Text(
+                                        text = track.artist,
+                                        color = Color(0xFF94A3B8),
+                                        fontSize = 12.sp,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
                                 }
                                 IconButton(
                                     onClick = {
@@ -5336,8 +5646,21 @@ fun SonoraPlayerScreen(
                                                     )
                                                     Spacer(modifier = Modifier.width(12.dp))
                                                     Column(modifier = Modifier.weight(1f)) {
-                                                        Text(song.title, fontWeight = FontWeight.Bold, fontSize = 15.sp, color = MaterialTheme.colorScheme.onBackground, maxLines = 1)
-                                                        Text(song.artist, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp, maxLines = 1)
+                                                        Text(
+                                                            text = song.title,
+                                                            fontWeight = FontWeight.Bold,
+                                                            fontSize = 15.sp,
+                                                            color = MaterialTheme.colorScheme.onBackground,
+                                                            maxLines = 2,
+                                                            overflow = TextOverflow.Clip
+                                                        )
+                                                        Text(
+                                                            text = song.artist,
+                                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                            fontSize = 13.sp,
+                                                            maxLines = 1,
+                                                            overflow = TextOverflow.Ellipsis
+                                                        )
                                                     }
                                                     RefinedDownloadMark(
                                                         isDownloaded = isDownloaded,
