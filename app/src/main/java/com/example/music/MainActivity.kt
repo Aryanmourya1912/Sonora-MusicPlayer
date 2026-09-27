@@ -2876,6 +2876,10 @@ fun SwipeablePlaylistTrackRow(
 @Composable
 fun AboutDeveloperSheet(
     isDarkTheme: Boolean,
+
+    autoResumeOnReconnect: Boolean,
+    onToggleAutoResume: (Boolean) -> Unit,
+
     gaplessEnabled: Boolean,
     onToggleGapless: (Boolean) -> Unit,
     volumeNormalizationEnabled: Boolean,
@@ -3145,6 +3149,86 @@ fun AboutDeveloperSheet(
                                 steps = 9
                             )
                         }
+                        
+                        // Auto Resume on Bluetooth / Earbud Reconnect
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(14.dp))
+                                .background(
+                                    if (autoResumeOnReconnect)
+                                        accentPurple.copy(alpha = 0.08f)
+                                    else
+                                        Color.Transparent
+                                )
+                                .padding(vertical = 6.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+
+                            Row(
+                                modifier = Modifier.weight(1f),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+
+                                Box(
+                                    modifier = Modifier
+                                        .size(42.dp)
+                                        .clip(RoundedCornerShape(12.dp))
+                                        .background(
+                                            if (autoResumeOnReconnect)
+                                                accentPurple.copy(alpha = 0.15f)
+                                            else
+                                                secondaryText.copy(alpha = 0.10f)
+                                        ),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.Bluetooth,
+                                        contentDescription = null,
+                                        tint = if (autoResumeOnReconnect)
+                                            accentPurple
+                                        else
+                                            secondaryText,
+                                        modifier = Modifier.size(21.dp)
+                                    )
+                                }
+
+                                Spacer(modifier = Modifier.width(12.dp))
+
+                                Column(
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Text(
+                                        text = "Auto-resume on reconnect",
+                                        fontWeight = FontWeight.SemiBold,
+                                        fontSize = 13.sp,
+                                        color = primaryText
+                                    )
+
+                                    Text(
+                                        text = "Continue playback when earbuds or Bluetooth audio reconnect.",
+                                        fontSize = 11.sp,
+                                        color = secondaryText
+                                    )
+                                }
+                            }
+
+                            Switch(
+                                checked = autoResumeOnReconnect,
+                                onCheckedChange = {
+                                    autoResumeOnReconnect = it
+
+                                    prefs.edit()
+                                        .putBoolean(KEY_AUTO_RESUME_ON_RECONNECT, it)
+                                        .apply()
+                                },
+                                colors = SwitchDefaults.colors(
+                                    checkedThumbColor = Color.White,
+                                    checkedTrackColor = accentPurple
+                                )
+                            )
+                        }
                     }
                 }
             }
@@ -3344,9 +3428,11 @@ private const val KEY_LAST_ARTWORK_URL = "last_artwork_url"
 private const val KEY_LAST_DURATION_TXT = "last_duration_txt"
 private const val KEY_LAST_POSITION_MS = "last_position_ms"
 private const val KEY_LAST_DURATION_MS = "last_duration_ms"
+
 private const val KEY_CROSSFADE_SEC = "crossfade_seconds"
 private const val KEY_GAPLESS_ENABLED = "gapless_enabled"
 private const val KEY_NORM_ENABLED = "volume_normalization"
+private const val KEY_AUTO_RESUME_ON_RECONNECT = "auto_resume_on_reconnect"
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
@@ -3438,6 +3524,12 @@ fun SonoraPlayerScreen(
     var volumeNormalizationEnabled by remember {
         mutableStateOf(prefs.getBoolean(KEY_NORM_ENABLED, true))
     }
+    var autoResumeOnReconnect by remember {
+        mutableStateOf(
+            prefs.getBoolean(KEY_AUTO_RESUME_ON_RECONNECT, true)
+        )
+    }
+    
     var isFadingIn by remember { mutableStateOf(false) }
 
     var searchQuery by remember { mutableStateOf("") }
@@ -6711,6 +6803,15 @@ fun SonoraPlayerScreen(
     if (showDeveloperProfileDialog) {
         AboutDeveloperSheet(
             isDarkTheme = isDarkTheme,
+
+            autoResumeOnReconnect = autoResumeOnReconnect,
+            onToggleAutoResume = {
+                autoResumeOnReconnect = it
+                prefs.edit()
+                    .putBoolean(KEY_AUTO_RESUME_ON_RECONNECT, it)
+                    .apply()
+            },
+                
             gaplessEnabled = gaplessEnabled,
             onToggleGapless = {
                 gaplessEnabled = it

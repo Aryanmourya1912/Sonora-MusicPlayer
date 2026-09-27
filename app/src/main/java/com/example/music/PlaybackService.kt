@@ -1,9 +1,11 @@
 package com.example.music
 
+import android.bluetooth.BluetoothA2dp
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.SharedPreferences
 import android.media.AudioManager
 import android.media.audiofx.LoudnessEnhancer
 import android.os.Bundle
@@ -40,6 +42,139 @@ class PlaybackService : MediaSessionService() {
     private var callMonitorJob: Job? = null
     private var pausedForCall = false
     private var wasPlayingBeforeInterruption = false
+    private var wasPlayingBeforeDeviceDisconnect = false
+    private var lastKnownPlayingState = false
+    private var deviceReconnectReceiverRegistered = false
+
+    private val playbackPrefs: SharedPreferences by lazy {
+        getSharedPreferences(
+            "sonora_playback_state",
+            Context.MODE_PRIVATE
+        )
+    }
+    
+    private val autoResumeOnReconnect: Boolean
+        get() = playbackPrefs.getBoolean(
+            "auto_resume_on_reconnect",
+            true
+        )
+        
+    // Listener to catch when playback stops because of an incoming phone call
+    private val audioNoisyReceiver = object : BroadcastReceiver() {
+
+        override fun onReceive(
+            context: Context?,
+            intent: Intent?
+        ) {
+            if (intent?.action != AudioManager.ACTION_AUDIO_BECOMING_NOISY) {
+                return
+            }
+
+            if (lastKnownPlayingState) {
+
+                wasPlayingBeforeDeviceDisconnect = true
+
+                Log.d(
+                    "Sonora",
+                    "Audio device disconnected while music was playing."
+                )
+            }
+        }
+    }
+
+        
+        
+    private val deviceReconnectReceiver = object : BroadcastReceiver() {
+
+        override fun onReceive(
+            context: Context?,
+            intent: Intent?
+        ) {
+            when (intent?.action) {
+
+                BluetoothA2dp.ACTION_CONNECTION_STATE_CHANGED -> {
+
+                    val state = intent.getIntExtra(
+                        BluetoothA2dp.EXTRA_STATE,
+                        BluetoothA2dp.STATE_DISCONNECTED
+                    )
+
+                    if (
+                        state == BluetoothA2dp.STATE_CONNECTED &&
+                        wasPlayingBeforeDeviceDisconnect &&
+                        autoResumeOnReconnect
+                    ) {
+
+                        Log.d(
+                            "Sonora",
+                            "Bluetooth audio reconnected. Auto-resuming playback."
+                        )
+
+                        mediaSession?.player?.let { player ->
+
+                            if (
+                                player.playbackState != Player.STATE_ENDED &&
+                                !player.isPlaying
+                            ) {
+                                serviceScope.launch {
+                                    delay(500L)
+
+                                    if (
+                                        autoResumeOnReconnect &&
+                                        wasPlayingBeforeDeviceDisconnect
+                                    ) {
+                                        player.play()
+                                        wasPlayingBeforeDeviceDisconnect = false
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Intent.ACTION_HEADSET_PLUG -> {
+
+                    val state = intent.getIntExtra(
+                        "state",
+                        0
+                    )
+
+                    // Wired headset connected
+                    if (
+                        state == 1 &&
+                        wasPlayingBeforeDeviceDisconnect &&
+                        autoResumeOnReconnect
+                    ) {
+
+                        Log.d(
+                            "Sonora",
+                            "Wired headset reconnected. Auto-resuming playback."
+                        )
+
+                        mediaSession?.player?.let { player ->
+
+                            if (
+                                player.playbackState != Player.STATE_ENDED &&
+                                !player.isPlaying
+                            ) {
+                                serviceScope.launch {
+                                    delay(500L)
+
+                                    if (
+                                        autoResumeOnReconnect &&
+                                        wasPlayingBeforeDeviceDisconnect
+                                    ) {
+                                        player.play()
+                                        wasPlayingBeforeDeviceDisconnect = false
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     private val audioManager by lazy {
         getSystemService(Context.AUDIO_SERVICE) as AudioManager
@@ -73,7 +208,7 @@ class PlaybackService : MediaSessionService() {
             controller: MediaSession.ControllerInfo,
             customCommand: SessionCommand,
             args: Bundle
-        ): ListenableFuture {
+        ): ListenableFuture<SessionResult> {
             if (customCommand.customAction == ACTION_CLOSE_APP) {
                 Log.d("Sonora", "Close button tapped in notification")
                 exitApp()
@@ -103,6 +238,13 @@ class PlaybackService : MediaSessionService() {
             .setAudioAttributes(audioAttributes, true)
             .setHandleAudioBecomingNoisy(true)
             .build()
+            
+        player.addListener(object : Player.Listener {
+
+            override fun onIsPlayingChanged(isPlaying: Boolean) {
+                lastKnownPlayingState = isPlaying
+            }
+        })
 
         // Equalizer & Hardware Loudness Normalization
         EqualizerManager.init(this, player.audioSessionId)
@@ -112,22 +254,6 @@ class PlaybackService : MediaSessionService() {
                 enabled = true
             }
         } catch (_: Exception) {}
-
-        // Listener to catch when playback stops because of an incoming phone call
-        player.addListener(object : Player.Listener {
-            override fun onIsPlayingChanged(isPlaying: Boolean) {
-                if (isPlaying) {
-                    wasPlayingBeforeInterruption = true
-                    pausedForCall = false
-                    callMonitorJob?.cancel()
-                } else {
-                    // If song was playing and stops, check if a call caused it
-                    if (wasPlayingBeforeInterruption && !pausedForCall) {
-                        startCallMonitoring()
-                    }
-                }
-            }
-        })
 
         val closeButton = CommandButton.Builder()
             .setDisplayName("Close")
@@ -144,6 +270,27 @@ class PlaybackService : MediaSessionService() {
             this,
             killReceiver,
             IntentFilter(ACTION_KILL_SERVICE),
+            ContextCompat.RECEIVER_NOT_EXPORTED
+        )
+        
+        val reconnectFilter = IntentFilter().apply {
+            addAction(BluetoothA2dp.ACTION_CONNECTION_STATE_CHANGED)
+            addAction(Intent.ACTION_HEADSET_PLUG)
+        }
+
+        ContextCompat.registerReceiver(
+            this,
+            deviceReconnectReceiver,
+            reconnectFilter,
+            ContextCompat.RECEIVER_NOT_EXPORTED
+        )
+
+        deviceReconnectReceiverRegistered = true
+        
+        ContextCompat.registerReceiver(
+            this,
+            audioNoisyReceiver,
+            IntentFilter(AudioManager.ACTION_AUDIO_BECOMING_NOISY),
             ContextCompat.RECEIVER_NOT_EXPORTED
         )
     }
@@ -216,6 +363,8 @@ class PlaybackService : MediaSessionService() {
     private fun terminatePlayback() {
         pausedForCall = false
         wasPlayingBeforeInterruption = false
+        wasPlayingBeforeDeviceDisconnect = false
+        lastKnownPlayingState = false
         callMonitorJob?.cancel()
 
         EqualizerManager.release()
@@ -254,6 +403,21 @@ class PlaybackService : MediaSessionService() {
 
         callMonitorJob?.cancel()
         terminatePlayback()
+        
+        if (deviceReconnectReceiverRegistered) {
+            try {
+                unregisterReceiver(deviceReconnectReceiver)
+            } catch (_: Exception) {
+            }
+
+            deviceReconnectReceiverRegistered = false
+        }
+
+        try {
+            unregisterReceiver(audioNoisyReceiver)
+        } catch (_: Exception) {
+        }
+        
         super.onDestroy()
     }
 
