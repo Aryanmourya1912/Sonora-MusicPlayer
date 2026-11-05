@@ -159,6 +159,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -460,22 +461,28 @@ fun parseJsonLyricLines(array: JSONArray): List<SyncedLyricLine> {
                 item.optStringOrEmpty("line")
             }
         }
-
         if (words.isBlank()) continue
 
         var timeMs = item.optLong("timeMs", -1L)
-
         if (timeMs < 0) {
-            val time = item.optLong("time", -1L)
-            timeMs = if (time >= 0) time else -1L
+            val startTimeMs = item.optLong("startTimeMs", -1L)
+            if (startTimeMs >= 0) timeMs = startTimeMs
         }
-
+        if (timeMs < 0) {
+            val rawTime = item.optDouble("time", -1.0)
+            if (rawTime >= 0.0) {
+                // If the value is small (e.g., 14.52), it's in seconds; convert to ms
+                timeMs = if (rawTime < 1000.0 && rawTime % 1.0 != 0.0) {
+                    (rawTime * 1000.0).toLong()
+                } else {
+                    rawTime.toLong()
+                }
+            }
+        }
         if (timeMs < 0) {
             val tag = item.optStringOrEmpty("timeTag")
-
             if (tag.isNotBlank()) {
                 val parsed = parseLrcLyrics("[$tag]$words")
-
                 if (parsed.isNotEmpty()) {
                     lines.addAll(parsed)
                     continue
@@ -484,12 +491,7 @@ fun parseJsonLyricLines(array: JSONArray): List<SyncedLyricLine> {
         }
 
         if (timeMs >= 0) {
-            lines.add(
-                SyncedLyricLine(
-                    timeMs = timeMs,
-                    text = sanitizeText(words)
-                )
-            )
+            lines.add(SyncedLyricLine(timeMs = timeMs, text = sanitizeText(words)))
         }
     }
 
@@ -618,7 +620,315 @@ suspend fun fetchLyricsFromPriorityProviders(
 }
 
 // ---------------------------------------------------------------------------
-// 1. LrcLib
+// In-Memory Lyrics Cache & Candidate Validator
+// ---------------------------------------------------------------------------
+
+private val lyricsMemoryCache = object : LinkedHashMap<String, Pair<String, List<SyncedLyricLine>>>(32, 0.75f, true) {
+    override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Pair<String, List<SyncedLyricLine>>>?): Boolean {
+        return size > 40
+    }
+}
+
+private fun isLyricCandidateMatch(
+    reqTitle: String,
+    reqArtist: String,
+    reqDurationSec: Int,
+    candTitle: String,
+    candArtist: String,
+    candDurationSec: Int = 0
+): Boolean {
+    val normReqTitle = cleanSongTitle(reqTitle)
+    val normCandTitle = cleanSongTitle(candTitle)
+
+    if (normReqTitle.isBlank() || normCandTitle.isBlank()) return false
+
+    val titleMatches = normReqTitle == normCandTitle ||
+            normCandTitle.contains(normReqTitle) ||
+            normReqTitle.contains(normCandTitle)
+    if (!titleMatches) return false
+
+    if (reqDurationSec > 20 && candDurationSec > 20) {
+        if (kotlin.math.abs(reqDurationSec - candDurationSec) > 18) {
+            return false
+        }
+    }
+
+    if (reqArtist.isNotBlank() && candArtist.isNotBlank()) {
+        val normReqArtist = cleanArtist(reqArtist)
+        val normCandArtist = cleanArtist(candArtist)
+        if (normReqArtist.isNotBlank() && normCandArtist.isNotBlank()) {
+            val artistOverlap = normCandArtist.contains(normReqArtist) ||
+                    normReqArtist.contains(normCandArtist) ||
+                    normReqArtist.split(" ").any { it.length > 2 && normCandArtist.contains(it) }
+            if (!artistOverlap && normReqTitle != normCandTitle) {
+                return false
+            }
+        }
+    }
+
+    return true
+}
+
+/**
+ * Universal payload extractor used by Better Lyrics, Paxsenix, LyricsPlus, and Zemer.
+ * Supports LRC, TTML (<tt>), JSON line arrays, and validated search arrays.
+ */
+private fun extractLyricsFromUniversalPayload(
+    rawResponse: String,
+    reqTitle: String,
+    reqArtist: String,
+    durationSec: Int
+): List<SyncedLyricLine> {
+    val trimmed = rawResponse.trim()
+    if (trimmed.isBlank()) return emptyList()
+
+    // 1. Direct TTML XML response
+    if (trimmed.startsWith("<tt") || trimmed.contains("<body") && trimmed.contains("begin=")) {
+        val ttmlParsed = parseTtmlLyrics(trimmed)
+        if (ttmlParsed.isNotEmpty()) return ttmlParsed
+    }
+
+    // 2. Direct raw LRC text response
+    if (trimmed.startsWith("[") && (trimmed.contains("[00:") || trimmed.contains("[01:"))) {
+        val lrcParsed = parseLrcLyrics(trimmed)
+        if (lrcParsed.isNotEmpty()) return lrcParsed
+    }
+
+    // 3. JSON Array response (e.g., search endpoints returning multiple candidates or line arrays)
+    if (trimmed.startsWith("[")) {
+        try {
+            val arr = JSONArray(trimmed)
+            // Check if it's directly an array of lyric lines
+            val directLines = parseJsonLyricLines(arr)
+            if (directLines.isNotEmpty()) return directLines
+
+            // Otherwise, treat as an array of song candidate objects
+            for (i in 0 until arr.length()) {
+                val item = arr.optJSONObject(i) ?: continue
+                val candTitle = item.optStringOrEmpty("title")
+                    .ifEmpty { item.optStringOrEmpty("trackName") }
+                    .ifEmpty { item.optStringOrEmpty("name") }
+                val candArtist = item.optStringOrEmpty("artist")
+                    .ifEmpty { item.optStringOrEmpty("artistName") }
+                val candDur = item.optDouble("duration", 0.0).toInt()
+
+                if (candTitle.isNotBlank() && !isLyricCandidateMatch(reqTitle, reqArtist, durationSec, candTitle, candArtist, candDur)) {
+                    continue
+                }
+
+                val extracted = extractFromSingleJsonObject(item, reqTitle, reqArtist, durationSec)
+                if (extracted.isNotEmpty()) return extracted
+            }
+        } catch (_: Exception) {}
+        return emptyList()
+    }
+
+    // 4. JSON Object response
+    if (trimmed.startsWith("{")) {
+        try {
+            val root = JSONObject(trimmed)
+            return extractFromSingleJsonObject(root, reqTitle, reqArtist, durationSec)
+        } catch (_: Exception) {}
+    }
+
+    return emptyList()
+}
+
+private fun extractFromSingleJsonObject(
+    root: JSONObject,
+    reqTitle: String,
+    reqArtist: String,
+    durationSec: Int
+): List<SyncedLyricLine> {
+    // Unwrap nested "data" or "result" containers if present
+    val dataObj = root.optJSONObject("data")
+        ?: root.optJSONObject("result")
+        ?: root
+
+    // Validate candidate metadata if the provider returns track info inside the object
+    val returnedTitle = dataObj.optStringOrEmpty("title")
+        .ifEmpty { dataObj.optStringOrEmpty("trackName") }
+        .ifEmpty { dataObj.optStringOrEmpty("song") }
+    val returnedArtist = dataObj.optStringOrEmpty("artist")
+        .ifEmpty { dataObj.optStringOrEmpty("artistName") }
+        .ifEmpty { dataObj.optStringOrEmpty("singer") }
+
+    if (returnedTitle.isNotBlank() && !isLyricCandidateMatch(reqTitle, reqArtist, durationSec, returnedTitle, returnedArtist)) {
+        return emptyList()
+    }
+
+    // A. Check for TTML field
+    val ttmlStr = dataObj.optStringOrEmpty("ttml")
+        .ifEmpty { dataObj.optStringOrEmpty("ttmlLyrics") }
+    if (ttmlStr.isNotBlank()) {
+        val parsed = parseTtmlLyrics(ttmlStr)
+        if (parsed.isNotEmpty()) return parsed
+    }
+
+    // B. Check for LRC / Synced string fields
+    val lrcStr = dataObj.optStringOrEmpty("syncedLyrics")
+        .ifEmpty { dataObj.optStringOrEmpty("lrc") }
+        .ifEmpty { dataObj.optStringOrEmpty("lyrics") }
+        .ifEmpty { dataObj.optStringOrEmpty("lyric") }
+
+    if (lrcStr.isNotBlank()) {
+        if (lrcStr.contains("<tt") || lrcStr.contains("begin=")) {
+            val ttmlParsed = parseTtmlLyrics(lrcStr)
+            if (ttmlParsed.isNotEmpty()) return ttmlParsed
+        }
+
+        val lrcParsed = parseLrcLyrics(lrcStr)
+        if (lrcParsed.isNotEmpty()) return lrcParsed
+    }
+
+    // C. Check for structured JSON array of lines ("lines", "lyrics" as array, "synced")
+    val linesArray = dataObj.optJSONArray("lines")
+        ?: dataObj.optJSONArray("lyrics")
+        ?: dataObj.optJSONArray("synced")
+        ?: root.optJSONArray("lines")
+
+    if (linesArray != null) {
+        val parsed = parseJsonLyricLines(linesArray)
+        if (parsed.isNotEmpty()) return parsed
+    }
+
+    // D. Check if "data" itself is a JSONArray of candidates or lines
+    val dataArray = root.optJSONArray("data") ?: root.optJSONArray("results")
+    if (dataArray != null) {
+        val directLines = parseJsonLyricLines(dataArray)
+        if (directLines.isNotEmpty()) return directLines
+
+        for (i in 0 until dataArray.length()) {
+            val candidate = dataArray.optJSONObject(i) ?: continue
+            val extracted = extractFromSingleJsonObject(candidate, reqTitle, reqArtist, durationSec)
+            if (extracted.isNotEmpty()) return extracted
+        }
+    }
+
+    // E. Fallback to plain unsynced lyrics only if no synced format existed
+    val plainStr = dataObj.optStringOrEmpty("plainLyrics")
+        .ifEmpty { dataObj.optStringOrEmpty("plain") }
+        .ifEmpty { if (lrcStr.isNotBlank() && !lrcStr.contains("[0")) lrcStr else "" }
+
+    if (plainStr.isNotBlank()) {
+        return convertPlainLyricsToTimed(plainStr, durationSec)
+    }
+
+    return emptyList()
+}
+
+// ---------------------------------------------------------------------------
+// Multi-Provider Chain Dispatcher (Priority: LrcLib -> Better Lyrics -> KuGou -> Paxsenix -> LyricsPlus -> Zemer)
+// ---------------------------------------------------------------------------
+
+suspend fun fetchLyricsFromPriorityProviders(
+    songTitle: String,
+    artistName: String,
+    durationSeconds: Int = 0
+): Pair<String, List<SyncedLyricLine>> = withContext(Dispatchers.IO) {
+
+    val cleanTitle = cleanSongTitle(songTitle)
+    val artistClean = if (
+        artistName.equals("Song", ignoreCase = true) ||
+        artistName.equals("Unknown Artist", ignoreCase = true)
+    ) {
+        ""
+    } else {
+        cleanArtist(artistName)
+    }
+
+    if (cleanTitle.isBlank()) {
+        return@withContext Pair("Sonora", emptyList())
+    }
+
+    val cacheKey = "${cleanTitle}|${artistClean}|$durationSeconds"
+    synchronized(lyricsMemoryCache) {
+        lyricsMemoryCache[cacheKey]?.let { cached ->
+            if (cached.second.isNotEmpty()) return@withContext cached
+        }
+    }
+
+    val providers: List<Pair<String, suspend () -> List<SyncedLyricLine>>> = listOf(
+        "LrcLib" to { fetchFromLrcLib(cleanTitle, artistClean, durationSeconds) },
+        "Better Lyrics" to { fetchFromBetterLyrics(cleanTitle, artistClean, durationSeconds) },
+        "KuGou" to { fetchFromKuGou(cleanTitle, artistClean, durationSeconds) },
+        "Paxsenix" to { fetchFromPaxsenix(cleanTitle, artistClean, durationSeconds) },
+        "LyricsPlus" to { fetchFromLyricsPlus(cleanTitle, artistClean, durationSeconds) },
+        "Zemer" to { fetchFromZemer(cleanTitle, artistClean, durationSeconds) }
+    )
+
+    var fallbackPlainResult: Pair<String, List<SyncedLyricLine>>? = null
+
+    for ((name, fetcher) in providers) {
+        try {
+            val result = fetcher()
+            if (result.isNotEmpty()) {
+                // Check if the result is genuinely timestamp-synced vs evenly-divided plain lyrics
+                val isRealSynced = isGenuineSyncedLyrics(result)
+                if (isRealSynced) {
+                    val finalPair = Pair(name, result)
+                    synchronized(lyricsMemoryCache) {
+                        lyricsMemoryCache[cacheKey] = finalPair
+                    }
+                    return@withContext finalPair
+                } else if (fallbackPlainResult == null) {
+                    // Hold onto plain lyrics in case a lower-priority provider has real synced LRC
+                    fallbackPlainResult = Pair(name, result)
+                }
+            }
+        } catch (_: Exception) {
+            // Continue to next provider
+        }
+    }
+
+    if (fallbackPlainResult != null) {
+        synchronized(lyricsMemoryCache) {
+            lyricsMemoryCache[cacheKey] = fallbackPlainResult
+        }
+        return@withContext fallbackPlainResult
+    }
+
+    Pair("Sonora", emptyList())
+}
+
+/**
+ * Distinguishes real synced LRC/TTML lines from synthetic evenly-spaced plain lyrics.
+ */
+private fun isGenuineSyncedLyrics(lines: List<SyncedLyricLine>): Boolean {
+    if (lines.size < 3) return true
+    val firstInterval = lines[1].timeMs - lines[0].timeMs
+    val secondInterval = lines[2].timeMs - lines[1].timeMs
+    // convertPlainLyricsToTimed spaces every single line by the exact same intervalMs
+    return firstInterval != secondInterval
+}
+
+private fun executeGetText(
+    endpoint: String,
+    timeoutMs: Int = 3000,
+    headers: Map<String, String> = emptyMap()
+): String? {
+    var conn: HttpURLConnection? = null
+    return try {
+        conn = (URL(endpoint).openConnection() as HttpURLConnection).apply {
+            requestMethod = "GET"
+            connectTimeout = timeoutMs
+            readTimeout = timeoutMs
+            setRequestProperty("User-Agent", "SonoraMusicPlayer/1.3 (Android)")
+            setRequestProperty("Accept", "application/json, text/plain, */*")
+            headers.forEach { (k, v) -> setRequestProperty(k, v) }
+        }
+        if (conn.responseCode in 200..299) {
+            conn.inputStream.bufferedReader().use { it.readText() }
+        } else null
+    } catch (_: Exception) {
+        null
+    } finally {
+        conn?.disconnect()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 1. LrcLib (Exact Lookup + Validated Search)
 // ---------------------------------------------------------------------------
 
 private suspend fun fetchFromLrcLib(
@@ -626,79 +936,65 @@ private suspend fun fetchFromLrcLib(
     artist: String,
     duration: Int
 ): List<SyncedLyricLine> {
+    val encTitle = URLEncoder.encode(title, "UTF-8")
+    val encArtist = URLEncoder.encode(artist, "UTF-8")
 
+    // 1. Fast Exact Get if Artist is known
+    if (artist.isNotBlank()) {
+        val durationParam = if (duration > 20) "&duration=$duration" else ""
+        val getUrl = "https://lrclib.net/api/get?track_name=$encTitle&artist_name=$encArtist$durationParam"
+        executeGetText(getUrl, timeoutMs = 2800)?.let { resp ->
+            val extracted = extractLyricsFromUniversalPayload(resp, title, artist, duration)
+            if (extracted.isNotEmpty() && isGenuineSyncedLyrics(extracted)) {
+                return extracted
+            }
+        }
+    }
+
+    // 2. Validated Search Fallback
     val queries = listOfNotNull(
         if (artist.isNotBlank()) "$title $artist" else null,
         title
     )
 
     for (q in queries) {
+        val encodedQuery = URLEncoder.encode(q, "UTF-8")
+        val resp = executeGetText("https://lrclib.net/api/search?q=$encodedQuery", timeoutMs = 3200) ?: continue
         try {
-            val encodedQuery = URLEncoder.encode(q, "UTF-8")
-            val endpoint =
-                "https://lrclib.net/api/search?q=$encodedQuery"
+            val array = JSONArray(resp)
+            // Pass 1: Validated Synced Lyrics
+            for (i in 0 until array.length()) {
+                val item = array.optJSONObject(i) ?: continue
+                val candTitle = item.optStringOrEmpty("trackName").ifEmpty { item.optStringOrEmpty("name") }
+                val candArtist = item.optStringOrEmpty("artistName")
+                val candDuration = item.optDouble("duration", 0.0).toInt()
+                val synced = item.optStringOrEmpty("syncedLyrics")
 
-            val conn =
-                (URL(endpoint).openConnection() as HttpURLConnection).apply {
-                    requestMethod = "GET"
-                    connectTimeout = 3500
-                    readTimeout = 3500
-                    setRequestProperty(
-                        "User-Agent",
-                        "SonoraMusicPlayer/1.0"
-                    )
-                }
-
-            if (conn.responseCode == HttpURLConnection.HTTP_OK) {
-                val resp =
-                    conn.inputStream.bufferedReader().use {
-                        it.readText()
-                    }
-
-                val array = JSONArray(resp)
-
-                // Prefer synced lyrics.
-                for (i in 0 until array.length()) {
-                    val item = array.getJSONObject(i)
-
-                    val synced =
-                        item.optStringOrEmpty("syncedLyrics")
-
-                    if (synced.isNotBlank()) {
-                        val parsed = parseLrcLyrics(synced)
-
-                        if (parsed.isNotEmpty()) {
-                            return parsed
-                        }
-                    }
-                }
-
-                // Fall back to plain lyrics.
-                for (i in 0 until array.length()) {
-                    val item = array.getJSONObject(i)
-
-                    val plain =
-                        item.optStringOrEmpty("plainLyrics")
-
-                    if (plain.isNotBlank()) {
-                        return convertPlainLyricsToTimed(
-                            plain,
-                            duration
-                        )
-                    }
+                if (synced.isNotBlank() && isLyricCandidateMatch(title, artist, duration, candTitle, candArtist, candDuration)) {
+                    val parsed = parseLrcLyrics(synced)
+                    if (parsed.isNotEmpty()) return parsed
                 }
             }
+            // Pass 2: Validated Plain Lyrics
+            for (i in 0 until array.length()) {
+                val item = array.optJSONObject(i) ?: continue
+                val candTitle = item.optStringOrEmpty("trackName").ifEmpty { item.optStringOrEmpty("name") }
+                val candArtist = item.optStringOrEmpty("artistName")
+                val candDuration = item.optDouble("duration", 0.0).toInt()
+                val plain = item.optStringOrEmpty("plainLyrics")
 
-            conn.disconnect()
-        } catch (_: Exception) {
-        }
+                if (plain.isNotBlank() && isLyricCandidateMatch(title, artist, duration, candTitle, candArtist, candDuration)) {
+                    return convertPlainLyricsToTimed(plain, duration)
+                }
+            }
+        } catch (_: Exception) {}
     }
 
     return emptyList()
 }
 
 // ---------------------------------------------------------------------------
-// 2. Better Lyrics
+// 2. Better Lyrics (Supports LRC, TTML & JSON Line Arrays)
 // ---------------------------------------------------------------------------
 
 private suspend fun fetchFromBetterLyrics(
@@ -706,72 +1002,26 @@ private suspend fun fetchFromBetterLyrics(
     artist: String,
     duration: Int
 ): List<SyncedLyricLine> {
+    val encTitle = URLEncoder.encode(title.trim(), "UTF-8")
+    val encArtist = URLEncoder.encode(artist.trim(), "UTF-8")
+    val durParam = if (duration > 20) "&d=$duration" else ""
 
-    try {
-        val encodedTitle =
-            URLEncoder.encode(title.trim(), "UTF-8")
+    val endpoints = listOf(
+        "https://lyrics-api.boidu.dev/getLyrics?s=$encTitle&a=$encArtist$durParam",
+        "https://lyrics-api.boidu.dev/getLyrics?s=$encTitle&a=$encArtist"
+    ).distinct()
 
-        val encodedArtist =
-            URLEncoder.encode(artist.trim(), "UTF-8")
-
-        val endpoint =
-            "https://lyrics-api.boidu.dev/getLyrics?s=$encodedTitle&a=$encodedArtist"
-
-        val conn =
-            (URL(endpoint).openConnection() as HttpURLConnection).apply {
-                requestMethod = "GET"
-                connectTimeout = 3500
-                readTimeout = 3500
-                setRequestProperty(
-                    "User-Agent",
-                    "SonoraMusicPlayer/1.0"
-                )
-            }
-
-        if (conn.responseCode == HttpURLConnection.HTTP_OK) {
-            val resp =
-                conn.inputStream.bufferedReader()
-                    .use { it.readText() }
-                    .trim()
-
-            if (resp.startsWith("{")) {
-                val obj = JSONObject(resp)
-
-                val lyricsStr =
-                    obj.optStringOrEmpty("lyrics")
-                        .ifEmpty {
-                            obj.optStringOrEmpty("lrc")
-                        }
-
-                if (lyricsStr.isNotBlank()) {
-                    val parsed = parseLrcLyrics(lyricsStr)
-
-                    if (parsed.isNotEmpty()) {
-                        return parsed
-                    }
-
-                    // Some providers may return plain lyrics.
-                    if (!lyricsStr.contains("[00:") &&
-                        !lyricsStr.contains("[01:")
-                    ) {
-                        return convertPlainLyricsToTimed(
-                            lyricsStr,
-                            duration
-                        )
-                    }
-                }
-            }
-        }
-
-        conn.disconnect()
-    } catch (_: Exception) {
+    for (endpoint in endpoints) {
+        val resp = executeGetText(endpoint, timeoutMs = 3000) ?: continue
+        val parsed = extractLyricsFromUniversalPayload(resp, title, artist, duration)
+        if (parsed.isNotEmpty()) return parsed
     }
 
     return emptyList()
 }
 
 // ---------------------------------------------------------------------------
-// 3. KuGou
+// 3. KuGou (Validated Candidate Scoring + Base64 LRC Decoder)
 // ---------------------------------------------------------------------------
 
 private suspend fun fetchFromKuGou(
@@ -779,103 +1029,46 @@ private suspend fun fetchFromKuGou(
     artist: String,
     duration: Int
 ): List<SyncedLyricLine> {
+    val query = URLEncoder.encode("$title $artist".trim(), "UTF-8")
+    val durationMsParam = if (duration > 20) "${duration * 1000}" else ""
+    val searchUrl = "https://lyrics.kugou.com/search?ver=1&man=yes&client=pc&keyword=$query&duration=$durationMsParam&hash="
 
+    val resp = executeGetText(searchUrl, timeoutMs = 3000) ?: return emptyList()
     try {
-        val query =
-            URLEncoder.encode(
-                "$title $artist".trim(),
-                "UTF-8"
-            )
+        val root = JSONObject(resp)
+        val candidates = root.optJSONArray("candidates") ?: return emptyList()
 
-        val searchUrl =
-            "http://lyrics.kugou.com/search" +
-                "?ver=1&man=yes&client=pc" +
-                "&keyword=$query&duration=&hash="
+        for (i in 0 until candidates.length()) {
+            val cand = candidates.optJSONObject(i) ?: continue
+            val candSong = cand.optString("song", "")
+            val candSinger = cand.optString("singer", "")
+            val candDurSec = (cand.optLong("duration", 0L) / 1000L).toInt()
 
-        val conn =
-            (URL(searchUrl).openConnection() as HttpURLConnection).apply {
-                requestMethod = "GET"
-                connectTimeout = 3500
-                readTimeout = 3500
+            if (!isLyricCandidateMatch(title, artist, duration, candSong, candSinger, candDurSec)) {
+                continue
             }
 
-        if (conn.responseCode == HttpURLConnection.HTTP_OK) {
-            val resp =
-                conn.inputStream.bufferedReader().use {
-                    it.readText()
-                }
+            val id = cand.optString("id")
+            val accesskey = cand.optString("accesskey")
+            if (id.isBlank() || accesskey.isBlank()) continue
 
-            val root = JSONObject(resp)
-            val candidates = root.optJSONArray("candidates")
+            val lrcUrl = "https://lyrics.kugou.com/download?ver=1&client=pc&id=$id&accesskey=$accesskey&fmt=lrc&charset=utf8"
+            val dlResp = executeGetText(lrcUrl, timeoutMs = 3000) ?: continue
+            val b64 = JSONObject(dlResp).optStringOrEmpty("content")
 
-            if (candidates != null && candidates.length() > 0) {
-                val candidate = candidates.getJSONObject(0)
-
-                val id =
-                    candidate.optString("id")
-
-                val accesskey =
-                    candidate.optString("accesskey")
-
-                val lrcUrl =
-                    "http://lyrics.kugou.com/download" +
-                        "?ver=1&client=pc" +
-                        "&id=$id" +
-                        "&accesskey=$accesskey" +
-                        "&fmt=lrc&charset=utf8"
-
-                val dlConn =
-                    (URL(lrcUrl).openConnection() as HttpURLConnection).apply {
-                        connectTimeout = 3500
-                        readTimeout = 3500
-                    }
-
-                if (dlConn.responseCode == HttpURLConnection.HTTP_OK) {
-                    val dlResp =
-                        dlConn.inputStream.bufferedReader().use {
-                            it.readText()
-                        }
-
-                    val b64 =
-                        JSONObject(dlResp)
-                            .optStringOrEmpty("content")
-
-                    if (b64.isNotBlank()) {
-                        val lrcText =
-                            String(
-                                Base64.decode(
-                                    b64,
-                                    Base64.DEFAULT
-                                ),
-                                Charsets.UTF_8
-                            )
-
-                        val parsed = parseLrcLyrics(lrcText)
-
-                        if (parsed.isNotEmpty()) {
-                            return parsed
-                        }
-
-                        return convertPlainLyricsToTimed(
-                            lrcText,
-                            duration
-                        )
-                    }
-                }
-
-                dlConn.disconnect()
+            if (b64.isNotBlank()) {
+                val lrcText = String(Base64.decode(b64, Base64.DEFAULT), Charsets.UTF_8)
+                val parsed = parseLrcLyrics(lrcText)
+                if (parsed.isNotEmpty()) return parsed
             }
         }
-
-        conn.disconnect()
-    } catch (_: Exception) {
-    }
+    } catch (_: Exception) {}
 
     return emptyList()
 }
 
 // ---------------------------------------------------------------------------
-// 4. Paxsenix
+// 4. Paxsenix (Multi-Endpoint with Candidate Verification)
 // ---------------------------------------------------------------------------
 
 private suspend fun fetchFromPaxsenix(
@@ -883,99 +1076,27 @@ private suspend fun fetchFromPaxsenix(
     artist: String,
     duration: Int
 ): List<SyncedLyricLine> {
-
-    val encodedTitle =
-        URLEncoder.encode(title.trim(), "UTF-8")
-
-    val encodedArtist =
-        URLEncoder.encode(artist.trim(), "UTF-8")
-
-    val encodedQuery =
-        URLEncoder.encode(
-            "$title $artist".trim(),
-            "UTF-8"
-        )
+    val encTitle = URLEncoder.encode(title.trim(), "UTF-8")
+    val encArtist = URLEncoder.encode(artist.trim(), "UTF-8")
+    val encQuery = URLEncoder.encode("$title $artist".trim(), "UTF-8")
 
     val endpoints = listOf(
-        "https://lyrics.paxsenix.org/lyrics" +
-            "?title=$encodedTitle&artist=$encodedArtist",
-
-        "https://api.paxsenix.biz.id/lyrics" +
-            "?q=$encodedQuery"
+        "https://lyrics.paxsenix.org/lyrics?title=$encTitle&artist=$encArtist",
+        "https://api.paxsenix.biz.id/lyrics?title=$encTitle&artist=$encArtist",
+        "https://api.paxsenix.biz.id/lyrics?q=$encQuery"
     )
 
     for (endpoint in endpoints) {
-        try {
-            val conn =
-                (URL(endpoint).openConnection() as HttpURLConnection).apply {
-                    requestMethod = "GET"
-                    connectTimeout = 3500
-                    readTimeout = 3500
-                    setRequestProperty(
-                        "User-Agent",
-                        "SonoraMusicPlayer/1.0"
-                    )
-                }
-
-            if (conn.responseCode == HttpURLConnection.HTTP_OK) {
-                val resp =
-                    conn.inputStream.bufferedReader()
-                        .use { it.readText() }
-                        .trim()
-
-                if (resp.startsWith("{")) {
-                    val root = JSONObject(resp)
-
-                    val dataObj =
-                        root.optJSONObject("data") ?: root
-
-                    val lrc =
-                        dataObj.optStringOrEmpty("lyrics")
-                            .ifEmpty {
-                                dataObj.optStringOrEmpty("lrc")
-                            }
-
-                    if (lrc.isNotBlank()) {
-                        val parsed = parseLrcLyrics(lrc)
-
-                        if (parsed.isNotEmpty()) {
-                            return parsed
-                        }
-                    }
-
-                    val linesArr =
-                        dataObj.optJSONArray("lines")
-
-                    if (linesArr != null) {
-                        val parsed =
-                            parseJsonLyricLines(linesArr)
-
-                        if (parsed.isNotEmpty()) {
-                            return parsed
-                        }
-                    }
-                } else if (
-                    resp.contains("[00:") ||
-                    resp.contains("[01:")
-                ) {
-                    val parsed = parseLrcLyrics(resp)
-
-                    if (parsed.isNotEmpty()) {
-                        return parsed
-                    }
-                }
-            }
-
-            conn.disconnect()
-        } catch (_: Exception) {
-        }
+        val resp = executeGetText(endpoint, timeoutMs = 2800) ?: continue
+        val parsed = extractLyricsFromUniversalPayload(resp, title, artist, duration)
+        if (parsed.isNotEmpty()) return parsed
     }
 
     return emptyList()
 }
 
 // ---------------------------------------------------------------------------
-// 5. LyricsPlus
+// 5. LyricsPlus (Supports v2 Synced Lines, TTML & LRC)
 // ---------------------------------------------------------------------------
 
 private suspend fun fetchFromLyricsPlus(
@@ -983,88 +1104,26 @@ private suspend fun fetchFromLyricsPlus(
     artist: String,
     duration: Int
 ): List<SyncedLyricLine> {
+    val qTitle = URLEncoder.encode(title.trim(), "UTF-8")
+    val qArtist = URLEncoder.encode(artist.trim(), "UTF-8")
+    val durParam = if (duration > 20) "&duration=$duration" else ""
 
-    try {
-        val qTitle =
-            URLEncoder.encode(title.trim(), "UTF-8")
+    val endpoints = listOf(
+        "https://lyricsplus.prjktla.my.id/v2/lyrics/get?title=$qTitle&artist=$qArtist$durParam",
+        "https://lyricsplus.prjktla.my.id/v2/lyrics?title=$qTitle&artist=$qArtist$durParam"
+    )
 
-        val qArtist =
-            URLEncoder.encode(artist.trim(), "UTF-8")
-
-        val endpoint =
-            "https://lyricsplus.prjktla.my.id/v2/lyrics" +
-                "?title=$qTitle&artist=$qArtist"
-
-        val conn =
-            (URL(endpoint).openConnection() as HttpURLConnection).apply {
-                requestMethod = "GET"
-                connectTimeout = 3500
-                readTimeout = 3500
-                setRequestProperty(
-                    "User-Agent",
-                    "SonoraMusicPlayer/1.0"
-                )
-            }
-
-        if (conn.responseCode == HttpURLConnection.HTTP_OK) {
-            val resp =
-                conn.inputStream.bufferedReader()
-                    .use { it.readText() }
-                    .trim()
-
-            if (resp.startsWith("{")) {
-                val root = JSONObject(resp)
-
-                val data =
-                    root.optJSONObject("data") ?: root
-
-                val lrc =
-                    data.optStringOrEmpty("lyrics")
-                        .ifEmpty {
-                            data.optStringOrEmpty("lrc")
-                        }
-
-                if (lrc.isNotBlank()) {
-                    val parsed = parseLrcLyrics(lrc)
-
-                    if (parsed.isNotEmpty()) {
-                        return parsed
-                    }
-
-                    return convertPlainLyricsToTimed(
-                        lrc,
-                        duration
-                    )
-                }
-
-                val lines =
-                    data.optJSONArray("lines")
-
-                if (lines != null) {
-                    val parsed =
-                        parseJsonLyricLines(lines)
-
-                    if (parsed.isNotEmpty()) {
-                        return parsed
-                    }
-                }
-            } else if (
-                resp.contains("[00:") ||
-                resp.contains("[01:")
-            ) {
-                return parseLrcLyrics(resp)
-            }
-        }
-
-        conn.disconnect()
-    } catch (_: Exception) {
+    for (endpoint in endpoints) {
+        val resp = executeGetText(endpoint, timeoutMs = 2800) ?: continue
+        val parsed = extractLyricsFromUniversalPayload(resp, title, artist, duration)
+        if (parsed.isNotEmpty()) return parsed
     }
 
     return emptyList()
 }
 
 // ---------------------------------------------------------------------------
-// 6. Zemer
+// 6. Zemer (Direct Match + Validated Query Fallback)
 // ---------------------------------------------------------------------------
 
 private suspend fun fetchFromZemer(
@@ -1072,104 +1131,20 @@ private suspend fun fetchFromZemer(
     artist: String,
     duration: Int
 ): List<SyncedLyricLine> {
-
-    val encodedTitle =
-        URLEncoder.encode(title.trim(), "UTF-8")
-
-    val encodedArtist =
-        URLEncoder.encode(artist.trim(), "UTF-8")
-
-    val encodedQuery =
-        URLEncoder.encode(
-            "$title $artist".trim(),
-            "UTF-8"
-        )
+    val encTitle = URLEncoder.encode(title.trim(), "UTF-8")
+    val encArtist = URLEncoder.encode(artist.trim(), "UTF-8")
+    val encQuery = URLEncoder.encode("$title $artist".trim(), "UTF-8")
 
     val endpoints = listOf(
-        "https://api.zemer.app/lyrics" +
-            "?title=$encodedTitle&artist=$encodedArtist",
-
-        "https://zemer.hamafitz.com/api/lyrics" +
-            "?q=$encodedQuery"
+        "https://api.zemer.app/lyrics?title=$encTitle&artist=$encArtist",
+        "https://zemer.hamafitz.com/api/lyrics?title=$encTitle&artist=$encArtist",
+        "https://zemer.hamafitz.com/api/lyrics?q=$encQuery"
     )
 
     for (endpoint in endpoints) {
-        try {
-            val conn =
-                (URL(endpoint).openConnection() as HttpURLConnection).apply {
-                    requestMethod = "GET"
-                    connectTimeout = 3500
-                    readTimeout = 3500
-                    setRequestProperty(
-                        "User-Agent",
-                        "SonoraMusicPlayer/1.0"
-                    )
-                }
-
-            if (conn.responseCode == HttpURLConnection.HTTP_OK) {
-                val resp =
-                    conn.inputStream.bufferedReader()
-                        .use { it.readText() }
-                        .trim()
-
-                if (resp.startsWith("{")) {
-                    val root = JSONObject(resp)
-
-                    val lyricsStr =
-                        root.optStringOrEmpty("lyrics")
-                            .ifEmpty {
-                                root.optStringOrEmpty("lrc")
-                            }
-                            .ifEmpty {
-                                root.optStringOrEmpty("syncedLyrics")
-                            }
-
-                    if (lyricsStr.isNotBlank()) {
-                        val parsed =
-                            parseLrcLyrics(lyricsStr)
-
-                        if (parsed.isNotEmpty()) {
-                            return parsed
-                        }
-                    }
-
-                    val lines =
-                        root.optJSONArray("lines")
-
-                    if (lines != null) {
-                        val parsed =
-                            parseJsonLyricLines(lines)
-
-                        if (parsed.isNotEmpty()) {
-                            return parsed
-                        }
-                    }
-
-                    val plain =
-                        root.optStringOrEmpty("plainLyrics")
-
-                    if (plain.isNotBlank()) {
-                        return convertPlainLyricsToTimed(
-                            plain,
-                            duration
-                        )
-                    }
-                } else if (
-                    resp.contains("[00:") ||
-                    resp.contains("[01:")
-                ) {
-                    val parsed =
-                        parseLrcLyrics(resp)
-
-                    if (parsed.isNotEmpty()) {
-                        return parsed
-                    }
-                }
-            }
-
-            conn.disconnect()
-        } catch (_: Exception) {
-        }
+        val resp = executeGetText(endpoint, timeoutMs = 2800) ?: continue
+        val parsed = extractLyricsFromUniversalPayload(resp, title, artist, duration)
+        if (parsed.isNotEmpty()) return parsed
     }
 
     return emptyList()
@@ -2581,17 +2556,20 @@ private val ARTIST_SPLIT_REGEX =
     Regex("\\s*(,|&|/|;|\\bfeat\\.?|\\bft\\.?|\\band\\b)\\s*", RegexOption.IGNORE_CASE)
 
 fun cleanSongTitle(rawTitle: String): String {
-    var clean = rawTitle.lowercase(Locale.ROOT)
+    var clean = sanitizeText(rawTitle).lowercase(Locale.ROOT)
+    // Strip everything after a pipe "|" (usually movie/label metadata on YouTube)
+    if (clean.contains("|")) {
+        clean = clean.substringBefore("|")
+    }
     clean = clean.replace(Regex("\\(.*?\\)"), " ")
     clean = clean.replace(Regex("\\[.*?\\]"), " ")
     clean = clean.replace(Regex("\\{.*?\\}"), " ")
     clean = clean.replace(
-        Regex("-\\s*(slowed|reverb|remix|acoustic|live|sped up|speed up|lofi|instrumental|edit|deluxe|remastered|version|from|soundtrack|ost).*"),
+        Regex("-\\s*(slowed|reverb|remix|acoustic|live|sped up|speed up|lofi|instrumental|edit|deluxe|remastered|version|from|soundtrack|ost|full video|full song|official|lyrical|video|audio).*"),
         " "
     )
-    clean = clean.replace(Regex("\\b($TITLE_NOISE_WORDS)\\b"), " ")
+    clean = clean.replace(Regex("\\b($TITLE_NOISE_WORDS|full song|lyrical|video song)\\b"), " ")
     clean = clean.replace(Regex("\\b(feat|ft)\\.?\\s+.*"), " ")
-    // \p{L}\p{N} keeps Hindi / Punjabi / other non-Latin titles instead of erasing them
     clean = clean.replace(Regex("[^\\p{L}\\p{N} ]"), " ")
     return clean.trim().replace(Regex("\\s+"), " ")
 }
@@ -2604,7 +2582,7 @@ fun cleanArtist(rawArtist: String): String {
         .replace(Regex("\\s+"), " ")
 }
 
-private fun parseDurationSeconds(duration: String): Int {
+fun parseDurationSeconds(duration: String): Int {
     if (duration.isBlank()) return 0
 
     val parts = duration.trim().split(":")
@@ -2976,37 +2954,58 @@ fun SyncedLyricsView(
     val coroutineScope = rememberCoroutineScope()
     var isManualScrolling by remember { mutableStateOf(false) }
 
+    // Reset manual scrolling state whenever a new song's lyrics load
+    LaunchedEffect(lyrics) {
+        isManualScrolling = false
+    }
+
+    // +250ms lookahead so the active line highlights right on beat
     val activeIndex = remember(currentPositionMs, lyrics) {
         if (lyrics.isEmpty()) -1
         else {
-            val idx = lyrics.indexOfLast { currentPositionMs >= it.timeMs }
+            val syncPositionMs = currentPositionMs + 250L
+            val idx = lyrics.indexOfLast { syncPositionMs >= it.timeMs }
             if (idx >= 0) idx else 0
         }
     }
 
-    var isAutoScrolling by remember { mutableStateOf(false) }
-
-    LaunchedEffect(listState) {
-        snapshotFlow { listState.isScrollInProgress }
-            .collect { scrolling ->
-                if (!scrolling && isManualScrolling) {
-                    delay(3500L)
-                    isManualScrolling = false
+    // Detect genuine user touch scrolling without blocking LazyColumn's native fling physics
+    val nestedScrollConnection = remember {
+        object : androidx.compose.ui.input.nestedscroll.NestedScrollConnection {
+            override fun onPreScroll(
+                available: androidx.compose.ui.geometry.Offset,
+                source: androidx.compose.ui.input.nestedscroll.NestedScrollSource
+            ): androidx.compose.ui.geometry.Offset {
+                if (source == androidx.compose.ui.input.nestedscroll.NestedScrollSource.Drag) {
+                    isManualScrolling = true
                 }
+                return androidx.compose.ui.geometry.Offset.Zero
             }
+        }
     }
 
+    // Auto-scroll to the active lyric line ONLY when not manually scrolling
     LaunchedEffect(activeIndex, isManualScrolling) {
         if (!isManualScrolling && activeIndex >= 0 && lyrics.isNotEmpty()) {
-            isAutoScrolling = true
-
             try {
                 listState.animateScrollToItem(
                     index = activeIndex,
                     scrollOffset = -140
                 )
-            } finally {
-                isAutoScrolling = false
+            } catch (_: Exception) {}
+        }
+    }
+
+    fun triggerSyncToCurrentAudio() {
+        isManualScrolling = false
+        if (activeIndex >= 0 && lyrics.isNotEmpty()) {
+            coroutineScope.launch {
+                try {
+                    listState.animateScrollToItem(
+                        index = activeIndex,
+                        scrollOffset = -140
+                    )
+                } catch (_: Exception) {}
             }
         }
     }
@@ -3053,7 +3052,17 @@ fun SyncedLyricsView(
                     }
                 }
 
-                Spacer(modifier = Modifier.width(48.dp))
+                // Top-right quick Sync button when user scrolls away
+                if (isManualScrolling && activeIndex >= 0) {
+                    TextButton(
+                        onClick = { triggerSyncToCurrentAudio() },
+                        colors = ButtonDefaults.textButtonColors(contentColor = Color(0xFF7C4DFF))
+                    ) {
+                        Text("Sync", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                    }
+                } else {
+                    Spacer(modifier = Modifier.width(48.dp))
+                }
             }
 
             Spacer(modifier = Modifier.height(10.dp))
@@ -3077,21 +3086,7 @@ fun SyncedLyricsView(
                     modifier = Modifier
                         .weight(1f)
                         .fillMaxWidth()
-                        .pointerInput(Unit) {
-                            detectDragGestures(
-                                onDragStart = {
-                                    isManualScrolling = true
-                                },
-                                onDragEnd = {
-                                    // Keep manual-scroll state for the existing 3.5 second timeout
-                                },
-                                onDragCancel = {
-                                    // Keep manual-scroll state for the existing 3.5 second timeout
-                                }
-                            ) { _, _ ->
-                                // Drag detected
-                            }
-                        },
+                        .nestedScroll(nestedScrollConnection),
                     contentPadding = PaddingValues(top = 180.dp, bottom = 220.dp),
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.spacedBy(28.dp)
@@ -3182,50 +3177,38 @@ fun SyncedLyricsView(
             }
         }
 
+        // Floating pill button at the bottom that appears immediately on manual scroll
         AnimatedVisibility(
-            visible = isManualScrolling && activeIndex >= 0,
+            visible = isManualScrolling && activeIndex >= 0 && lyrics.isNotEmpty(),
             enter = slideInVertically(initialOffsetY = { it / 2 }) + fadeIn(),
             exit = slideOutVertically(targetOffsetY = { it / 2 }) + fadeOut(),
             modifier = Modifier
                 .align(Alignment.BottomCenter)
-                .padding(bottom = 76.dp)
+                .padding(bottom = 82.dp)
         ) {
             Card(
                 shape = RoundedCornerShape(24.dp),
                 colors = CardDefaults.cardColors(containerColor = Color(0xFF7C4DFF)),
-                elevation = CardDefaults.cardElevation(defaultElevation = 6.dp),
+                elevation = CardDefaults.cardElevation(defaultElevation = 8.dp),
                 modifier = Modifier.clickable {
-                    isManualScrolling = false
-
-                    coroutineScope.launch {
-                        isAutoScrolling = true
-
-                        try {
-                            listState.animateScrollToItem(
-                                index = activeIndex,
-                                scrollOffset = -140
-                            )
-                        } finally {
-                            isAutoScrolling = false
-                        }
-                    }
+                    triggerSyncToCurrentAudio()
                 }
             ) {
                 Row(
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                    modifier = Modifier.padding(horizontal = 18.dp, vertical = 10.dp),
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     Icon(
-                        imageVector = Icons.Rounded.PlayArrow,
-                        contentDescription = "Sync",
+                        imageVector = Icons.Rounded.GraphicEq,
+                        contentDescription = "Sync Lyrics",
                         tint = Color.White,
-                        modifier = Modifier.size(16.dp)
+                        modifier = Modifier.size(18.dp)
                     )
                     Text(
-                        text = "Sync to Audio",
+                        text = "Sync Lyrics",
                         color = Color.White,
-                        fontSize = 12.sp,
+                        fontSize = 13.sp,
                         fontWeight = FontWeight.Bold
                     )
                 }
@@ -4160,16 +4143,29 @@ fun SonoraPlayerScreen(
 
     LaunchedEffect(activeSongId, activeTitle, activeArtist) {
         if (activeSongId.isNotBlank()) {
+            val requestedSongId = activeSongId
+            // Immediately clear previous song's lyrics so stale lines never display
+            activeSyncedLyrics = emptyList()
+            activeLyricsProvider = ""
             isLyricsLoading = true
-            val durationSec = (totalDuration / 1000).toInt()
+
+            // Use formatted track duration if ExoPlayer hasn't reported duration yet
+            val parsedDurationSec = parseDurationSeconds(activeDurationFormatted)
+            val playerDurationSec = (totalDuration / 1000).toInt()
+            val effectiveDurationSec = if (parsedDurationSec > 0) parsedDurationSec else playerDurationSec
+
             val (provider, parsedLines) = fetchLyricsFromPriorityProviders(
                 songTitle = activeTitle,
                 artistName = activeArtist,
-                durationSeconds = durationSec
+                durationSeconds = effectiveDurationSec
             )
-            activeLyricsProvider = provider
-            activeSyncedLyrics = parsedLines
-            isLyricsLoading = false
+
+            // Guard against race condition if user skipped tracks while fetching
+            if (activeSongId == requestedSongId) {
+                activeLyricsProvider = provider
+                activeSyncedLyrics = parsedLines
+                isLyricsLoading = false
+            }
         }
     }
 
