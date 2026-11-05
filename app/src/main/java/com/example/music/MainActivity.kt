@@ -13,6 +13,7 @@ import android.net.Uri
 import android.os.Bundle
 import android.util.Base64
 import android.widget.Toast
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
@@ -487,6 +488,40 @@ fun parseLrcLyrics(lrcString: String): List<SyncedLyricLine> {
     return enrichLinesWithWordTimings(lines)
 }
 
+fun parseTtmlTimestamp(tag: String): Long {
+    val clean = tag.trim().removeSuffix("s")
+    if (clean.contains(":")) {
+        val parts = clean.split(":")
+        if (parts.size == 2) {
+            val min = parts[0].toLongOrNull() ?: 0L
+            val secParts = parts[1].split(".")
+            val sec = secParts[0].toLongOrNull() ?: 0L
+            val ms = if (secParts.size > 1) {
+                secParts[1].padEnd(3, '0').take(3).toLongOrNull() ?: 0L
+            } else {
+                0L
+            }
+            return (min * 60L + sec) * 1000L + ms
+        }
+        if (parts.size == 3) {
+            val hr = parts[0].toLongOrNull() ?: 0L
+            val min = parts[1].toLongOrNull() ?: 0L
+            val secParts = parts[2].split(".")
+            val sec = secParts[0].toLongOrNull() ?: 0L
+            val ms = if (secParts.size > 1) {
+                secParts[1].padEnd(3, '0').take(3).toLongOrNull() ?: 0L
+            } else {
+                0L
+            }
+            return ((hr * 3600L) + (min * 60L) + sec) * 1000L + ms
+        }
+    } else {
+        val secs = clean.toDoubleOrNull() ?: return 0L
+        return (secs * 1000.0).toLong()
+    }
+    return 0L
+}
+
 fun parseTtmlLyrics(ttml: String): List<SyncedLyricLine> {
     val lines = mutableListOf<SyncedLyricLine>()
 
@@ -659,97 +694,6 @@ fun convertPlainLyricsToTimed(
             text = text
         )
     }
-}
-
-private fun JSONObject.optStringOrEmpty(key: String): String =
-    if (isNull(key)) "" else optString(key, "")
-
-// ---------------------------------------------------------------------------
-// Multi-Provider Chain Dispatcher
-// ---------------------------------------------------------------------------
-
-suspend fun fetchLyricsFromPriorityProviders(
-    songTitle: String,
-    artistName: String,
-    durationSeconds: Int = 0
-): Pair<String, List<SyncedLyricLine>> = withContext(Dispatchers.IO) {
-
-    val cleanTitle = cleanSongTitle(songTitle)
-
-    val artistClean =
-        if (
-            artistName.equals("Song", ignoreCase = true) ||
-            artistName.equals("Unknown Artist", ignoreCase = true)
-        ) {
-            ""
-        } else {
-            cleanArtist(artistName)
-        }
-
-    val providers: List<Pair<String, suspend () -> List<SyncedLyricLine>>> =
-        listOf(
-            "LrcLib" to {
-                fetchFromLrcLib(
-                    cleanTitle,
-                    artistClean,
-                    durationSeconds
-                )
-            },
-
-            "Better Lyrics" to {
-                fetchFromBetterLyrics(
-                    cleanTitle,
-                    artistClean,
-                    durationSeconds
-                )
-            },
-
-            "KuGou" to {
-                fetchFromKuGou(
-                    cleanTitle,
-                    artistClean,
-                    durationSeconds
-                )
-            },
-
-            "Paxsenix" to {
-                fetchFromPaxsenix(
-                    cleanTitle,
-                    artistClean,
-                    durationSeconds
-                )
-            },
-
-            "LyricsPlus" to {
-                fetchFromLyricsPlus(
-                    cleanTitle,
-                    artistClean,
-                    durationSeconds
-                )
-            },
-
-            "Zemer" to {
-                fetchFromZemer(
-                    cleanTitle,
-                    artistClean,
-                    durationSeconds
-                )
-            }
-        )
-
-    for ((name, fetcher) in providers) {
-        try {
-            val result = fetcher()
-
-            if (result.isNotEmpty()) {
-                return@withContext Pair(name, result)
-            }
-        } catch (_: Exception) {
-            // Continue to the next provider.
-        }
-    }
-
-    Pair("Sonora", emptyList())
 }
 
 // ---------------------------------------------------------------------------
