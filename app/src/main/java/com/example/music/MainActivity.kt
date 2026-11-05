@@ -1741,6 +1741,125 @@ suspend fun searchYouTubeMusic(
     }
 }
 
+/**
+ * Universal search engine:
+ * 1. Queries YouTube Music (WEB_REMIX) for official releases, albums, and tracks.
+ * 2. If results are scarce (< 8 items), queries the main YouTube catalog (WEB client)
+ *    to retrieve covers, unreleased audio, regional songs, and live sessions.
+ */
+suspend fun searchYouTubeUniversal(
+    query: String
+): Pair<List<FullTrackItem>, String?> = withContext(Dispatchers.IO) {
+    if (query.trim().isBlank()) {
+        return@withContext Pair(emptyList<FullTrackItem>(), null)
+    }
+
+    // Step 1: Query YouTube Music
+    val (ytMusicResults, ytMusicError) = searchYouTubeMusic(query)
+    if (ytMusicResults.size >= 8) {
+        return@withContext Pair(ytMusicResults, null)
+    }
+
+    val combinedResults = ytMusicResults.toMutableList()
+
+    // Step 2: Fallback to standard YouTube Web Client (Videos Only)
+    try {
+        val url = URL("https://www.youtube.com/youtubei/v1/search")
+        val conn = (url.openConnection() as HttpURLConnection).apply {
+            requestMethod = "POST"
+            connectTimeout = 6000
+            readTimeout = 6000
+            doOutput = true
+            setRequestProperty("Content-Type", "application/json")
+            setRequestProperty(
+                "User-Agent",
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+            )
+        }
+
+        val payload = JSONObject().apply {
+            put("context", JSONObject().apply {
+                put("client", JSONObject().apply {
+                    put("clientName", "WEB")
+                    put("clientVersion", "2.20240101.00.00")
+                    put("hl", "en")
+                    put("gl", "IN")
+                })
+            })
+            put("query", query.trim())
+            // EgIQAQ%3D%3D enforces the search filter strictly to Videos
+            put("params", "EgIQAQ%3D%3D")
+        }
+
+        conn.outputStream.use {
+            it.write(payload.toString().toByteArray(Charsets.UTF_8))
+        }
+
+        if (conn.responseCode == HttpURLConnection.HTTP_OK) {
+            val respText = conn.inputStream.bufferedReader().use { it.readText() }
+            val root = JSONObject(respText)
+
+            val renderers = mutableListOf<JSONObject>()
+            findRenderersRecursive(root, "videoRenderer", renderers)
+
+            for (item in renderers) {
+                val videoId = item.optString("videoId")
+                if (videoId.isBlank() || combinedResults.any { it.id == videoId }) continue
+
+                // Title
+                val titleRuns = item.optJSONObject("title")?.optJSONArray("runs")
+                val title = if (titleRuns != null && titleRuns.length() > 0) {
+                    buildString {
+                        for (i in 0 until titleRuns.length()) {
+                            append(titleRuns.optJSONObject(i)?.optString("text", "") ?: "")
+                        }
+                    }.trim()
+                } else {
+                    item.optJSONObject("title")?.optString("simpleText", "Unknown Track") ?: "Unknown Track"
+                }
+
+                // Channel / Artist
+                val ownerRuns = item.optJSONObject("ownerText")?.optJSONArray("runs")
+                val artist = if (ownerRuns != null && ownerRuns.length() > 0) {
+                    ownerRuns.optJSONObject(0)?.optString("text", "Unknown Artist") ?: "Unknown Artist"
+                } else {
+                    "Unknown Artist"
+                }
+
+                // Duration
+                val duration = item.optJSONObject("lengthText")?.optString("simpleText", "") ?: ""
+
+                // High-Res Thumbnail
+                val thumbArray = item.optJSONObject("thumbnail")?.optJSONArray("thumbnails")
+                val artworkUrl = if (thumbArray != null && thumbArray.length() > 0) {
+                    thumbArray.getJSONObject(thumbArray.length() - 1).optString("url", "")
+                } else {
+                    ""
+                }
+
+                combinedResults.add(
+                    FullTrackItem(
+                        id = videoId,
+                        title = sanitizeText(title),
+                        artist = sanitizeText(artist),
+                        audioUrl = "",
+                        artworkUrl = artworkUrl,
+                        durationFormatted = duration
+                    )
+                )
+            }
+        }
+    } catch (e: Exception) {
+        e.printStackTrace()
+    }
+
+    if (combinedResults.isNotEmpty()) {
+        Pair(combinedResults, null)
+    } else {
+        Pair(emptyList(), ytMusicError ?: "No search results found")
+    }
+}
+
 suspend fun fetchYouTubeAutomixRadio(
     videoId: String
 ): List<FullTrackItem> = withContext(Dispatchers.IO) {
@@ -4133,7 +4252,7 @@ fun SonoraPlayerScreen(
 
     LaunchedEffect(selectedMoodCategory) {
         isMoodLoading = true
-        val (tracks, _) = searchYouTubeMusic(selectedMoodCategory.searchQuery)
+        val (tracks, _) = searchYouTubeUniversal(selectedMoodCategory.searchQuery)
         moodTracks = tracks
         isMoodLoading = false
     }
@@ -4178,11 +4297,11 @@ fun SonoraPlayerScreen(
                     val candidates = mutableListOf<FullTrackItem>()
                     candidates.addAll(fetchYouTubeAutomixRadio(seedId))
                     if (candidates.size < 25) {
-                        val (moreArtist, _) = searchYouTubeMusic("$seedArtist latest hits")
+                        val (moreArtist, _) = searchYouTubeUniversal("$seedArtist latest hits")
                         candidates.addAll(moreArtist)
                     }
                     if (candidates.size < 25) {
-                        val (trending, _) = searchYouTubeMusic("Trending Hindi Bollywood Songs")
+                        val (trending, _) = searchYouTubeUniversal("Trending Hindi Bollywood Songs")
                         candidates.addAll(trending)
                     }
 
@@ -4731,7 +4850,9 @@ fun SonoraPlayerScreen(
             isSearching = true
             coroutineScope.launch {
                 dao.insertSearchQuery(SearchHistoryEntity(query = queryToSearch.trim()))
-                val (results, _) = searchYouTubeMusic(queryToSearch)
+                
+                // Calls searchYouTubeUniversal instead of searchYouTubeMusic
+                val (results, _) = searchYouTubeUniversal(queryToSearch)
 
                 searchResults = filterSimilarTracks(
                     incoming = results,
