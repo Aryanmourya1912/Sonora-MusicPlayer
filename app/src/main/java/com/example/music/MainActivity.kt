@@ -7,44 +7,47 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
+import android.graphics.Bitmap
+import android.graphics.Canvas
 import android.graphics.drawable.BitmapDrawable
 import android.media.AudioManager
 import android.net.Uri
 import android.os.Bundle
 import android.util.Base64
+import android.view.View
 import android.widget.Toast
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
-import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
-import androidx.compose.animation.togetherWith
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.slideOutVertically
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.draggable
 import androidx.compose.foundation.gestures.rememberDraggableState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
@@ -84,8 +87,8 @@ import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.Favorite
 import androidx.compose.material.icons.rounded.FavoriteBorder
-import androidx.compose.material.icons.rounded.GraphicEq
 import androidx.compose.material.icons.rounded.Folder
+import androidx.compose.material.icons.rounded.GraphicEq
 import androidx.compose.material.icons.rounded.History
 import androidx.compose.material.icons.rounded.Home
 import androidx.compose.material.icons.rounded.Info
@@ -152,35 +155,43 @@ import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
-import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.text.SpanStyle
-import androidx.compose.ui.text.buildAnnotatedString
-import androidx.compose.ui.text.withStyle
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.platform.LocalSavedStateRegistryOwner
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.platform.ViewCompositionStrategy
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 import androidx.core.view.WindowCompat
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.ViewTreeLifecycleOwner
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
@@ -189,6 +200,8 @@ import androidx.media3.common.Timeline
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
 import androidx.palette.graphics.Palette
+import androidx.savedstate.SavedStateRegistryOwner
+import androidx.savedstate.ViewTreeSavedStateRegistryOwner
 import coil.ImageLoader
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
@@ -199,14 +212,8 @@ import com.example.music.data.PlaylistEntity
 import com.example.music.data.PlaylistSongEntity
 import com.example.music.data.SearchHistoryEntity
 import com.example.music.data.SonoraDatabase
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.flowOf
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
-import org.json.JSONArray
-import org.json.JSONObject
 import java.io.File
+import java.io.FileOutputStream
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
@@ -215,6 +222,13 @@ import javax.crypto.Cipher
 import javax.crypto.spec.SecretKeySpec
 import kotlin.math.max
 import kotlin.math.roundToInt
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import org.json.JSONArray
+import org.json.JSONObject
 
 data class FullTrackItem(
     val id: String,
@@ -693,6 +707,57 @@ fun convertPlainLyricsToTimed(
             timeMs = index * intervalMs,
             text = text
         )
+    }
+}
+
+fun captureAndShareLyricCard(
+    context: Context,
+    lifecycleOwner: LifecycleOwner,
+    savedStateRegistryOwner: SavedStateRegistryOwner,
+    content: @Composable () -> Unit
+) {
+    val composeView = ComposeView(context).apply {
+        setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed)
+        ViewTreeLifecycleOwner.set(this, lifecycleOwner)
+        ViewTreeSavedStateRegistryOwner.set(this, savedStateRegistryOwner)
+        setContent {
+            MaterialTheme(colorScheme = darkColorScheme()) {
+                content()
+            }
+        }
+    }
+
+    // Standard Instagram Story Dimensions
+    val width = 1080
+    val height = 1920
+
+    composeView.measure(
+        View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY),
+        View.MeasureSpec.makeMeasureSpec(height, View.MeasureSpec.EXACTLY)
+    )
+    composeView.layout(0, 0, width, height)
+
+    val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+    val canvas = Canvas(bitmap)
+    composeView.draw(canvas)
+
+    try {
+        val cachePath = File(context.cacheDir, "images")
+        cachePath.mkdirs()
+        val file = File(cachePath, "sonora_lyric_card.png")
+        val stream = FileOutputStream(file)
+        bitmap.compress(Bitmap.CompressFormat.PNG, 100, stream)
+        stream.close()
+
+        val uri = FileProvider.getUriForFile(context, "${context.packageName}.provider", file)
+        val intent = Intent(Intent.ACTION_SEND).apply {
+            type = "image/png"
+            putExtra(Intent.EXTRA_STREAM, uri)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        context.startActivity(Intent.createChooser(intent, "Share Lyric Card"))
+    } catch (e: Exception) {
+        e.printStackTrace()
     }
 }
 
@@ -2119,6 +2184,158 @@ suspend fun fetchArtistCatalog(
     val uniqueHits = popularHits.filter { hit -> topSongs.none { it.id == hit.id } }
     Pair(topSongs, uniqueHits)
 }
+   
+@Composable
+fun SyncedLyricsView(
+    providerName: String,
+    lyrics: List<SyncedLyricLine>,
+    currentPositionMs: Long,
+    isLoading: Boolean,
+    onSeekRequested: (Long) -> Unit,
+    onCloseRequested: () -> Unit,
+    trackTitle: String,
+    trackArtist: String,
+    artworkUrl: String,
+    modifier: Modifier = Modifier
+) {
+    val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+    val savedStateRegistryOwner = LocalSavedStateRegistryOwner.current
+    
+    val listState = rememberLazyListState()
+    val coroutineScope = rememberCoroutineScope()
+    var isManualScrolling by remember { mutableStateOf(false) }
+    
+    // Selection State
+    var selectedLines by remember { mutableStateOf(emptySet<Int>()) }
+
+    // Clear selection when song changes
+    LaunchedEffect(lyrics) {
+        isManualScrolling = false
+        selectedLines = emptySet()
+    }
+
+    // ... (Keep your existing activeIndex and nestedScrollConnection setup here) ...
+
+    Box(
+        modifier = modifier
+            .fillMaxSize()
+            .padding(horizontal = 20.dp, vertical = 12.dp)
+    ) {
+        Column(
+            modifier = Modifier.fillMaxSize(),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            // Dynamic Top Bar: Normal vs Selection Mode
+            if (selectedLines.isNotEmpty()) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    IconButton(onClick = { selectedLines = emptySet() }) {
+                        Icon(Icons.Rounded.Close, contentDescription = "Cancel", tint = Color.White)
+                    }
+                    Text(
+                        text = "${selectedLines.size}/4 Selected",
+                        color = Color.White,
+                        fontWeight = FontWeight.Bold
+                    )
+                    TextButton(
+                        onClick = {
+                            val linesToShare = lyrics
+                                .filterIndexed { i, _ -> selectedLines.contains(i) }
+                                .map { it.text }
+                            
+                            captureAndShareLyricCard(
+                                context = context,
+                                lifecycleOwner = lifecycleOwner,
+                                savedStateRegistryOwner = savedStateRegistryOwner
+                            ) {
+                                LyricCardTemplate(
+                                    selectedLyrics = linesToShare,
+                                    trackTitle = trackTitle,
+                                    trackArtist = trackArtist,
+                                    artworkUrl = artworkUrl
+                                )
+                            }
+                            selectedLines = emptySet()
+                        },
+                        colors = ButtonDefaults.textButtonColors(contentColor = Color(0xFF7C4DFF))
+                    ) {
+                        Text("Share", fontWeight = FontWeight.Bold)
+                    }
+                }
+            } else {
+                // ... (Keep your existing normal top bar with Back button and provider info here) ...
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            if (isLoading) {
+                Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
+                    CircularProgressIndicator(color = Color.White)
+                }
+            } else if (lyrics.isNotEmpty()) {
+                LazyColumn(
+                    state = listState,
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
+                        .nestedScroll(nestedScrollConnection),
+                    contentPadding = PaddingValues(top = 180.dp, bottom = 220.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(28.dp)
+                ) {
+                    itemsIndexed(lyrics, key = { index, line -> "${line.timeMs}_$index" }) { index, item ->
+                        val isActive = index == activeIndex
+                        val isPast = index < activeIndex
+                        val isSelected = selectedLines.contains(index)
+
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(12.dp))
+                                // Apply semi-transparent overlay if selected
+                                .background(if (isSelected) Color(0x407C4DFF) else Color.Transparent)
+                                .pointerInput(Unit) {
+                                    detectTapGestures(
+                                        onLongPress = {
+                                            if (selectedLines.isEmpty()) {
+                                                selectedLines = setOf(index)
+                                            }
+                                        },
+                                        onTap = {
+                                            if (selectedLines.isNotEmpty()) {
+                                                if (isSelected) {
+                                                    selectedLines = selectedLines - index
+                                                } else if (selectedLines.size < 4) {
+                                                    selectedLines = selectedLines + index
+                                                }
+                                            } else {
+                                                onSeekRequested(item.timeMs)
+                                                isManualScrolling = false
+                                            }
+                                        }
+                                    )
+                                }
+                                .padding(horizontal = 12.dp, vertical = 12.dp)
+                        ) {
+                            KaraokeLineText(
+                                line = item,
+                                currentPositionMs = currentPositionMs + 150L,
+                                isActive = isActive,
+                                isPast = isPast
+                            )
+                        }
+                    }
+                }
+            }
+            // ... (Keep your existing floating bottom Sync button and artwork footer) ...
+        }
+    }
+}     
 
 // ---------------------------------------------------------------------------
 // Artist Detail Screen
@@ -2936,6 +3153,113 @@ fun sanitizeText(input: String): String {
         .replace("&lt;", "<")
         .replace("&gt;", ">")
         .replace("&amp;", "&")
+}
+        
+import androidx.compose.ui.draw.blur
+
+@Composable
+fun LyricCardTemplate(
+    selectedLyrics: List<String>,
+    trackTitle: String,
+    trackArtist: String,
+    artworkUrl: String
+) {
+    Box(
+        modifier = Modifier
+            .size(1080.dp, 1920.dp)
+            .background(Color(0xFF0F151C))
+    ) {
+        // Blurred Background
+        AsyncImage(
+            model = artworkUrl,
+            contentDescription = null,
+            modifier = Modifier
+                .fillMaxSize()
+                .blur(radius = 80.dp)
+                .graphicsLayer { alpha = 0.6f },
+            contentScale = ContentScale.Crop
+        )
+        
+        // Gradient Overlay for readability
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(
+                    Brush.verticalGradient(
+                        colors = listOf(Color.Transparent, Color(0xAA000000)),
+                        startY = 800f
+                    )
+                )
+        )
+
+        // Centered Lyrics
+        Column(
+            modifier = Modifier
+                .align(Alignment.Center)
+                .padding(horizontal = 80.dp),
+            verticalArrangement = Arrangement.spacedBy(40.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            selectedLyrics.forEach { line ->
+                Text(
+                    text = line,
+                    fontSize = 64.sp,
+                    fontWeight = FontWeight.ExtraBold,
+                    color = Color.White,
+                    textAlign = TextAlign.Center,
+                    lineHeight = 78.sp
+                )
+            }
+        }
+
+        // Bottom Attribution Footer
+        Row(
+            modifier = Modifier
+                .align(Alignment.BottomStart)
+                .fillMaxWidth()
+                .padding(60.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            AsyncImage(
+                model = artworkUrl,
+                contentDescription = null,
+                modifier = Modifier
+                    .size(140.dp)
+                    .clip(RoundedCornerShape(24.dp)),
+                contentScale = ContentScale.Crop
+            )
+            Spacer(modifier = Modifier.width(40.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = trackTitle,
+                    color = Color.White,
+                    fontSize = 48.sp,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1
+                )
+                Text(
+                    text = trackArtist,
+                    color = Color(0xFFD1D5DB),
+                    fontSize = 36.sp,
+                    maxLines = 1
+                )
+            }
+            Column(horizontalAlignment = Alignment.End) {
+                Icon(
+                    imageVector = Icons.Rounded.GraphicEq,
+                    contentDescription = null,
+                    tint = Color(0xFF7C4DFF),
+                    modifier = Modifier.size(64.dp)
+                )
+                Text(
+                    text = "Sonora",
+                    color = Color.White,
+                    fontSize = 28.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
