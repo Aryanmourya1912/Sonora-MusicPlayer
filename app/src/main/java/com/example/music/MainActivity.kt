@@ -113,6 +113,8 @@ import androidx.compose.material.icons.rounded.Share
 import androidx.compose.material.icons.rounded.Shuffle
 import androidx.compose.material.icons.rounded.SkipNext
 import androidx.compose.material.icons.rounded.SkipPrevious
+import androidx.compose.material.icons.rounded.SlowMotionVideo
+import androidx.compose.material.icons.rounded.Speed
 import androidx.compose.material.icons.rounded.TrendingUp
 import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material.icons.rounded.VolumeUp
@@ -195,6 +197,7 @@ import androidx.lifecycle.ViewTreeLifecycleOwner
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
+import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
 import androidx.media3.common.Timeline
 import androidx.media3.session.MediaController
@@ -2184,7 +2187,173 @@ suspend fun fetchArtistCatalog(
     val uniqueHits = popularHits.filter { hit -> topSongs.none { it.id == hit.id } }
     Pair(topSongs, uniqueHits)
 }
-   
+        
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun PlaybackSpeedSheet(
+    isDarkTheme: Boolean,
+    currentSpeed: Float,
+    currentPitch: Float,
+    onSpeedChange: (Float) -> Unit,
+    onPitchChange: (Float) -> Unit,
+    onDismiss: () -> Unit
+) {
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val sheetBgColor = if (isDarkTheme) Color(0xFF0F151C) else Color(0xFFFFFFFF)
+    val cardBgColor = if (isDarkTheme) Color(0xFF141C24) else Color(0xFFF1F5F9)
+    val textColor = if (isDarkTheme) Color.White else Color(0xFF0F172A)
+    val secondaryTextColor = if (isDarkTheme) Color(0xFF94A3B8) else Color(0xFF64748B)
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        containerColor = sheetBgColor,
+        shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp, vertical = 8.dp)
+                .navigationBarsPadding()
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(
+                        modifier = Modifier
+                            .size(38.dp)
+                            .clip(CircleShape)
+                            .background(Color(0xFF7C4DFF).copy(alpha = 0.15f)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Speed,
+                            contentDescription = null,
+                            tint = Color(0xFF7C4DFF),
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Text("Playback Engine", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = textColor)
+                }
+                
+                TextButton(onClick = {
+                    onSpeedChange(1.0f)
+                    onPitchChange(1.0f)
+                }) {
+                    Text("Reset", color = Color(0xFF7C4DFF), fontWeight = FontWeight.Bold)
+                }
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // Presets
+            Text(
+                text = "PRESETS",
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Bold,
+                color = secondaryTextColor,
+                letterSpacing = 1.sp
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                listOf(
+                    "Normal" to (1.0f to 1.0f),
+                    "Nightcore" to (1.25f to 1.25f),
+                    "Slowed" to (0.85f to 0.85f),
+                    "Deep Voice" to (1.0f to 0.75f)
+                ).forEach { (label, values) ->
+                    val isSelected = currentSpeed == values.first && currentPitch == values.second
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(if (isSelected) Color(0xFF7C4DFF) else cardBgColor)
+                            .clickable {
+                                onSpeedChange(values.first)
+                                onPitchChange(values.second)
+                            }
+                            .padding(vertical = 10.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = label,
+                            fontSize = 12.sp,
+                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                            color = if (isSelected) Color.White else textColor
+                        )
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(24.dp))
+
+            // Speed Slider
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = cardBgColor),
+                shape = RoundedCornerShape(16.dp)
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("Speed (Tempo)", fontWeight = FontWeight.SemiBold, color = textColor)
+                        Text(String.format(Locale.ROOT, "%.2fx", currentSpeed), color = Color(0xFF7C4DFF), fontWeight = FontWeight.Bold)
+                    }
+                    Slider(
+                        value = currentSpeed,
+                        onValueChange = onSpeedChange,
+                        valueRange = 0.5f..2.0f,
+                        colors = SliderDefaults.colors(
+                            thumbColor = Color.White,
+                            activeTrackColor = Color(0xFF7C4DFF),
+                            inactiveTrackColor = if (isDarkTheme) Color(0xFF1E2836) else Color(0xFFCBD5E1)
+                        )
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            // Pitch Slider
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = cardBgColor),
+                shape = RoundedCornerShape(16.dp)
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("Pitch (Key)", fontWeight = FontWeight.SemiBold, color = textColor)
+                        Text(String.format(Locale.ROOT, "%.2fx", currentPitch), color = Color(0xFF7C4DFF), fontWeight = FontWeight.Bold)
+                    }
+                    Slider(
+                        value = currentPitch,
+                        onValueChange = onPitchChange,
+                        valueRange = 0.5f..2.0f,
+                        colors = SliderDefaults.colors(
+                            thumbColor = Color.White,
+                            activeTrackColor = Color(0xFF7C4DFF),
+                            inactiveTrackColor = if (isDarkTheme) Color(0xFF1E2836) else Color(0xFFCBD5E1)
+                        )
+                    )
+                }
+            }
+            Spacer(modifier = Modifier.height(16.dp))
+        }
+    }
+}
+             
 @Composable
 fun SyncedLyricsView(
     providerName: String,
@@ -4550,6 +4719,18 @@ fun SonoraPlayerScreen(
     val allPlaylists by remember { dao.getAllPlaylists() }.collectAsState(initial = emptyList())
     val downloadedSongs by remember { dao.getAllDownloadedSongs() }.collectAsState(initial = emptyList())
 
+    var showPlaybackSpeedSheet by remember { mutableStateOf(false) }
+    var playbackSpeed by remember { mutableFloatStateOf(prefs.getFloat("playback_speed", 1.0f)) }
+    var playbackPitch by remember { mutableFloatStateOf(prefs.getFloat("playback_pitch", 1.0f)) }
+    
+    LaunchedEffect(playbackSpeed, playbackPitch) {
+        controller?.playbackParameters = PlaybackParameters(playbackSpeed, playbackPitch)
+        prefs.edit()
+            .putFloat("playback_speed", playbackSpeed)
+            .putFloat("playback_pitch", playbackPitch)
+            .apply()
+    }
+
     var selectedNavTab by remember { mutableIntStateOf(0) }
     var selectedLibrarySubTab by remember { mutableIntStateOf(0) }
     var viewingPlaylist by remember { mutableStateOf<PlaylistEntity?>(null) }
@@ -4986,6 +5167,8 @@ fun SonoraPlayerScreen(
                 val savedId = prefs.getString(KEY_LAST_ID, "") ?: ""
                 val savedPosMs = prefs.getLong(KEY_LAST_POSITION_MS, 0L)
 
+                // Restore Audio Parameters
+                mediaController.playbackParameters = PlaybackParameters(playbackSpeed, playbackPitch)
                 if (mediaController.mediaItemCount > 0) {
                     val currentItem = mediaController.currentMediaItem
                     activeSongId = currentItem?.mediaId ?: ""
@@ -7548,6 +7731,15 @@ fun SonoraPlayerScreen(
                                 Text(text = activeTitle, fontSize = 14.sp, color = Color.White, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                             }
                             Row(verticalAlignment = Alignment.CenterVertically) {
+                                // NEW SPEED BUTTON
+                                IconButton(onClick = { showPlaybackSpeedSheet = true }) {
+                                    Icon(
+                                        imageVector = if (playbackSpeed != 1.0f || playbackPitch != 1.0f) Icons.Rounded.SlowMotionVideo else Icons.Rounded.Speed,
+                                        contentDescription = "Playback Speed",
+                                        tint = if (playbackSpeed != 1.0f || playbackPitch != 1.0f) Color(0xFF7C4DFF) else Color.White,
+                                        modifier = Modifier.size(22.dp)
+                                    )
+                                }
                                 IconButton(onClick = { playerDisplayMode = if (playerDisplayMode == 0) 1 else 0 }) {
                                     Icon(
                                         imageVector = if (playerDisplayMode == 1) Icons.Rounded.Album else Icons.Rounded.GraphicEq,
@@ -7986,4 +8178,16 @@ fun SonoraPlayerScreen(
             }
         )
     }
+    
+    if (showPlaybackSpeedSheet) {
+        PlaybackSpeedSheet(
+            isDarkTheme = isDarkTheme,
+            currentSpeed = playbackSpeed,
+            currentPitch = playbackPitch,
+            onSpeedChange = { playbackSpeed = it },
+            onPitchChange = { playbackPitch = it },
+            onDismiss = { showPlaybackSpeedSheet = false }
+        )
+    }
+    
 }
