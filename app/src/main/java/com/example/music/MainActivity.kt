@@ -979,6 +979,9 @@ private fun isGenuineSyncedLyrics(lines: List<SyncedLyricLine>): Boolean {
     return firstInterval != secondInterval
 }
 
+private fun JSONObject.optStringOrEmpty(key: String): String =
+    if (isNull(key)) "" else optString(key, "")
+
 private fun executeGetText(
     endpoint: String,
     timeoutMs: Int = 3000,
