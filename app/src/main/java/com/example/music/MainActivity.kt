@@ -159,6 +159,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
@@ -226,9 +229,17 @@ data class DiscoveryCategory(
     val searchQuery: String
 )
 
+data class LyricWord(
+    val text: String,
+    val startTimeMs: Long,
+    val endTimeMs: Long
+)
+
 data class SyncedLyricLine(
     val timeMs: Long,
-    val text: String
+    val endTimeMs: Long = 0L,
+    val text: String,
+    val words: List<LyricWord> = emptyList()
 )
 
 val DiscoveryCategoryList = listOf(
@@ -333,121 +344,214 @@ suspend fun extractArtworkPaletteColors(context: Context, imageUrl: String): Pai
 private val LRC_TIME_TAG =
     Regex("""\[(\d{1,3}):(\d{2})(?:[.:](\d{1,3}))?]""")
 
+private val INLINE_WORD_TIME_TAG =
+    Regex("""[<\[(\s]*(\d{1,3}):(\d{2})(?:[.:](\d{1,3}))?[>\])]""")
+
+private fun parseTagToMs(minStr: String, secStr: String, fracStr: String): Long {
+    val min = minStr.toLongOrNull() ?: 0L
+    val sec = secStr.toLongOrNull() ?: 0L
+    val ms = when (fracStr.length) {
+        0 -> 0L
+        1 -> (fracStr.toLongOrNull() ?: 0L) * 100L
+        2 -> (fracStr.toLongOrNull() ?: 0L) * 10L
+        else -> fracStr.take(3).toLongOrNull() ?: 0L
+    }
+    return (min * 60L + sec) * 1000L + ms
+}
+
+/**
+ * Populates endTimeMs for every line and generates proportional word-by-word
+ * karaoke timings for lines that didn't come with native syllable timestamps.
+ */
+fun enrichLinesWithWordTimings(rawLines: List<SyncedLyricLine>): List<SyncedLyricLine> {
+    if (rawLines.isEmpty()) return emptyList()
+    val sorted = rawLines.sortedBy { it.timeMs }
+
+    return sorted.mapIndexed { idx, line ->
+        val nextLineStart = sorted.getOrNull(idx + 1)?.timeMs ?: (line.timeMs + 4200L)
+        val computedEnd = if (line.endTimeMs > line.timeMs) {
+            line.endTimeMs
+        } else {
+            // Sing duration is bounded between 1.2s and 5.5s so pauses between verses don't drag the fill
+            (nextLineStart - 180L).coerceIn(line.timeMs + 1200L, line.timeMs + 5500L)
+        }
+
+        val finalWords = if (line.words.isNotEmpty()) {
+            line.words
+        } else {
+            val tokens = line.text.split(Regex("\\s+")).filter { it.isNotBlank() }
+            if (tokens.isEmpty()) {
+                emptyList()
+            } else {
+                val totalDuration = (computedEnd - line.timeMs).coerceAtLeast(600L)
+                // Weight each word's duration by character length for natural syllable pacing
+                val totalChars = tokens.sumOf { it.length.coerceAtLeast(2) }.toFloat()
+                var cursorMs = line.timeMs
+
+                tokens.mapIndexed { wIdx, token ->
+                    val weight = token.length.coerceAtLeast(2) / totalChars
+                    val wordDur = (totalDuration * weight).toLong().coerceAtLeast(80L)
+                    val wStart = cursorMs
+                    val wEnd = if (wIdx == tokens.lastIndex) computedEnd else (wStart + wordDur)
+                    cursorMs = wEnd
+                    LyricWord(
+                        text = if (wIdx < tokens.lastIndex) "$token " else token,
+                        startTimeMs = wStart,
+                        endTimeMs = wEnd.coerceAtLeast(wStart + 60L)
+                    )
+                }
+            }
+        }
+
+        line.copy(endTimeMs = computedEnd, words = finalWords)
+    }
+}
+
 fun parseLrcLyrics(lrcString: String): List<SyncedLyricLine> {
     val lines = mutableListOf<SyncedLyricLine>()
 
     lrcString.lines().forEach { rawLine ->
         val line = rawLine.trim()
         val tags = LRC_TIME_TAG.findAll(line).toList()
-
         if (tags.isEmpty()) return@forEach
 
-        val text = line.substring(tags.last().range.last + 1).trim()
-        if (text.isBlank()) return@forEach
+        val firstTag = tags.first()
+        val lineStartMs = parseTagToMs(
+            firstTag.groupValues[1],
+            firstTag.groupValues[2],
+            firstTag.groupValues[3]
+        )
+
+        val bodyAfterMainTag = line.substring(firstTag.range.last + 1).trim()
+        if (bodyAfterMainTag.isBlank()) return@forEach
+
+        // Check for Enhanced LRC inline word timestamps: e.g. <00:12.40>Hello <00:12.85>world
+        val inlineMatches = INLINE_WORD_TIME_TAG.findAll(bodyAfterMainTag).toList()
+        if (inlineMatches.size >= 2) {
+            val parsedWords = mutableListOf<LyricWord>()
+            val cleanBuilder = StringBuilder()
+
+            for (i in inlineMatches.indices) {
+                val m = inlineMatches[i]
+                val wStart = parseTagToMs(m.groupValues[1], m.groupValues[2], m.groupValues[3])
+                val textStart = m.range.last + 1
+                val textEnd = if (i + 1 < inlineMatches.size) inlineMatches[i + 1].range.first else bodyAfterMainTag.length
+                val rawWord = sanitizeText(bodyAfterMainTag.substring(textStart, textEnd)).trim()
+
+                if (rawWord.isNotBlank()) {
+                    val nextTime = if (i + 1 < inlineMatches.size) {
+                        val nextM = inlineMatches[i + 1]
+                        parseTagToMs(nextM.groupValues[1], nextM.groupValues[2], nextM.groupValues[3])
+                    } else {
+                        wStart + 450L
+                    }
+                    val displayWord = "$rawWord "
+                    cleanBuilder.append(displayWord)
+                    parsedWords.add(
+                        LyricWord(
+                            text = displayWord,
+                            startTimeMs = wStart,
+                            endTimeMs = nextTime.coerceAtLeast(wStart + 80L)
+                        )
+                    )
+                }
+            }
+
+            val fullText = cleanBuilder.toString().trim()
+            if (fullText.isNotBlank()) {
+                val lineEnd = parsedWords.lastOrNull()?.endTimeMs ?: (lineStartMs + 3000L)
+                lines.add(
+                    SyncedLyricLine(
+                        timeMs = lineStartMs,
+                        endTimeMs = lineEnd,
+                        text = fullText,
+                        words = parsedWords
+                    )
+                )
+                return@forEach
+            }
+        }
+
+        // Standard LRC line
+        val cleanText = sanitizeText(
+            bodyAfterMainTag.replace(INLINE_WORD_TIME_TAG, "")
+        ).trim()
+        if (cleanText.isEmpty()) return@forEach
 
         for (tag in tags) {
-            val min = tag.groupValues[1].toLongOrNull() ?: 0L
-            val sec = tag.groupValues[2].toLongOrNull() ?: 0L
-            val fraction = tag.groupValues[3]
-
-            val ms = when (fraction.length) {
-                0 -> 0L
-                1 -> (fraction.toLongOrNull() ?: 0L) * 100L
-                2 -> (fraction.toLongOrNull() ?: 0L) * 10L
-                else -> fraction.take(3).toLongOrNull() ?: 0L
-            }
-
-            lines.add(
-                SyncedLyricLine(
-                    timeMs = (min * 60 + sec) * 1000L + ms,
-                    text = text
-                )
-            )
+            val tMs = parseTagToMs(tag.groupValues[1], tag.groupValues[2], tag.groupValues[3])
+            lines.add(SyncedLyricLine(timeMs = tMs, text = cleanText))
         }
     }
 
-    return lines.sortedBy { it.timeMs }
-}
-
-fun parseTtmlTimestamp(tag: String): Long {
-    val clean = tag.trim().removeSuffix("s")
-
-    if (clean.contains(":")) {
-        val parts = clean.split(":")
-
-        if (parts.size == 2) {
-            val min = parts[0].toLongOrNull() ?: 0L
-            val secParts = parts[1].split(".")
-
-            val sec = secParts[0].toLongOrNull() ?: 0L
-
-            val ms = if (secParts.size > 1) {
-                secParts[1]
-                    .padEnd(3, '0')
-                    .take(3)
-                    .toLongOrNull() ?: 0L
-            } else {
-                0L
-            }
-
-            return (min * 60L + sec) * 1000L + ms
-        }
-
-        if (parts.size == 3) {
-            val hr = parts[0].toLongOrNull() ?: 0L
-            val min = parts[1].toLongOrNull() ?: 0L
-
-            val secParts = parts[2].split(".")
-            val sec = secParts[0].toLongOrNull() ?: 0L
-
-            val ms = if (secParts.size > 1) {
-                secParts[1]
-                    .padEnd(3, '0')
-                    .take(3)
-                    .toLongOrNull() ?: 0L
-            } else {
-                0L
-            }
-
-            return ((hr * 3600L) + (min * 60L) + sec) * 1000L + ms
-        }
-    } else {
-        val secs = clean.toDoubleOrNull() ?: return 0L
-        return (secs * 1000.0).toLong()
-    }
-
-    return 0L
+    return enrichLinesWithWordTimings(lines)
 }
 
 fun parseTtmlLyrics(ttml: String): List<SyncedLyricLine> {
     val lines = mutableListOf<SyncedLyricLine>()
 
     val pRegex = Regex(
-        """<[^>]*begin=["']([^"']+)["'][^>]*>(.*?)</[^>]+>""",
-        RegexOption.DOT_MATCHES_ALL
+        """<p\b([^>]*)>(.*?)</p>""",
+        setOf(RegexOption.DOT_MATCHES_ALL, RegexOption.IGNORE_CASE)
     )
+    val spanRegex = Regex(
+        """<span\b([^>]*)>(.*?)</span>""",
+        setOf(RegexOption.DOT_MATCHES_ALL, RegexOption.IGNORE_CASE)
+    )
+    val beginAttr = Regex("""begin=["']([^"']+)["']""")
+    val endAttr = Regex("""end=["']([^"']+)["']""")
 
     for (match in pRegex.findAll(ttml)) {
-        val begin = match.groupValues[1]
-        val rawText = match.groupValues[2]
+        val pAttrs = match.groupValues[1]
+        val innerHtml = match.groupValues[2]
 
-        val cleanText = sanitizeText(
-            rawText.replace(Regex("<[^>]+>"), "")
-        ).trim()
+        val beginStr = beginAttr.find(pAttrs)?.groupValues?.get(1) ?: continue
+        val endStr = endAttr.find(pAttrs)?.groupValues?.get(1) ?: ""
+        val lineStartMs = parseTtmlTimestamp(beginStr)
+        val lineEndMs = if (endStr.isNotBlank()) parseTtmlTimestamp(endStr) else 0L
+
+        // Extract word-by-word <span begin="..." end="..."> syllables if present
+        val spanWords = mutableListOf<LyricWord>()
+        for (spanMatch in spanRegex.findAll(innerHtml)) {
+            val sAttrs = spanMatch.groupValues[1]
+            val sRawText = spanMatch.groupValues[2]
+            val sClean = sanitizeText(sRawText.replace(Regex("<[^>]+>"), "")).trim()
+            if (sClean.isBlank()) continue
+
+            val wBegin = beginAttr.find(sAttrs)?.groupValues?.get(1)
+            val wEnd = endAttr.find(sAttrs)?.groupValues?.get(1)
+            if (wBegin != null) {
+                val wStartMs = parseTtmlTimestamp(wBegin)
+                val wEndMs = if (wEnd != null) parseTtmlTimestamp(wEnd) else (wStartMs + 350L)
+                spanWords.add(
+                    LyricWord(
+                        text = "$sClean ",
+                        startTimeMs = wStartMs,
+                        endTimeMs = wEndMs.coerceAtLeast(wStartMs + 60L)
+                    )
+                )
+            }
+        }
+
+        val cleanText = if (spanWords.isNotEmpty()) {
+            spanWords.joinToString("") { it.text }.trim()
+        } else {
+            sanitizeText(innerHtml.replace(Regex("<[^>]+>"), "")).trim()
+        }
 
         if (cleanText.isNotBlank()) {
-            val timeMs = parseTtmlTimestamp(begin)
-
             lines.add(
                 SyncedLyricLine(
-                    timeMs = timeMs,
-                    text = cleanText
+                    timeMs = lineStartMs,
+                    endTimeMs = lineEndMs,
+                    text = cleanText,
+                    words = spanWords
                 )
             )
         }
     }
 
-    return lines.sortedBy { it.timeMs }
+    return enrichLinesWithWordTimings(lines)
 }
 
 fun parseJsonLyricLines(array: JSONArray): List<SyncedLyricLine> {
@@ -456,12 +560,12 @@ fun parseJsonLyricLines(array: JSONArray): List<SyncedLyricLine> {
     for (i in 0 until array.length()) {
         val item = array.optJSONObject(i) ?: continue
 
-        val words = item.optStringOrEmpty("words").ifEmpty {
+        val wordsStr = item.optStringOrEmpty("words").ifEmpty {
             item.optStringOrEmpty("text").ifEmpty {
                 item.optStringOrEmpty("line")
             }
         }
-        if (words.isBlank()) continue
+        if (wordsStr.isBlank()) continue
 
         var timeMs = item.optLong("timeMs", -1L)
         if (timeMs < 0) {
@@ -471,7 +575,6 @@ fun parseJsonLyricLines(array: JSONArray): List<SyncedLyricLine> {
         if (timeMs < 0) {
             val rawTime = item.optDouble("time", -1.0)
             if (rawTime >= 0.0) {
-                // If the value is small (e.g., 14.52), it's in seconds; convert to ms
                 timeMs = if (rawTime < 1000.0 && rawTime % 1.0 != 0.0) {
                     (rawTime * 1000.0).toLong()
                 } else {
@@ -479,23 +582,53 @@ fun parseJsonLyricLines(array: JSONArray): List<SyncedLyricLine> {
                 }
             }
         }
-        if (timeMs < 0) {
-            val tag = item.optStringOrEmpty("timeTag")
-            if (tag.isNotBlank()) {
-                val parsed = parseLrcLyrics("[$tag]$words")
-                if (parsed.isNotEmpty()) {
-                    lines.addAll(parsed)
-                    continue
+
+        val durationMs = item.optLong("durationMs", item.optLong("duration", 0L))
+        val endTimeMs = item.optLong("endTimeMs", if (durationMs > 0) timeMs + durationMs else 0L)
+
+        // Parse word-level syllables if provided by LyricsPlus / Better Lyrics ("syllabus" or "syllables")
+        val syllabusArr = item.optJSONArray("syllabus")
+            ?: item.optJSONArray("syllables")
+            ?: item.optJSONArray("words")
+        val parsedWords = mutableListOf<LyricWord>()
+
+        if (syllabusArr != null) {
+            for (s in 0 until syllabusArr.length()) {
+                val syl = syllabusArr.optJSONObject(s) ?: continue
+                val sylText = sanitizeText(
+                    syl.optStringOrEmpty("text").ifEmpty { syl.optStringOrEmpty("word") }
+                ).trim()
+                if (sylText.isBlank()) continue
+
+                val sStart = syl.optLong("time", syl.optLong("startTimeMs", syl.optLong("timeMs", -1L)))
+                val sDur = syl.optLong("duration", syl.optLong("durationMs", 300L))
+                val sEnd = syl.optLong("endTimeMs", if (sStart >= 0) sStart + sDur else -1L)
+
+                if (sStart >= 0) {
+                    parsedWords.add(
+                        LyricWord(
+                            text = "$sylText ",
+                            startTimeMs = sStart,
+                            endTimeMs = sEnd.coerceAtLeast(sStart + 60L)
+                        )
+                    )
                 }
             }
         }
 
         if (timeMs >= 0) {
-            lines.add(SyncedLyricLine(timeMs = timeMs, text = sanitizeText(words)))
+            lines.add(
+                SyncedLyricLine(
+                    timeMs = timeMs,
+                    endTimeMs = endTimeMs,
+                    text = sanitizeText(wordsStr),
+                    words = parsedWords
+                )
+            )
         }
     }
 
-    return lines.sortedBy { it.timeMs }
+    return enrichLinesWithWordTimings(lines)
 }
 
 fun convertPlainLyricsToTimed(
@@ -2938,6 +3071,139 @@ fun RefinedLikeMark(
 }
 
 @Composable
+fun KaraokeLineText(
+    line: SyncedLyricLine,
+    currentPositionMs: Long,
+    isActive: Boolean,
+    isPast: Boolean,
+    modifier: Modifier = Modifier
+) {
+    val scale by animateFloatAsState(
+        targetValue = if (isActive) 1.04f else 0.96f,
+        animationSpec = spring(
+            dampingRatio = Spring.DampingRatioLowBouncy,
+            stiffness = Spring.StiffnessLow
+        ),
+        label = "karaokeLineScale"
+    )
+
+    if (!isActive || line.words.isEmpty()) {
+        val inactiveAlpha by animateFloatAsState(
+            targetValue = if (isPast) 0.28f else 0.38f,
+            animationSpec = tween(250),
+            label = "inactiveAlpha"
+        )
+        Text(
+            text = line.text,
+            fontSize = if (isActive) 26.sp else 20.sp,
+            fontWeight = if (isActive) FontWeight.ExtraBold else FontWeight.SemiBold,
+            color = Color.White.copy(alpha = if (isActive) 1f else inactiveAlpha),
+            textAlign = TextAlign.Center,
+            lineHeight = if (isActive) 34.sp else 27.sp,
+            modifier = modifier
+                .fillMaxWidth()
+                .graphicsLayer {
+                    scaleX = scale
+                    scaleY = scale
+                }
+        )
+        return
+    }
+
+    // Active line: Word-by-Word (and character-by-character within the active word) Karaoke Fill
+    val annotatedKaraoke = buildAnnotatedString {
+        for (word in line.words) {
+            val wStart = word.startTimeMs
+            val wEnd = word.endTimeMs.coerceAtLeast(wStart + 1L)
+
+            when {
+                // 1. Word has already been sung -> Full glowing white
+                currentPositionMs >= wEnd -> {
+                    withStyle(
+                        SpanStyle(
+                            color = Color.White,
+                            fontWeight = FontWeight.ExtraBold
+                        )
+                    ) {
+                        append(word.text)
+                    }
+                }
+                // 2. Word has not started yet -> Dimmed translucent white
+                currentPositionMs < wStart -> {
+                    withStyle(
+                        SpanStyle(
+                            color = Color.White.copy(alpha = 0.35f),
+                            fontWeight = FontWeight.Bold
+                        )
+                    ) {
+                        append(word.text)
+                    }
+                }
+                // 3. Word is currently being sung -> Smooth progressive fill across letters
+                else -> {
+                    val wordProgress = ((currentPositionMs - wStart).toFloat() / (wEnd - wStart).toFloat())
+                        .coerceIn(0f, 1f)
+                    val textLen = word.text.length
+                    val exactCharPos = wordProgress * textLen
+                    val fullSungChars = exactCharPos.toInt().coerceIn(0, textLen)
+                    val partialFraction = (exactCharPos - fullSungChars).coerceIn(0f, 1f)
+
+                    // Fully sung characters of the current word
+                    if (fullSungChars > 0) {
+                        withStyle(
+                            SpanStyle(
+                                color = Color.White,
+                                fontWeight = FontWeight.ExtraBold
+                            )
+                        ) {
+                            append(word.text.substring(0, fullSungChars))
+                        }
+                    }
+
+                    // Active leading-edge character being sung right now (interpolated alpha)
+                    if (fullSungChars < textLen) {
+                        val edgeAlpha = 0.35f + (0.65f * partialFraction)
+                        withStyle(
+                            SpanStyle(
+                                color = Color.White.copy(alpha = edgeAlpha),
+                                fontWeight = FontWeight.ExtraBold
+                            )
+                        ) {
+                            append(word.text[fullSungChars])
+                        }
+                    }
+
+                    // Remaining unsung characters of the current word
+                    if (fullSungChars + 1 < textLen) {
+                        withStyle(
+                            SpanStyle(
+                                color = Color.White.copy(alpha = 0.35f),
+                                fontWeight = FontWeight.Bold
+                            )
+                        ) {
+                            append(word.text.substring(fullSungChars + 1))
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Text(
+        text = annotatedKaraoke,
+        fontSize = 26.sp,
+        textAlign = TextAlign.Center,
+        lineHeight = 34.sp,
+        modifier = modifier
+            .fillMaxWidth()
+            .graphicsLayer {
+                scaleX = scale
+                scaleY = scale
+            }
+    )
+}
+
+@Composable
 fun SyncedLyricsView(
     providerName: String,
     lyrics: List<SyncedLyricLine>,
@@ -3093,12 +3359,7 @@ fun SyncedLyricsView(
                 ) {
                     itemsIndexed(lyrics, key = { index, line -> "${line.timeMs}_$index" }) { index, item ->
                         val isActive = index == activeIndex
-
-                        val animatedAlpha by animateFloatAsState(
-                            targetValue = if (isActive) 1f else 0.35f,
-                            animationSpec = tween(300),
-                            label = "lyricAlpha"
-                        )
+                        val isPast = index < activeIndex
 
                         Column(
                             horizontalAlignment = Alignment.CenterHorizontally,
@@ -3111,13 +3372,11 @@ fun SyncedLyricsView(
                                 }
                                 .padding(horizontal = 12.dp, vertical = 6.dp)
                         ) {
-                            Text(
-                                text = item.text,
-                                fontSize = if (isActive) 26.sp else 20.sp,
-                                fontWeight = if (isActive) FontWeight.Bold else FontWeight.Medium,
-                                color = Color.White.copy(alpha = animatedAlpha),
-                                textAlign = TextAlign.Center,
-                                modifier = Modifier.fillMaxWidth()
+                            KaraokeLineText(
+                                line = item,
+                                currentPositionMs = currentPositionMs + 150L,
+                                isActive = isActive,
+                                isPast = isPast
                             )
 
                             if (isManualScrolling) {
@@ -4653,7 +4912,13 @@ fun SonoraPlayerScreen(
                 }
             }
 
-            delay(if (showLiveLyrics || crossfadeSeconds > 0) 100L else 500L)
+            delay(
+                when {
+                    showLiveLyrics -> 40L
+                    crossfadeSeconds > 0 -> 100L
+                    else -> 500L
+                }
+            )
         }
     }
 
