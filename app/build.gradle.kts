@@ -6,8 +6,17 @@ plugins {
 }
 
 val gitHubRunNumber = System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull() ?: 1
+
+// Last build on the old scheme was run 132 (1.3.132). The new scheme counts from there.
+val baseRun = 132
+val buildsSinceBase = (gitHubRunNumber - baseRun).coerceAtLeast(0)
+
+val versionMajor = 1
+val versionMinor = 4 + buildsSinceBase / 100
+val versionPatch = buildsSinceBase % 100
+
 val autoVersionCode = gitHubRunNumber + 10
-val autoVersionName = "1.3.$gitHubRunNumber"
+val autoVersionName = "$versionMajor.$versionMinor.$versionPatch"
 
 android {
     namespace = "com.example.music"

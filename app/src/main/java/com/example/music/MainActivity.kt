@@ -2187,22 +2187,38 @@ suspend fun fetchArtistCatalog(
     val uniqueHits = popularHits.filter { hit -> topSongs.none { it.id == hit.id } }
     Pair(topSongs, uniqueHits)
 }
-        
+
+             
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun PlaybackSpeedSheet(
     isDarkTheme: Boolean,
-    currentSpeed: Float,
-    currentPitch: Float,
-    onSpeedChange: (Float) -> Unit,
-    onPitchChange: (Float) -> Unit,
+    initialSpeed: Float,
+    initialPitch: Float,
+    onApplyParams: (Float, Float) -> Unit,
     onDismiss: () -> Unit
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    
+    // Internal state prevents spamming ExoPlayer while the user is actively dragging the slider
+    var sliderSpeed by remember { mutableFloatStateOf(initialSpeed) }
+    var sliderPitch by remember { mutableFloatStateOf(initialPitch) }
+
     val sheetBgColor = if (isDarkTheme) Color(0xFF0F151C) else Color(0xFFFFFFFF)
     val cardBgColor = if (isDarkTheme) Color(0xFF141C24) else Color(0xFFF1F5F9)
     val textColor = if (isDarkTheme) Color.White else Color(0xFF0F172A)
     val secondaryTextColor = if (isDarkTheme) Color(0xFF94A3B8) else Color(0xFF64748B)
+
+    val presets = listOf(
+        "Normal" to (1.0f to 1.0f),
+        "Lo-Fi" to (0.90f to 0.90f),
+        "Slowed" to (0.85f to 0.85f),
+        "Ultra Slowed" to (0.75f to 0.75f),
+        "Super Slowed" to (0.65f to 0.65f),
+        "Nightcore" to (1.25f to 1.25f),
+        "Deep Voice" to (1.0f to 0.75f),
+        "Chipmunk" to (1.0f to 1.50f)
+    )
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -2241,8 +2257,9 @@ fun PlaybackSpeedSheet(
                 }
                 
                 TextButton(onClick = {
-                    onSpeedChange(1.0f)
-                    onPitchChange(1.0f)
+                    sliderSpeed = 1.0f
+                    sliderPitch = 1.0f
+                    onApplyParams(1.0f, 1.0f)
                 }) {
                     Text("Reset", color = Color(0xFF7C4DFF), fontWeight = FontWeight.Bold)
                 }
@@ -2250,7 +2267,6 @@ fun PlaybackSpeedSheet(
 
             Spacer(modifier = Modifier.height(16.dp))
 
-            // Presets
             Text(
                 text = "PRESETS",
                 fontSize = 11.sp,
@@ -2259,27 +2275,23 @@ fun PlaybackSpeedSheet(
                 letterSpacing = 1.sp
             )
             Spacer(modifier = Modifier.height(8.dp))
-            Row(
+            
+            LazyRow(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                listOf(
-                    "Normal" to (1.0f to 1.0f),
-                    "Nightcore" to (1.25f to 1.25f),
-                    "Slowed" to (0.85f to 0.85f),
-                    "Deep Voice" to (1.0f to 0.75f)
-                ).forEach { (label, values) ->
-                    val isSelected = currentSpeed == values.first && currentPitch == values.second
+                items(presets) { (label, values) ->
+                    val isSelected = sliderSpeed == values.first && sliderPitch == values.second
                     Box(
                         modifier = Modifier
-                            .weight(1f)
                             .clip(RoundedCornerShape(12.dp))
                             .background(if (isSelected) Color(0xFF7C4DFF) else cardBgColor)
                             .clickable {
-                                onSpeedChange(values.first)
-                                onPitchChange(values.second)
+                                sliderSpeed = values.first
+                                sliderPitch = values.second
+                                onApplyParams(sliderSpeed, sliderPitch)
                             }
-                            .padding(vertical = 10.dp),
+                            .padding(horizontal = 16.dp, vertical = 10.dp),
                         contentAlignment = Alignment.Center
                     ) {
                         Text(
@@ -2306,11 +2318,12 @@ fun PlaybackSpeedSheet(
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
                         Text("Speed (Tempo)", fontWeight = FontWeight.SemiBold, color = textColor)
-                        Text(String.format(Locale.ROOT, "%.2fx", currentSpeed), color = Color(0xFF7C4DFF), fontWeight = FontWeight.Bold)
+                        Text(String.format(Locale.ROOT, "%.2fx", sliderSpeed), color = Color(0xFF7C4DFF), fontWeight = FontWeight.Bold)
                     }
                     Slider(
-                        value = currentSpeed,
-                        onValueChange = onSpeedChange,
+                        value = sliderSpeed,
+                        onValueChange = { sliderSpeed = it },
+                        onValueChangeFinished = { onApplyParams(sliderSpeed, sliderPitch) },
                         valueRange = 0.5f..2.0f,
                         colors = SliderDefaults.colors(
                             thumbColor = Color.White,
@@ -2335,11 +2348,12 @@ fun PlaybackSpeedSheet(
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
                         Text("Pitch (Key)", fontWeight = FontWeight.SemiBold, color = textColor)
-                        Text(String.format(Locale.ROOT, "%.2fx", currentPitch), color = Color(0xFF7C4DFF), fontWeight = FontWeight.Bold)
+                        Text(String.format(Locale.ROOT, "%.2fx", sliderPitch), color = Color(0xFF7C4DFF), fontWeight = FontWeight.Bold)
                     }
                     Slider(
-                        value = currentPitch,
-                        onValueChange = onPitchChange,
+                        value = sliderPitch,
+                        onValueChange = { sliderPitch = it },
+                        onValueChangeFinished = { onApplyParams(sliderSpeed, sliderPitch) },
                         valueRange = 0.5f..2.0f,
                         colors = SliderDefaults.colors(
                             thumbColor = Color.White,
@@ -2352,7 +2366,7 @@ fun PlaybackSpeedSheet(
             Spacer(modifier = Modifier.height(16.dp))
         }
     }
-}     
+}    
 
 // ---------------------------------------------------------------------------
 // Artist Detail Screen
@@ -4572,14 +4586,6 @@ fun SonoraPlayerScreen(
     var showPlaybackSpeedSheet by remember { mutableStateOf(false) }
     var playbackSpeed by remember { mutableFloatStateOf(prefs.getFloat("playback_speed", 1.0f)) }
     var playbackPitch by remember { mutableFloatStateOf(prefs.getFloat("playback_pitch", 1.0f)) }
-    
-    LaunchedEffect(playbackSpeed, playbackPitch) {
-        controller?.playbackParameters = PlaybackParameters(playbackSpeed, playbackPitch)
-        prefs.edit()
-            .putFloat("playback_speed", playbackSpeed)
-            .putFloat("playback_pitch", playbackPitch)
-            .apply()
-    }
 
     var selectedNavTab by remember { mutableIntStateOf(0) }
     var selectedLibrarySubTab by remember { mutableIntStateOf(0) }
@@ -8031,10 +8037,18 @@ fun SonoraPlayerScreen(
     if (showPlaybackSpeedSheet) {
         PlaybackSpeedSheet(
             isDarkTheme = isDarkTheme,
-            currentSpeed = playbackSpeed,
-            currentPitch = playbackPitch,
-            onSpeedChange = { playbackSpeed = it },
-            onPitchChange = { playbackPitch = it },
+            initialSpeed = playbackSpeed,
+            initialPitch = playbackPitch,
+            onApplyParams = { finalSpeed, finalPitch ->
+                playbackSpeed = finalSpeed
+                playbackPitch = finalPitch
+                
+                controller?.playbackParameters = PlaybackParameters(finalSpeed, finalPitch)
+                prefs.edit()
+                    .putFloat("playback_speed", finalSpeed)
+                    .putFloat("playback_pitch", finalPitch)
+                    .apply()
+            },
             onDismiss = { showPlaybackSpeedSheet = false }
         )
     }
