@@ -193,7 +193,7 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.LifecycleOwner
-import androidx.lifecycle.ViewTreeLifecycleOwner
+import androidx.lifecycle.setViewTreeLifecycleOwner
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
@@ -204,7 +204,7 @@ import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
 import androidx.palette.graphics.Palette
 import androidx.savedstate.SavedStateRegistryOwner
-import androidx.savedstate.ViewTreeSavedStateRegistryOwner
+import androidx.savedstate.setViewTreeSavedStateRegistryOwner
 import coil.ImageLoader
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
@@ -721,8 +721,8 @@ fun captureAndShareLyricCard(
 ) {
     val composeView = ComposeView(context).apply {
         setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed)
-        ViewTreeLifecycleOwner.set(this, lifecycleOwner)
-        ViewTreeSavedStateRegistryOwner.set(this, savedStateRegistryOwner)
+        composeView.setViewTreeLifecycleOwner(lifecycleOwner)
+        composeView.setViewTreeSavedStateRegistryOwner(savedStateOwner)
         setContent {
             MaterialTheme(colorScheme = darkColorScheme()) {
                 content()
@@ -2350,158 +2350,6 @@ fun PlaybackSpeedSheet(
                 }
             }
             Spacer(modifier = Modifier.height(16.dp))
-        }
-    }
-}
-             
-@Composable
-fun SyncedLyricsView(
-    providerName: String,
-    lyrics: List<SyncedLyricLine>,
-    currentPositionMs: Long,
-    isLoading: Boolean,
-    onSeekRequested: (Long) -> Unit,
-    onCloseRequested: () -> Unit,
-    trackTitle: String,
-    trackArtist: String,
-    artworkUrl: String,
-    modifier: Modifier = Modifier
-) {
-    val context = LocalContext.current
-    val lifecycleOwner = LocalLifecycleOwner.current
-    val savedStateRegistryOwner = LocalSavedStateRegistryOwner.current
-    
-    val listState = rememberLazyListState()
-    val coroutineScope = rememberCoroutineScope()
-    var isManualScrolling by remember { mutableStateOf(false) }
-    
-    // Selection State
-    var selectedLines by remember { mutableStateOf(emptySet<Int>()) }
-
-    // Clear selection when song changes
-    LaunchedEffect(lyrics) {
-        isManualScrolling = false
-        selectedLines = emptySet()
-    }
-
-    // ... (Keep your existing activeIndex and nestedScrollConnection setup here) ...
-
-    Box(
-        modifier = modifier
-            .fillMaxSize()
-            .padding(horizontal = 20.dp, vertical = 12.dp)
-    ) {
-        Column(
-            modifier = Modifier.fillMaxSize(),
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-            // Dynamic Top Bar: Normal vs Selection Mode
-            if (selectedLines.isNotEmpty()) {
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    IconButton(onClick = { selectedLines = emptySet() }) {
-                        Icon(Icons.Rounded.Close, contentDescription = "Cancel", tint = Color.White)
-                    }
-                    Text(
-                        text = "${selectedLines.size}/4 Selected",
-                        color = Color.White,
-                        fontWeight = FontWeight.Bold
-                    )
-                    TextButton(
-                        onClick = {
-                            val linesToShare = lyrics
-                                .filterIndexed { i, _ -> selectedLines.contains(i) }
-                                .map { it.text }
-                            
-                            captureAndShareLyricCard(
-                                context = context,
-                                lifecycleOwner = lifecycleOwner,
-                                savedStateRegistryOwner = savedStateRegistryOwner
-                            ) {
-                                LyricCardTemplate(
-                                    selectedLyrics = linesToShare,
-                                    trackTitle = trackTitle,
-                                    trackArtist = trackArtist,
-                                    artworkUrl = artworkUrl
-                                )
-                            }
-                            selectedLines = emptySet()
-                        },
-                        colors = ButtonDefaults.textButtonColors(contentColor = Color(0xFF7C4DFF))
-                    ) {
-                        Text("Share", fontWeight = FontWeight.Bold)
-                    }
-                }
-            } else {
-                // ... (Keep your existing normal top bar with Back button and provider info here) ...
-            }
-
-            Spacer(modifier = Modifier.height(10.dp))
-
-            if (isLoading) {
-                Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
-                    CircularProgressIndicator(color = Color.White)
-                }
-            } else if (lyrics.isNotEmpty()) {
-                LazyColumn(
-                    state = listState,
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxWidth()
-                        .nestedScroll(nestedScrollConnection),
-                    contentPadding = PaddingValues(top = 180.dp, bottom = 220.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(28.dp)
-                ) {
-                    itemsIndexed(lyrics, key = { index, line -> "${line.timeMs}_$index" }) { index, item ->
-                        val isActive = index == activeIndex
-                        val isPast = index < activeIndex
-                        val isSelected = selectedLines.contains(index)
-
-                        Column(
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(12.dp))
-                                // Apply semi-transparent overlay if selected
-                                .background(if (isSelected) Color(0x407C4DFF) else Color.Transparent)
-                                .pointerInput(Unit) {
-                                    detectTapGestures(
-                                        onLongPress = {
-                                            if (selectedLines.isEmpty()) {
-                                                selectedLines = setOf(index)
-                                            }
-                                        },
-                                        onTap = {
-                                            if (selectedLines.isNotEmpty()) {
-                                                if (isSelected) {
-                                                    selectedLines = selectedLines - index
-                                                } else if (selectedLines.size < 4) {
-                                                    selectedLines = selectedLines + index
-                                                }
-                                            } else {
-                                                onSeekRequested(item.timeMs)
-                                                isManualScrolling = false
-                                            }
-                                        }
-                                    )
-                                }
-                                .padding(horizontal = 12.dp, vertical = 12.dp)
-                        ) {
-                            KaraokeLineText(
-                                line = item,
-                                currentPositionMs = currentPositionMs + 150L,
-                                isActive = isActive,
-                                isPast = isPast
-                            )
-                        }
-                    }
-                }
-            }
-            // ... (Keep your existing floating bottom Sync button and artwork footer) ...
         }
     }
 }     
