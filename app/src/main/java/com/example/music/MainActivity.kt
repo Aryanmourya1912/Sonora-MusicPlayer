@@ -721,8 +721,8 @@ fun captureAndShareLyricCard(
 ) {
     val composeView = ComposeView(context).apply {
         setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed)
-        ViewTreeLifecycleOwner.set(this, lifecycleOwner)
-        ViewTreeSavedStateRegistryOwner.set(this, savedStateRegistryOwner)
+        setViewTreeLifecycleOwner(lifecycleOwner)
+        setViewTreeSavedStateRegistryOwner(savedStateRegistryOwner)
         setContent {
             MaterialTheme(colorScheme = darkColorScheme()) {
                 content()
