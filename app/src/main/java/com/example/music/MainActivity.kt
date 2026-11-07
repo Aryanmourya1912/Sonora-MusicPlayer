@@ -796,14 +796,19 @@ fun LyricCardTemplate(
     trackArtist: String,
     artworkUrl: String
 ) {
+    val context = LocalContext.current
+
     Box(
         modifier = Modifier
             .size(1080.dp, 1920.dp)
             .background(Color(0xFF0F151C))
     ) {
-        // Background Image WITHOUT the hardware blur (Safe for Bitmap Canvas)
+        // Background Image WITHOUT the hardware blur and explicitly disabling hardware bitmaps
         AsyncImage(
-            model = artworkUrl,
+            model = ImageRequest.Builder(context)
+                .data(artworkUrl)
+                .allowHardware(false) // <--- PREVENTS THE CRASH
+                .build(),
             contentDescription = null,
             modifier = Modifier
                 .fillMaxSize()
@@ -854,8 +859,12 @@ fun LyricCardTemplate(
                 .padding(60.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
+            // Foreground Image explicitly disabling hardware bitmaps
             AsyncImage(
-                model = artworkUrl,
+                model = ImageRequest.Builder(context)
+                    .data(artworkUrl)
+                    .allowHardware(false) // <--- PREVENTS THE CRASH
+                    .build(),
                 contentDescription = null,
                 modifier = Modifier
                     .size(140.dp)
