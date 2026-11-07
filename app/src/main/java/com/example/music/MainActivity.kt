@@ -746,6 +746,13 @@ fun captureAndShareLyricCard(
             // Wait 1.2 seconds for Compose to layout and Coil to fetch the album image
             delay(1200L) 
 
+            // FORCE strict measurement right before drawing so the canvas knows the exact bounds
+            composeView.measure(
+                View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY),
+                View.MeasureSpec.makeMeasureSpec(height, View.MeasureSpec.EXACTLY)
+            )
+            composeView.layout(0, 0, width, height)
+
             val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
             val canvas = Canvas(bitmap)
             composeView.draw(canvas)
@@ -776,7 +783,7 @@ fun captureAndShareLyricCard(
             e.printStackTrace()
             rootView.removeView(composeView) // Failsafe cleanup
             withContext(Dispatchers.Main) {
-                Toast.makeText(context, "Failed to generate image", Toast.LENGTH_SHORT).show()
+                Toast.makeText(context, "Failed to generate image: ${e.message}", Toast.LENGTH_LONG).show()
             }
         }
     }
@@ -794,24 +801,27 @@ fun LyricCardTemplate(
             .size(1080.dp, 1920.dp)
             .background(Color(0xFF0F151C))
     ) {
-        // Blurred Background Overlay
+        // Background Image WITHOUT the hardware blur (Safe for Bitmap Canvas)
         AsyncImage(
             model = artworkUrl,
             contentDescription = null,
             modifier = Modifier
                 .fillMaxSize()
-                .blur(radius = 80.dp)
-                .graphicsLayer { alpha = 0.6f },
+                .graphicsLayer { alpha = 0.5f },
             contentScale = ContentScale.Crop
         )
         
+        // Heavy Gradient Overlay to simulate the focus/blur depth
         Box(
             modifier = Modifier
                 .fillMaxSize()
                 .background(
                     Brush.verticalGradient(
-                        colors = listOf(Color.Transparent, Color(0xAA000000)),
-                        startY = 800f
+                        colors = listOf(
+                            Color(0xDD0F151C),
+                            Color(0x990F151C),
+                            Color(0xEE0F151C)
+                        )
                     )
                 )
         )
