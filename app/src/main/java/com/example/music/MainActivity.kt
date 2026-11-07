@@ -721,8 +721,8 @@ fun captureAndShareLyricCard(
 ) {
     val composeView = ComposeView(context).apply {
         setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed)
-        composeView.setViewTreeLifecycleOwner(lifecycleOwner)
-        composeView.setViewTreeSavedStateRegistryOwner(savedStateOwner)
+        setViewTreeLifecycleOwner(lifecycleOwner)
+        setViewTreeSavedStateRegistryOwner(savedStateRegistryOwner)
         setContent {
             MaterialTheme(colorScheme = darkColorScheme()) {
                 content()
@@ -4566,6 +4566,9 @@ fun SonoraPlayerScreen(
     val allPlaylists by remember { dao.getAllPlaylists() }.collectAsState(initial = emptyList())
     val downloadedSongs by remember { dao.getAllDownloadedSongs() }.collectAsState(initial = emptyList())
 
+    var controller by remember { mutableStateOf<MediaController?>(null) }
+             
+            
     var showPlaybackSpeedSheet by remember { mutableStateOf(false) }
     var playbackSpeed by remember { mutableFloatStateOf(prefs.getFloat("playback_speed", 1.0f)) }
     var playbackPitch by remember { mutableFloatStateOf(prefs.getFloat("playback_pitch", 1.0f)) }
@@ -4585,7 +4588,6 @@ fun SonoraPlayerScreen(
         viewingPlaylist?.let { dao.getSongsForPlaylist(it.id) } ?: flowOf(emptyList<PlaylistSongEntity>())
     }.collectAsState(initial = emptyList())
 
-    var controller by remember { mutableStateOf<MediaController?>(null) }
     var isPlaying by remember { mutableStateOf(false) }
     
     var showLiveLyrics by remember { mutableStateOf(false) }
