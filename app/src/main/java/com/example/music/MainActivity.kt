@@ -225,6 +225,7 @@ import javax.crypto.Cipher
 import javax.crypto.spec.SecretKeySpec
 import kotlin.math.max
 import kotlin.math.roundToInt
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.flowOf
@@ -715,14 +716,17 @@ fun convertPlainLyricsToTimed(
 
 fun captureAndShareLyricCard(
     context: Context,
+    coroutineScope: CoroutineScope, // Now requires a CoroutineScope to run safely
     lifecycleOwner: LifecycleOwner,
     savedStateRegistryOwner: SavedStateRegistryOwner,
     content: @Composable () -> Unit
 ) {
+    Toast.makeText(context, "Generating card...", Toast.LENGTH_SHORT).show()
+
     val composeView = ComposeView(context).apply {
         setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed)
-        setViewTreeLifecycleOwner(lifecycleOwner)
-        setViewTreeSavedStateRegistryOwner(savedStateRegistryOwner)
+        ViewTreeLifecycleOwner.set(this, lifecycleOwner)
+        ViewTreeSavedStateRegistryOwner.set(this, savedStateRegistryOwner)
         setContent {
             MaterialTheme(colorScheme = darkColorScheme()) {
                 content()
@@ -730,7 +734,6 @@ fun captureAndShareLyricCard(
         }
     }
 
-    // Standard Instagram Story Dimensions
     val width = 1080
     val height = 1920
 
@@ -740,27 +743,43 @@ fun captureAndShareLyricCard(
     )
     composeView.layout(0, 0, width, height)
 
-    val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-    val canvas = Canvas(bitmap)
-    composeView.draw(canvas)
+    // Launch asynchronously so the Main Thread (and music) never freezes
+    coroutineScope.launch(Dispatchers.Main) {
+        try {
+            // Give Compose time to render and Coil time to fetch the background image
+            delay(800L) 
 
-    try {
-        val cachePath = File(context.cacheDir, "images")
-        cachePath.mkdirs()
-        val file = File(cachePath, "sonora_lyric_card.png")
-        val stream = FileOutputStream(file)
-        bitmap.compress(Bitmap.CompressFormat.PNG, 100, stream)
-        stream.close()
+            val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+            val canvas = Canvas(bitmap)
+            composeView.draw(canvas)
 
-        val uri = FileProvider.getUriForFile(context, "${context.packageName}.provider", file)
-        val intent = Intent(Intent.ACTION_SEND).apply {
-            type = "image/png"
-            putExtra(Intent.EXTRA_STREAM, uri)
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            // Save the file on the background I/O thread
+            withContext(Dispatchers.IO) {
+                val cachePath = File(context.cacheDir, "images")
+                cachePath.mkdirs()
+                val file = File(cachePath, "sonora_lyric_card.png")
+                val stream = FileOutputStream(file)
+                bitmap.compress(Bitmap.CompressFormat.PNG, 100, stream)
+                stream.close()
+
+                val uri = FileProvider.getUriForFile(context, "${context.packageName}.provider", file)
+                
+                // Switch back to Main Thread to open the Share Sheet
+                withContext(Dispatchers.Main) {
+                    val intent = Intent(Intent.ACTION_SEND).apply {
+                        type = "image/png"
+                        putExtra(Intent.EXTRA_STREAM, uri)
+                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    }
+                    context.startActivity(Intent.createChooser(intent, "Share Lyric Card"))
+                }
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+            withContext(Dispatchers.Main) {
+                Toast.makeText(context, "Share error: Verify FileProvider in Manifest", Toast.LENGTH_LONG).show()
+            }
         }
-        context.startActivity(Intent.createChooser(intent, "Share Lyric Card"))
-    } catch (e: Exception) {
-        e.printStackTrace()
     }
 }
 
@@ -3611,6 +3630,7 @@ fun SyncedLyricsView(
                             
                             captureAndShareLyricCard(
                                 context = context,
+                                coroutineScope = coroutineScope,
                                 lifecycleOwner = lifecycleOwner,
                                 savedStateRegistryOwner = savedStateRegistryOwner
                             ) {
