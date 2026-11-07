@@ -15,6 +15,7 @@ import android.net.Uri
 import android.os.Bundle
 import android.util.Base64
 import android.view.View
+import android.view.ViewGroup
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
@@ -716,17 +717,19 @@ fun convertPlainLyricsToTimed(
 
 fun captureAndShareLyricCard(
     context: Context,
-    coroutineScope: CoroutineScope, // Now requires a CoroutineScope to run safely
-    lifecycleOwner: LifecycleOwner,
-    savedStateRegistryOwner: SavedStateRegistryOwner,
+    coroutineScope: CoroutineScope,
     content: @Composable () -> Unit
 ) {
+    val activity = context as? Activity ?: return
     Toast.makeText(context, "Generating card...", Toast.LENGTH_SHORT).show()
 
+    val width = 1080
+    val height = 1920
+
     val composeView = ComposeView(context).apply {
+        // Keeps it attached for rendering, but invisible to the user
+        visibility = View.INVISIBLE
         setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed)
-        setViewTreeLifecycleOwner(lifecycleOwner)
-        setViewTreeSavedStateRegistryOwner(savedStateRegistryOwner)
         setContent {
             MaterialTheme(colorScheme = darkColorScheme()) {
                 content()
@@ -734,26 +737,22 @@ fun captureAndShareLyricCard(
         }
     }
 
-    val width = 1080
-    val height = 1920
+    // Attach to the Activity's root layout so it inherits all required Lifecycles and Window tokens
+    val rootView = activity.window.decorView.findViewById<ViewGroup>(android.R.id.content)
+    rootView.addView(composeView, ViewGroup.LayoutParams(width, height))
 
-    composeView.measure(
-        View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY),
-        View.MeasureSpec.makeMeasureSpec(height, View.MeasureSpec.EXACTLY)
-    )
-    composeView.layout(0, 0, width, height)
-
-    // Launch asynchronously so the Main Thread (and music) never freezes
     coroutineScope.launch(Dispatchers.Main) {
         try {
-            // Give Compose time to render and Coil time to fetch the background image
-            delay(800L) 
+            // Wait 1.2 seconds for Compose to layout and Coil to fetch the album image
+            delay(1200L) 
 
             val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
             val canvas = Canvas(bitmap)
             composeView.draw(canvas)
 
-            // Save the file on the background I/O thread
+            // Instantly remove the invisible view to free up memory
+            rootView.removeView(composeView)
+
             withContext(Dispatchers.IO) {
                 val cachePath = File(context.cacheDir, "images")
                 cachePath.mkdirs()
@@ -764,7 +763,6 @@ fun captureAndShareLyricCard(
 
                 val uri = FileProvider.getUriForFile(context, "${context.packageName}.provider", file)
                 
-                // Switch back to Main Thread to open the Share Sheet
                 withContext(Dispatchers.Main) {
                     val intent = Intent(Intent.ACTION_SEND).apply {
                         type = "image/png"
@@ -776,8 +774,9 @@ fun captureAndShareLyricCard(
             }
         } catch (e: Exception) {
             e.printStackTrace()
+            rootView.removeView(composeView) // Failsafe cleanup
             withContext(Dispatchers.Main) {
-                Toast.makeText(context, "Share error: Verify FileProvider in Manifest", Toast.LENGTH_LONG).show()
+                Toast.makeText(context, "Failed to generate image", Toast.LENGTH_SHORT).show()
             }
         }
     }
@@ -3532,8 +3531,6 @@ fun SyncedLyricsView(
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
-    val lifecycleOwner = LocalLifecycleOwner.current
-    val savedStateRegistryOwner = LocalSavedStateRegistryOwner.current
 
     val listState = rememberLazyListState()
     val coroutineScope = rememberCoroutineScope()
@@ -3630,9 +3627,7 @@ fun SyncedLyricsView(
                             
                             captureAndShareLyricCard(
                                 context = context,
-                                coroutineScope = coroutineScope,
-                                lifecycleOwner = lifecycleOwner,
-                                savedStateRegistryOwner = savedStateRegistryOwner
+                                coroutineScope = coroutineScope
                             ) {
                                 LyricCardTemplate(
                                     selectedLyrics = linesToShare,
