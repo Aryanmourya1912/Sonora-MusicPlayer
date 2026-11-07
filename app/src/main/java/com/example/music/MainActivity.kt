@@ -721,8 +721,8 @@ fun captureAndShareLyricCard(
 ) {
     val composeView = ComposeView(context).apply {
         setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed)
-        setViewTreeLifecycleOwner(lifecycleOwner)
-        setViewTreeSavedStateRegistryOwner(savedStateRegistryOwner)
+        ViewTreeLifecycleOwner.set(this, lifecycleOwner)
+        ViewTreeSavedStateRegistryOwner.set(this, savedStateRegistryOwner)
         setContent {
             MaterialTheme(colorScheme = darkColorScheme()) {
                 content()
@@ -764,9 +764,109 @@ fun captureAndShareLyricCard(
     }
 }
 
-// ---------------------------------------------------------------------------
-// In-Memory Lyrics Cache & Candidate Validator
-// ---------------------------------------------------------------------------
+@Composable
+fun LyricCardTemplate(
+    selectedLyrics: List<String>,
+    trackTitle: String,
+    trackArtist: String,
+    artworkUrl: String
+) {
+    Box(
+        modifier = Modifier
+            .size(1080.dp, 1920.dp)
+            .background(Color(0xFF0F151C))
+    ) {
+        // Blurred Background Overlay
+        AsyncImage(
+            model = artworkUrl,
+            contentDescription = null,
+            modifier = Modifier
+                .fillMaxSize()
+                .blur(radius = 80.dp)
+                .graphicsLayer { alpha = 0.6f },
+            contentScale = ContentScale.Crop
+        )
+        
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(
+                    Brush.verticalGradient(
+                        colors = listOf(Color.Transparent, Color(0xAA000000)),
+                        startY = 800f
+                    )
+                )
+        )
+
+        // Centered Lyrics
+        Column(
+            modifier = Modifier
+                .align(Alignment.Center)
+                .padding(horizontal = 80.dp),
+            verticalArrangement = Arrangement.spacedBy(40.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            selectedLyrics.forEach { line ->
+                Text(
+                    text = line,
+                    fontSize = 64.sp,
+                    fontWeight = FontWeight.ExtraBold,
+                    color = Color.White,
+                    textAlign = TextAlign.Center,
+                    lineHeight = 78.sp
+                )
+            }
+        }
+
+        // Bottom Attribution Footer
+        Row(
+            modifier = Modifier
+                .align(Alignment.BottomStart)
+                .fillMaxWidth()
+                .padding(60.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            AsyncImage(
+                model = artworkUrl,
+                contentDescription = null,
+                modifier = Modifier
+                    .size(140.dp)
+                    .clip(RoundedCornerShape(24.dp)),
+                contentScale = ContentScale.Crop
+            )
+            Spacer(modifier = Modifier.width(40.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = trackTitle,
+                    color = Color.White,
+                    fontSize = 48.sp,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1
+                )
+                Text(
+                    text = trackArtist,
+                    color = Color(0xFFD1D5DB),
+                    fontSize = 36.sp,
+                    maxLines = 1
+                )
+            }
+            Column(horizontalAlignment = Alignment.End) {
+                Icon(
+                    imageVector = Icons.Rounded.GraphicEq,
+                    contentDescription = null,
+                    tint = Color(0xFF7C4DFF),
+                    modifier = Modifier.size(64.dp)
+                )
+                Text(
+                    text = "Sonora",
+                    color = Color.White,
+                    fontSize = 28.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        }
+    }
+}
 
 private val lyricsMemoryCache = object : LinkedHashMap<String, Pair<String, List<SyncedLyricLine>>>(32, 0.75f, true) {
     override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Pair<String, List<SyncedLyricLine>>>?): Boolean {
@@ -3187,111 +3287,6 @@ fun sanitizeText(input: String): String {
 }
         
 
-@Composable
-fun LyricCardTemplate(
-    selectedLyrics: List<String>,
-    trackTitle: String,
-    trackArtist: String,
-    artworkUrl: String
-) {
-    Box(
-        modifier = Modifier
-            .size(1080.dp, 1920.dp)
-            .background(Color(0xFF0F151C))
-    ) {
-        // Blurred Background
-        AsyncImage(
-            model = artworkUrl,
-            contentDescription = null,
-            modifier = Modifier
-                .fillMaxSize()
-                .blur(radius = 80.dp)
-                .graphicsLayer { alpha = 0.6f },
-            contentScale = ContentScale.Crop
-        )
-        
-        // Gradient Overlay for readability
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(
-                    Brush.verticalGradient(
-                        colors = listOf(Color.Transparent, Color(0xAA000000)),
-                        startY = 800f
-                    )
-                )
-        )
-
-        // Centered Lyrics
-        Column(
-            modifier = Modifier
-                .align(Alignment.Center)
-                .padding(horizontal = 80.dp),
-            verticalArrangement = Arrangement.spacedBy(40.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-            selectedLyrics.forEach { line ->
-                Text(
-                    text = line,
-                    fontSize = 64.sp,
-                    fontWeight = FontWeight.ExtraBold,
-                    color = Color.White,
-                    textAlign = TextAlign.Center,
-                    lineHeight = 78.sp
-                )
-            }
-        }
-
-        // Bottom Attribution Footer
-        Row(
-            modifier = Modifier
-                .align(Alignment.BottomStart)
-                .fillMaxWidth()
-                .padding(60.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            AsyncImage(
-                model = artworkUrl,
-                contentDescription = null,
-                modifier = Modifier
-                    .size(140.dp)
-                    .clip(RoundedCornerShape(24.dp)),
-                contentScale = ContentScale.Crop
-            )
-            Spacer(modifier = Modifier.width(40.dp))
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = trackTitle,
-                    color = Color.White,
-                    fontSize = 48.sp,
-                    fontWeight = FontWeight.Bold,
-                    maxLines = 1
-                )
-                Text(
-                    text = trackArtist,
-                    color = Color(0xFFD1D5DB),
-                    fontSize = 36.sp,
-                    maxLines = 1
-                )
-            }
-            Column(horizontalAlignment = Alignment.End) {
-                Icon(
-                    imageVector = Icons.Rounded.GraphicEq,
-                    contentDescription = null,
-                    tint = Color(0xFF7C4DFF),
-                    modifier = Modifier.size(64.dp)
-                )
-                Text(
-                    text = "Sonora",
-                    color = Color.White,
-                    fontSize = 28.sp,
-                    fontWeight = FontWeight.Bold
-                )
-            }
-        }
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Small composables
 // ---------------------------------------------------------------------------
@@ -3517,16 +3512,22 @@ fun SyncedLyricsView(
     artworkUrl: String,
     modifier: Modifier = Modifier
 ) {
+    val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+    val savedStateRegistryOwner = LocalSavedStateRegistryOwner.current
+
     val listState = rememberLazyListState()
     val coroutineScope = rememberCoroutineScope()
     var isManualScrolling by remember { mutableStateOf(false) }
+    
+    // NEW: Multi-select state
+    var selectedLines by remember { mutableStateOf(emptySet<Int>()) }
 
-    // Reset manual scrolling state whenever a new song's lyrics load
     LaunchedEffect(lyrics) {
         isManualScrolling = false
+        selectedLines = emptySet()
     }
 
-    // +250ms lookahead so the active line highlights right on beat
     val activeIndex = remember(currentPositionMs, lyrics) {
         if (lyrics.isEmpty()) -1
         else {
@@ -3536,7 +3537,6 @@ fun SyncedLyricsView(
         }
     }
 
-    // Detect genuine user touch scrolling without blocking LazyColumn's native fling physics
     val nestedScrollConnection = remember {
         object : androidx.compose.ui.input.nestedscroll.NestedScrollConnection {
             override fun onPreScroll(
@@ -3551,9 +3551,8 @@ fun SyncedLyricsView(
         }
     }
 
-    // Auto-scroll to the active lyric line ONLY when not manually scrolling
     LaunchedEffect(activeIndex, isManualScrolling) {
-        if (!isManualScrolling && activeIndex >= 0 && lyrics.isNotEmpty()) {
+        if (!isManualScrolling && activeIndex >= 0 && lyrics.isNotEmpty() && selectedLines.isEmpty()) {
             try {
                 listState.animateScrollToItem(
                     index = activeIndex,
@@ -3565,6 +3564,7 @@ fun SyncedLyricsView(
 
     fun triggerSyncToCurrentAudio() {
         isManualScrolling = false
+        selectedLines = emptySet()
         if (activeIndex >= 0 && lyrics.isNotEmpty()) {
             coroutineScope.launch {
                 try {
@@ -3586,49 +3586,92 @@ fun SyncedLyricsView(
             modifier = Modifier.fillMaxSize(),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(vertical = 4.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                IconButton(onClick = onCloseRequested) {
-                    Icon(
-                        imageVector = Icons.Rounded.ArrowBack,
-                        contentDescription = "Back",
-                        tint = Color.White,
-                        modifier = Modifier.size(24.dp)
-                    )
-                }
-
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text(
-                        text = if (providerName.isNotBlank()) "Lyrics from $providerName" else "Synchronized Lyrics",
-                        fontSize = 13.sp,
-                        color = Color.White.copy(alpha = 0.75f),
-                        fontWeight = FontWeight.Medium
-                    )
-                    if (isManualScrolling) {
-                        Text(
-                            text = "Auto-scroll paused",
-                            fontSize = 11.sp,
-                            color = Color(0xFFFBBF24),
-                            fontWeight = FontWeight.SemiBold
-                        )
+            // NEW: Selection Top Bar vs Normal Top Bar
+            if (selectedLines.isNotEmpty()) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 4.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    IconButton(onClick = { selectedLines = emptySet() }) {
+                        Icon(Icons.Rounded.Close, contentDescription = "Cancel", tint = Color.White)
                     }
-                }
-
-                // Top-right quick Sync button when user scrolls away
-                if (isManualScrolling && activeIndex >= 0) {
+                    Text(
+                        text = "${selectedLines.size}/4 Selected",
+                        color = Color.White,
+                        fontWeight = FontWeight.Bold
+                    )
                     TextButton(
-                        onClick = { triggerSyncToCurrentAudio() },
+                        onClick = {
+                            val linesToShare = lyrics
+                                .filterIndexed { i, _ -> selectedLines.contains(i) }
+                                .map { it.text }
+                            
+                            captureAndShareLyricCard(
+                                context = context,
+                                lifecycleOwner = lifecycleOwner,
+                                savedStateRegistryOwner = savedStateRegistryOwner
+                            ) {
+                                LyricCardTemplate(
+                                    selectedLyrics = linesToShare,
+                                    trackTitle = trackTitle,
+                                    trackArtist = trackArtist,
+                                    artworkUrl = artworkUrl
+                                )
+                            }
+                            selectedLines = emptySet()
+                        },
                         colors = ButtonDefaults.textButtonColors(contentColor = Color(0xFF7C4DFF))
                     ) {
-                        Text("Sync", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                        Text("Share", fontWeight = FontWeight.Bold)
                     }
-                } else {
-                    Spacer(modifier = Modifier.width(48.dp))
+                }
+            } else {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 4.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    IconButton(onClick = onCloseRequested) {
+                        Icon(
+                            imageVector = Icons.Rounded.ArrowBack,
+                            contentDescription = "Back",
+                            tint = Color.White,
+                            modifier = Modifier.size(24.dp)
+                        )
+                    }
+
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text(
+                            text = if (providerName.isNotBlank()) "Lyrics from $providerName" else "Synchronized Lyrics",
+                            fontSize = 13.sp,
+                            color = Color.White.copy(alpha = 0.75f),
+                            fontWeight = FontWeight.Medium
+                        )
+                        if (isManualScrolling) {
+                            Text(
+                                text = "Auto-scroll paused",
+                                fontSize = 11.sp,
+                                color = Color(0xFFFBBF24),
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+                    }
+
+                    if (isManualScrolling && activeIndex >= 0) {
+                        TextButton(
+                            onClick = { triggerSyncToCurrentAudio() },
+                            colors = ButtonDefaults.textButtonColors(contentColor = Color(0xFF7C4DFF))
+                        ) {
+                            Text("Sync", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                        }
+                    } else {
+                        Spacer(modifier = Modifier.width(48.dp))
+                    }
                 }
             }
 
@@ -3659,17 +3702,38 @@ fun SyncedLyricsView(
                     verticalArrangement = Arrangement.spacedBy(28.dp)
                 ) {
                     itemsIndexed(lyrics, key = { index, line -> "${line.timeMs}_$index" }) { index, item ->
-                        val isActive = index == activeIndex
+                        val isActive = index == activeIndex && selectedLines.isEmpty()
                         val isPast = index < activeIndex
+                        val isSelected = selectedLines.contains(index)
 
                         Column(
                             horizontalAlignment = Alignment.CenterHorizontally,
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .clip(RoundedCornerShape(12.dp))
-                                .clickable {
-                                    onSeekRequested(item.timeMs)
-                                    isManualScrolling = false
+                                // NEW: Selection highlight
+                                .background(if (isSelected) Color(0x407C4DFF) else Color.Transparent)
+                                .pointerInput(Unit) {
+                                    detectTapGestures(
+                                        onLongPress = {
+                                            if (selectedLines.isEmpty()) {
+                                                selectedLines = setOf(index)
+                                                isManualScrolling = true
+                                            }
+                                        },
+                                        onTap = {
+                                            if (selectedLines.isNotEmpty()) {
+                                                if (isSelected) {
+                                                    selectedLines = selectedLines - index
+                                                } else if (selectedLines.size < 4) {
+                                                    selectedLines = selectedLines + index
+                                                }
+                                            } else {
+                                                onSeekRequested(item.timeMs)
+                                                isManualScrolling = false
+                                            }
+                                        }
+                                    )
                                 }
                                 .padding(horizontal = 12.dp, vertical = 6.dp)
                         ) {
@@ -3680,7 +3744,7 @@ fun SyncedLyricsView(
                                 isPast = isPast
                             )
 
-                            if (isManualScrolling) {
+                            if (isManualScrolling && selectedLines.isEmpty()) {
                                 Spacer(modifier = Modifier.height(4.dp))
                                 Text(
                                     text = formatTime(item.timeMs),
@@ -3737,9 +3801,8 @@ fun SyncedLyricsView(
             }
         }
 
-        // Floating pill button at the bottom that appears immediately on manual scroll
         AnimatedVisibility(
-            visible = isManualScrolling && activeIndex >= 0 && lyrics.isNotEmpty(),
+            visible = isManualScrolling && activeIndex >= 0 && lyrics.isNotEmpty() && selectedLines.isEmpty(),
             enter = slideInVertically(initialOffsetY = { it / 2 }) + fadeIn(),
             exit = slideOutVertically(targetOffsetY = { it / 2 }) + fadeOut(),
             modifier = Modifier
