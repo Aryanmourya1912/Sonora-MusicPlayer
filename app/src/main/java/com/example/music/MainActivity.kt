@@ -803,11 +803,11 @@ fun LyricCardTemplate(
             .size(1080.dp, 1920.dp)
             .background(Color(0xFF0F151C))
     ) {
-        // Background Image WITHOUT the hardware blur and explicitly disabling hardware bitmaps
+        // 1. Background Image
         AsyncImage(
             model = ImageRequest.Builder(context)
                 .data(artworkUrl)
-                .allowHardware(false) // <--- PREVENTS THE CRASH
+                .allowHardware(false)
                 .build(),
             contentDescription = null,
             modifier = Modifier
@@ -815,91 +815,113 @@ fun LyricCardTemplate(
                 .graphicsLayer { alpha = 0.5f },
             contentScale = ContentScale.Crop
         )
-        
-        // Heavy Gradient Overlay to simulate the focus/blur depth
+
+        // 2. Dual Gradient Overlay for contrast
         Box(
             modifier = Modifier
                 .fillMaxSize()
                 .background(
                     Brush.verticalGradient(
                         colors = listOf(
-                            Color(0xDD0F151C),
-                            Color(0x990F151C),
-                            Color(0xEE0F151C)
+                            Color(0xBB000000), // Darker top
+                            Color(0x66000000), // Lighter middle
+                            Color(0xEE000000)  // Very dark bottom
                         )
                     )
                 )
         )
 
-        // Centered Lyrics
+        // 3. Centered Lyrics (Scaled and constrained)
         Column(
             modifier = Modifier
                 .align(Alignment.Center)
-                .padding(horizontal = 80.dp),
-            verticalArrangement = Arrangement.spacedBy(40.dp),
+                .padding(horizontal = 90.dp)
+                .padding(bottom = 200.dp), // Push up slightly to balance footer
+            verticalArrangement = Arrangement.spacedBy(32.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             selectedLyrics.forEach { line ->
                 Text(
                     text = line,
-                    fontSize = 64.sp,
+                    fontSize = 54.sp, // Reduced from 64.sp
                     fontWeight = FontWeight.ExtraBold,
                     color = Color.White,
                     textAlign = TextAlign.Center,
-                    lineHeight = 78.sp
+                    lineHeight = 72.sp,
+                    // Prevent single letters hanging on a new line
+                    modifier = Modifier.fillMaxWidth()
                 )
             }
         }
 
-        // Bottom Attribution Footer
-        Row(
+        // 4. Modern Pill-Shaped Footer
+        Box(
             modifier = Modifier
-                .align(Alignment.BottomStart)
-                .fillMaxWidth()
-                .padding(60.dp),
-            verticalAlignment = Alignment.CenterVertically
+                .align(Alignment.BottomCenter)
+                .padding(bottom = 120.dp)
+                .fillMaxWidth(0.85f) // Don't touch the edges
+                .clip(RoundedCornerShape(48.dp))
+                .background(Color(0x40000000))
+                .border(2.dp, Color(0x33FFFFFF), RoundedCornerShape(48.dp))
+                .padding(24.dp)
         ) {
-            // Foreground Image explicitly disabling hardware bitmaps
-            AsyncImage(
-                model = ImageRequest.Builder(context)
-                    .data(artworkUrl)
-                    .allowHardware(false) // <--- PREVENTS THE CRASH
-                    .build(),
-                contentDescription = null,
-                modifier = Modifier
-                    .size(140.dp)
-                    .clip(RoundedCornerShape(24.dp)),
-                contentScale = ContentScale.Crop
-            )
-            Spacer(modifier = Modifier.width(40.dp))
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = trackTitle,
-                    color = Color.White,
-                    fontSize = 48.sp,
-                    fontWeight = FontWeight.Bold,
-                    maxLines = 1
-                )
-                Text(
-                    text = trackArtist,
-                    color = Color(0xFFD1D5DB),
-                    fontSize = 36.sp,
-                    maxLines = 1
-                )
-            }
-            Column(horizontalAlignment = Alignment.End) {
-                Icon(
-                    imageVector = Icons.Rounded.GraphicEq,
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                // Album Art
+                AsyncImage(
+                    model = ImageRequest.Builder(context)
+                        .data(artworkUrl)
+                        .allowHardware(false)
+                        .build(),
                     contentDescription = null,
-                    tint = Color(0xFF7C4DFF),
-                    modifier = Modifier.size(64.dp)
+                    modifier = Modifier
+                        .size(120.dp)
+                        .clip(CircleShape),
+                    contentScale = ContentScale.Crop
                 )
-                Text(
-                    text = "Sonora",
-                    color = Color.White,
-                    fontSize = 28.sp,
-                    fontWeight = FontWeight.Bold
-                )
+                
+                Spacer(modifier = Modifier.width(32.dp))
+                
+                // Track Info (Constrained)
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = trackTitle,
+                        color = Color.White,
+                        fontSize = 42.sp,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Text(
+                        text = trackArtist,
+                        color = Color(0xFFD1D5DB),
+                        fontSize = 32.sp,
+                        fontWeight = FontWeight.Medium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+                
+                Spacer(modifier = Modifier.width(24.dp))
+                
+                // App Branding
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Icon(
+                        imageVector = Icons.Rounded.GraphicEq,
+                        contentDescription = null,
+                        tint = Color(0xFF7C4DFF),
+                        modifier = Modifier.size(54.dp)
+                    )
+                    Text(
+                        text = "Sonora",
+                        color = Color.White,
+                        fontSize = 24.sp,
+                        fontWeight = FontWeight.Bold,
+                        letterSpacing = 2.sp
+                    )
+                }
             }
         }
     }
@@ -1531,6 +1553,152 @@ fun calculateTotalOfflineBytes(downloadedSongs: List<DownloadedSongEntity>): Lon
         }
     }
     return total
+}
+            
+suspend fun fetchYouTubePlaylistTracks(playlistId: String): List<Pair<String, String>> = withContext(Dispatchers.IO) {
+    val tracks = mutableListOf<Pair<String, String>>()
+    try {
+        val url = URL("https://www.youtube.com/youtubei/v1/browse")
+        val conn = (url.openConnection() as HttpURLConnection).apply {
+            requestMethod = "POST"
+            connectTimeout = 5000
+            readTimeout = 5000
+            doOutput = true
+            setRequestProperty("Content-Type", "application/json")
+            setRequestProperty("User-Agent", "Mozilla/5.0")
+        }
+
+        val payload = JSONObject().apply {
+            put("context", JSONObject().apply {
+                put("client", JSONObject().apply {
+                    put("clientName", "WEB")
+                    put("clientVersion", "2.20240101.00.00")
+                })
+            })
+            put("browseId", if (playlistId.startsWith("VL")) playlistId else "VL$playlistId")
+        }
+
+        conn.outputStream.use { it.write(payload.toString().toByteArray(Charsets.UTF_8)) }
+
+        if (conn.responseCode == HttpURLConnection.HTTP_OK) {
+            val respText = conn.inputStream.bufferedReader().use { it.readText() }
+            val root = JSONObject(respText)
+            
+            val renderers = mutableListOf<JSONObject>()
+            findRenderersRecursive(root, "playlistVideoRenderer", renderers)
+            findRenderersRecursive(root, "musicResponsiveListItemRenderer", renderers)
+
+            for (item in renderers) {
+                val titleRuns = item.optJSONObject("title")?.optJSONArray("runs")
+                val title = titleRuns?.optJSONObject(0)?.optString("text") 
+                    ?: item.optJSONObject("title")?.optString("simpleText") ?: ""
+
+                val artistRuns = item.optJSONObject("shortBylineText")?.optJSONArray("runs") 
+                    ?: item.optJSONObject("flexColumns")?.optJSONObject(1)
+                        ?.optJSONObject("musicResponsiveListItemFlexColumnRenderer")
+                        ?.optJSONObject("text")?.optJSONArray("runs")
+                        
+                val artist = artistRuns?.optJSONObject(0)?.optString("text") ?: "Unknown Artist"
+
+                if (title.isNotBlank() && title != "Deleted video") {
+                    tracks.add(Pair(sanitizeText(title), sanitizeText(artist)))
+                }
+            }
+        }
+    } catch (e: Exception) { e.printStackTrace() }
+    tracks
+}
+
+suspend fun fetchSpotifyPlaylistTracks(playlistId: String): List<Pair<String, String>> = withContext(Dispatchers.IO) {
+    val tracks = mutableListOf<Pair<String, String>>()
+    try {
+        // The embed endpoint provides a clean JSON blob without requiring OAuth tokens
+        val url = URL("https://open.spotify.com/embed/playlist/$playlistId")
+        val conn = (url.openConnection() as HttpURLConnection).apply {
+            requestMethod = "GET"
+            connectTimeout = 6000
+            readTimeout = 6000
+            setRequestProperty("User-Agent", "Mozilla/5.0")
+        }
+
+        if (conn.responseCode == HttpURLConnection.HTTP_OK) {
+            val html = conn.inputStream.bufferedReader().use { it.readText() }
+            
+            // Extract the Next.js hydration JSON block
+            val jsonStart = html.indexOf("<script id=\"__NEXT_DATA__\" type=\"application/json\">")
+            if (jsonStart != -1) {
+                val jsonStr = html.substring(jsonStart).substringAfter(">").substringBefore("</script>")
+                val root = JSONObject(jsonStr)
+                
+                val trackList = root.optJSONObject("props")
+                    ?.optJSONObject("pageProps")
+                    ?.optJSONObject("state")
+                    ?.optJSONObject("data")
+                    ?.optJSONObject("entity")
+                    ?.optJSONArray("trackList")
+
+                if (trackList != null) {
+                    for (i in 0 until trackList.length()) {
+                        val track = trackList.optJSONObject(i) ?: continue
+                        val title = track.optString("title", "")
+                        val artist = track.optString("subtitle", "")
+                        if (title.isNotBlank()) {
+                            tracks.add(Pair(title, artist))
+                        }
+                    }
+                }
+            }
+        }
+    } catch (e: Exception) { e.printStackTrace() }
+    tracks
+}
+            
+suspend fun importPlaylistFromUrl(
+    url: String, 
+    playlistName: String, 
+    dao: com.example.music.data.SonoraDao // Use your exact DAO import path
+): Int = withContext(Dispatchers.IO) {
+    val rawTracks = mutableListOf<Pair<String, String>>()
+    
+    when {
+        url.contains("spotify.com/playlist/") -> {
+            val id = url.substringAfter("playlist/").substringBefore("?").substringBefore("/")
+            rawTracks.addAll(fetchSpotifyPlaylistTracks(id))
+        }
+        url.contains("youtube.com/playlist?list=") || url.contains("youtu.be/playlist?list=") -> {
+            val id = url.substringAfter("list=").substringBefore("&")
+            rawTracks.addAll(fetchYouTubePlaylistTracks(id))
+        }
+    }
+
+    if (rawTracks.isEmpty()) return@withContext 0
+
+    // Create the new playlist in Room
+    val playlistId = dao.insertPlaylist(com.example.music.data.PlaylistEntity(name = playlistName.trim()))
+    var importedCount = 0
+
+    for ((title, artist) in rawTracks) {
+        val query = "$title $artist".trim()
+        val (results, _) = searchYouTubeUniversal(query)
+        
+        val bestMatch = results.firstOrNull()
+        if (bestMatch != null) {
+            dao.insertPlaylistSong(
+                com.example.music.data.PlaylistSongEntity(
+                    playlistId = playlistId,
+                    songId = bestMatch.id,
+                    title = bestMatch.title,
+                    artist = bestMatch.artist,
+                    audioUrl = bestMatch.audioUrl,
+                    artworkUrl = bestMatch.artworkUrl,
+                    duration = bestMatch.durationFormatted
+                )
+            )
+            importedCount++
+        }
+    }
+    
+    importedCount
 }
 
 suspend fun downloadTrackWithAutoRetry(
@@ -4869,6 +5037,11 @@ fun SonoraPlayerScreen(
     var songToAddToPlaylist by remember { mutableStateOf<FullTrackItem?>(null) }
     var showCreatePlaylistDialog by remember { mutableStateOf(false) }
     var newPlaylistName by remember { mutableStateOf("") }
+    var showImportPlaylistDialog by remember { mutableStateOf(false) }
+            
+    var importPlaylistUrl by remember { mutableStateOf("") }
+    var importPlaylistName by remember { mutableStateOf("") }
+    var isImportingPlaylist by remember { mutableStateOf(false) }
 
     val maxSysVolume = remember { audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC).toFloat() }
     var currentVolumeSlider by remember {
@@ -6991,17 +7164,34 @@ fun SonoraPlayerScreen(
                                         } else {
                                             LazyColumn(modifier = Modifier.fillMaxSize()) {
                                                 item {
+                                                Row(
+                                                    modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
+                                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                                ) {
                                                     Button(
                                                         onClick = { showCreatePlaylistDialog = true },
                                                         colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
                                                         shape = RoundedCornerShape(10.dp),
-                                                        modifier = Modifier
-                                                            .fillMaxWidth()
-                                                            .padding(vertical = 6.dp)
+                                                        modifier = Modifier.weight(1f)
                                                     ) {
-                                                        Text("+ Create New Playlist", fontWeight = FontWeight.Bold)
+                                                        Text("+ New", fontWeight = FontWeight.Bold)
+                                                    }
+                                                    
+                                                    Button(
+                                                        onClick = { showImportPlaylistDialog = true },
+                                                        colors = ButtonDefaults.buttonColors(
+                                                            containerColor = if (isDarkTheme) Color(0xFF1E2836) else Color(0xFFE2E8F0),
+                                                            contentColor = if (isDarkTheme) Color.White else Color(0xFF0F172A)
+                                                        ),
+                                                        shape = RoundedCornerShape(10.dp),
+                                                        modifier = Modifier.weight(1f)
+                                                    ) {
+                                                        Icon(Icons.Rounded.Link, contentDescription = null, modifier = Modifier.size(16.dp))
+                                                        Spacer(modifier = Modifier.width(4.dp))
+                                                        Text("Import Link", fontWeight = FontWeight.Bold)
                                                     }
                                                 }
+                                            }
                                                 items(allPlaylists) { playlist ->
                                                     val songsForThisPlaylist by remember(playlist.id) { dao.getSongsForPlaylist(playlist.id) }
                                                         .collectAsState(initial = emptyList())
@@ -8150,4 +8340,76 @@ fun SonoraPlayerScreen(
         )
     }
     
+    if (showImportPlaylistDialog) {
+        AlertDialog(
+            onDismissRequest = { if (!isImportingPlaylist) showImportPlaylistDialog = false },
+            title = { Text("Import Playlist", color = Color.White, fontWeight = FontWeight.Bold) },
+            text = {
+                Column {
+                    Text(
+                        text = "Paste a public Spotify or YouTube playlist link. Sonora will match and import the tracks.",
+                        fontSize = 13.sp,
+                        color = Color(0xFF94A3B8),
+                        modifier = Modifier.padding(bottom = 12.dp)
+                    )
+                    OutlinedTextField(
+                        value = importPlaylistUrl,
+                        onValueChange = { importPlaylistUrl = it },
+                        label = { Text("Playlist URL") },
+                        singleLine = true,
+                        enabled = !isImportingPlaylist,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = importPlaylistName,
+                        onValueChange = { importPlaylistName = it },
+                        label = { Text("Save As (Name)") },
+                        singleLine = true,
+                        enabled = !isImportingPlaylist,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    
+                    if (isImportingPlaylist) {
+                        Spacer(modifier = Modifier.height(16.dp))
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            CircularProgressIndicator(modifier = Modifier.size(20.dp), color = Color(0xFF7C4DFF), strokeWidth = 2.dp)
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Text("Matching tracks... this may take a minute.", fontSize = 12.sp, color = Color(0xFFD1D5DB))
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        if (importPlaylistUrl.isNotBlank() && importPlaylistName.isNotBlank()) {
+                            isImportingPlaylist = true
+                            coroutineScope.launch {
+                                val count = importPlaylistFromUrl(importPlaylistUrl, importPlaylistName, dao)
+                                isImportingPlaylist = false
+                                showImportPlaylistDialog = false
+                                importPlaylistUrl = ""
+                                importPlaylistName = ""
+                                Toast.makeText(context, "Imported $count tracks to '${importPlaylistName}'", Toast.LENGTH_LONG).show()
+                            }
+                        }
+                    },
+                    enabled = !isImportingPlaylist && importPlaylistUrl.isNotBlank() && importPlaylistName.isNotBlank()
+                ) { Text("Import") }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = { 
+                        showImportPlaylistDialog = false 
+                        importPlaylistUrl = ""
+                        importPlaylistName = ""
+                    },
+                    enabled = !isImportingPlaylist
+                ) { Text("Cancel", color = Color(0xFF94A3B8)) }
+            },
+            containerColor = Color(0xFF161F29),
+            shape = RoundedCornerShape(16.dp)
+        )
+    }  
 }
