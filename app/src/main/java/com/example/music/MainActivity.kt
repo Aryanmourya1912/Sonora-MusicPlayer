@@ -148,6 +148,7 @@ import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
@@ -174,10 +175,12 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalSavedStateRegistryOwner
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.ViewCompositionStrategy
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
@@ -185,6 +188,7 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
+import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -728,26 +732,27 @@ fun captureAndShareLyricCard(
     val height = 1920
 
     val composeView = ComposeView(context).apply {
-        // Keeps it attached for rendering, but invisible to the user
         visibility = View.INVISIBLE
         setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed)
         setContent {
-            MaterialTheme(colorScheme = darkColorScheme()) {
-                content()
+            // FORCE standard font scaling so system settings don't blow up the image text
+            val currentDensity = LocalDensity.current
+            CompositionLocalProvider(
+                LocalDensity provides Density(density = currentDensity.density, fontScale = 1.0f)
+            ) {
+                MaterialTheme(colorScheme = darkColorScheme()) {
+                    content()
+                }
             }
         }
     }
 
-    // Attach to the Activity's root layout so it inherits all required Lifecycles and Window tokens
     val rootView = activity.window.decorView.findViewById<ViewGroup>(android.R.id.content)
     rootView.addView(composeView, ViewGroup.LayoutParams(width, height))
 
     coroutineScope.launch(Dispatchers.Main) {
         try {
-            // Wait 1.2 seconds for Compose to layout and Coil to fetch the album image
-            delay(1200L) 
-
-            // FORCE strict measurement right before drawing so the canvas knows the exact bounds
+            delay(1200L)
             composeView.measure(
                 View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY),
                 View.MeasureSpec.makeMeasureSpec(height, View.MeasureSpec.EXACTLY)
@@ -757,8 +762,6 @@ fun captureAndShareLyricCard(
             val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
             val canvas = Canvas(bitmap)
             composeView.draw(canvas)
-
-            // Instantly remove the invisible view to free up memory
             rootView.removeView(composeView)
 
             withContext(Dispatchers.IO) {
@@ -782,9 +785,9 @@ fun captureAndShareLyricCard(
             }
         } catch (e: Exception) {
             e.printStackTrace()
-            rootView.removeView(composeView) // Failsafe cleanup
+            rootView.removeView(composeView)
             withContext(Dispatchers.Main) {
-                Toast.makeText(context, "Failed to generate image: ${e.message}", Toast.LENGTH_LONG).show()
+                Toast.makeText(context, "Failed to generate image", Toast.LENGTH_SHORT).show()
             }
         }
     }
@@ -804,93 +807,73 @@ fun LyricCardTemplate(
             .size(1080.dp, 1920.dp)
             .background(Color(0xFF0F151C))
     ) {
-        // 1. Background Image
         AsyncImage(
-            model = ImageRequest.Builder(context)
-                .data(artworkUrl)
-                .allowHardware(false)
-                .build(),
+            model = ImageRequest.Builder(context).data(artworkUrl).allowHardware(false).build(),
             contentDescription = null,
-            modifier = Modifier
-                .fillMaxSize()
-                .graphicsLayer { alpha = 0.5f },
+            modifier = Modifier.fillMaxSize().graphicsLayer { alpha = 0.45f },
             contentScale = ContentScale.Crop
         )
-
-        // 2. Dual Gradient Overlay for contrast
+        
         Box(
             modifier = Modifier
                 .fillMaxSize()
                 .background(
                     Brush.verticalGradient(
-                        colors = listOf(
-                            Color(0xBB000000), // Darker top
-                            Color(0x66000000), // Lighter middle
-                            Color(0xEE000000)  // Very dark bottom
-                        )
+                        colors = listOf(Color(0xDD000000), Color(0x77000000), Color(0xEE000000))
                     )
                 )
         )
 
-        // 3. Centered Lyrics (Scaled and constrained)
         Column(
             modifier = Modifier
                 .align(Alignment.Center)
-                .padding(horizontal = 90.dp)
-                .padding(bottom = 200.dp), // Push up slightly to balance footer
-            verticalArrangement = Arrangement.spacedBy(32.dp),
+                .fillMaxWidth()
+                .padding(horizontal = 60.dp)
+                .padding(bottom = 220.dp),
+            verticalArrangement = Arrangement.spacedBy(24.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             selectedLyrics.forEach { line ->
                 Text(
                     text = line,
-                    fontSize = 54.sp, // Reduced from 64.sp
+                    fontSize = 46.sp,
                     fontWeight = FontWeight.ExtraBold,
                     color = Color.White,
                     textAlign = TextAlign.Center,
-                    lineHeight = 72.sp,
-                    // Prevent single letters hanging on a new line
-                    modifier = Modifier.fillMaxWidth()
+                    lineHeight = 60.sp
                 )
             }
         }
 
-        // 4. Modern Pill-Shaped Footer
         Box(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
-                .padding(bottom = 120.dp)
-                .fillMaxWidth(0.85f) // Don't touch the edges
-                .clip(RoundedCornerShape(48.dp))
+                .padding(bottom = 100.dp)
+                .padding(horizontal = 60.dp)
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(32.dp))
                 .background(Color(0x40000000))
-                .border(2.dp, Color(0x33FFFFFF), RoundedCornerShape(48.dp))
+                .border(2.dp, Color(0x33FFFFFF), RoundedCornerShape(32.dp))
                 .padding(24.dp)
         ) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // Album Art
                 AsyncImage(
-                    model = ImageRequest.Builder(context)
-                        .data(artworkUrl)
-                        .allowHardware(false)
-                        .build(),
+                    model = ImageRequest.Builder(context).data(artworkUrl).allowHardware(false).build(),
                     contentDescription = null,
-                    modifier = Modifier
-                        .size(120.dp)
-                        .clip(CircleShape),
+                    modifier = Modifier.size(110.dp).clip(CircleShape),
                     contentScale = ContentScale.Crop
                 )
                 
-                Spacer(modifier = Modifier.width(32.dp))
+                Spacer(modifier = Modifier.width(28.dp))
                 
-                // Track Info (Constrained)
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
                         text = trackTitle,
                         color = Color.White,
-                        fontSize = 42.sp,
+                        fontSize = 38.sp,
                         fontWeight = FontWeight.Bold,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
@@ -898,29 +881,32 @@ fun LyricCardTemplate(
                     Text(
                         text = trackArtist,
                         color = Color(0xFFD1D5DB),
-                        fontSize = 32.sp,
+                        fontSize = 28.sp,
                         fontWeight = FontWeight.Medium,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
                 }
                 
-                Spacer(modifier = Modifier.width(24.dp))
+                Spacer(modifier = Modifier.width(16.dp))
                 
-                // App Branding
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    // Replaced with existing launcher foreground
                     Icon(
-                        imageVector = Icons.Rounded.GraphicEq,
-                        contentDescription = null,
-                        tint = Color(0xFF7C4DFF),
-                        modifier = Modifier.size(54.dp)
+                        painter = painterResource(id = R.drawable.ic_launcher_foreground), 
+                        contentDescription = "Sonora",
+                        tint = Color.Unspecified, // Uses the original colors of your XML
+                        modifier = Modifier
+                            .size(72.dp) // Scaled up to account for adaptive icon padding
+                            .offset(y = 4.dp) // Nudged down slightly for visual balance
                     )
                     Text(
                         text = "Sonora",
                         color = Color.White,
-                        fontSize = 24.sp,
+                        fontSize = 20.sp,
                         fontWeight = FontWeight.Bold,
-                        letterSpacing = 2.sp
+                        letterSpacing = 1.sp,
+                        modifier = Modifier.offset(y = (-4).dp)
                     )
                 }
             }
@@ -1666,8 +1652,9 @@ suspend fun importPlaylistFromUrl(
             val id = url.substringAfter("playlist/").substringBefore("?").substringBefore("/")
             rawTracks.addAll(fetchSpotifyPlaylistTracks(id))
         }
-        url.contains("youtube.com/playlist?list=") || url.contains("youtu.be/playlist?list=") -> {
-            val id = url.substringAfter("list=").substringBefore("&")
+        url.contains("list=") -> {
+            // Strips all tracking parameters (&si=, &playnext=) to isolate the pure list ID
+            val id = url.substringAfter("list=").substringBefore("&").substringBefore("?")
             rawTracks.addAll(fetchYouTubePlaylistTracks(id))
         }
     }
