@@ -38,6 +38,7 @@ import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.gestures.detectDragGestures
@@ -1593,8 +1594,8 @@ suspend fun fetchYouTubePlaylistTracks(playlistId: String): List<Pair<String, St
                 val title = titleRuns?.optJSONObject(0)?.optString("text") 
                     ?: item.optJSONObject("title")?.optString("simpleText") ?: ""
 
-                val artistRuns = item.optJSONObject("shortBylineText")?.optJSONArray("runs") 
-                    ?: item.optJSONObject("flexColumns")?.optJSONObject(1)
+                val artistRuns = item.optJSONObject("shortBylineText")?.optJSONArray("runs")
+                    ?: item.optJSONArray("flexColumns")?.optJSONObject(1)
                         ?.optJSONObject("musicResponsiveListItemFlexColumnRenderer")
                         ?.optJSONObject("text")?.optJSONArray("runs")
                         
