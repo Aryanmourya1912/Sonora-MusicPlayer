@@ -4055,17 +4055,17 @@ fun SyncedLyricsView(
                             val linesToShare = lyrics
                                 .filterIndexed { i, _ -> selectedLines.contains(i) }
                                 .map { it.text }
-                            
+
                             captureAndShareLyricCard(
                                 context,
-                                scope,
-                                artworkUrl = currentArtworkUrl
+                                coroutineScope,
+                                artworkUrl = artworkUrl
                             ) {
                                 LyricCardTemplate(
-                                    selectedLyrics,
-                                    title,
-                                    artist,
-                                    currentArtworkUrl
+                                    linesToShare,
+                                    trackTitle,
+                                    trackArtist,
+                                    artworkUrl
                                 )
                             }
                             selectedLines = emptySet()
@@ -5055,7 +5055,7 @@ fun SonoraPlayerScreen(
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
-    val coroutineScope = rememberCoroutineScope()
+    val  = rememberCoroutineScope()
     val view = LocalView.current
     
     var isPlayerExpanded by remember { mutableStateOf(false) }
