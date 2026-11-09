@@ -13,13 +13,16 @@ import android.graphics.drawable.BitmapDrawable
 import android.media.AudioManager
 import android.net.Uri
 import android.os.Bundle
+import android.speech.RecognizerIntent
 import android.util.Base64
 import android.view.View
 import android.view.ViewGroup
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
@@ -5353,6 +5356,26 @@ fun SonoraPlayerScreen(
     var currentVolumeSlider by remember {
         mutableFloatStateOf(audioManager.getStreamVolume(AudioManager.STREAM_MUSIC).toFloat())
     }
+    
+    val speechRecognizerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            val spokenText = result.data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)?.getOrNull(0)
+            if (!spokenText.isNullOrBlank()) {
+                // Update your search bar text
+                searchQuery = spokenText 
+                
+                // Automatically trigger the search execution
+                isSearching = true
+                coroutineScope.launch {
+                    val (results, _) = searchYouTubeUniversal(spokenText)
+                    searchResults = results
+                    isSearching = false
+                }
+            }
+        }
+    }
 
     // Keeps the volume slider in sync with hardware volume keys.
     // (Replaces the raw Thread { while(true) Thread.sleep() } which crashed the app with an
@@ -7217,7 +7240,18 @@ fun SonoraPlayerScreen(
                                 }
 
                                 FloatingActionButton(
-                                    onClick = { Toast.makeText(context, "Voice Search coming soon", Toast.LENGTH_SHORT).show() },
+                                    onClick = { 
+                                        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                                            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                                            putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault())
+                                            putExtra(RecognizerIntent.EXTRA_PROMPT, "Search Sonora...")
+                                        }
+                                        try {
+                                            speechRecognizerLauncher.launch(intent)
+                                        } catch (e: Exception) {
+                                            Toast.makeText(context, "Voice search is not installed on this device", Toast.LENGTH_SHORT).show()
+                                        }
+                                    },
                                     containerColor = Color(0xFF384353),
                                     contentColor = Color.White,
                                     shape = RoundedCornerShape(16.dp),
