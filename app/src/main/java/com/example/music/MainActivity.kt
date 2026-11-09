@@ -1920,40 +1920,47 @@ suspend fun fetchYouTubePlaylistTracks(playlistId: String): List<Pair<String, St
             readTimeout = 8000
             setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
             setRequestProperty("Accept-Language", "en-US,en;q=0.9")
-            // Crucial: Bypasses the YouTube cookie consent intercept page
             setRequestProperty("Cookie", "CONSENT=YES+cb.20210328-17-p0.en+FX+478") 
         }
 
         if (conn.responseCode == HttpURLConnection.HTTP_OK) {
             val html = conn.inputStream.bufferedReader().use { it.readText() }
             
-            // Handles both 'var ytInitialData =' and 'window["ytInitialData"] ='
-            val regex = "(?:var ytInitialData|window\\[\"ytInitialData\"\\])\\s*=\\s*(\\{.*?\\});\\s*</script>".toRegex()
-            val match = regex.find(html)
+            // Bulletproof string extraction instead of fragile Regex
+            val marker = "ytInitialData = "
+            val startIndex = html.indexOf(marker)
             
-            if (match != null) {
-                val root = JSONObject(match.groupValues[1])
-                val renderers = mutableListOf<JSONObject>()
+            if (startIndex != -1) {
+                val blockStart = html.indexOf("{", startIndex)
+                val blockEnd = html.indexOf("</script>", blockStart)
                 
-                // Extracts from BOTH standard YouTube and YouTube Music
-                findRenderersRecursive(root, "playlistVideoRenderer", renderers)
-                findRenderersRecursive(root, "musicResponsiveListItemRenderer", renderers)
+                if (blockStart != -1 && blockEnd != -1) {
+                    var jsonStr = html.substring(blockStart, blockEnd).trim()
+                    if (jsonStr.endsWith(";")) {
+                        jsonStr = jsonStr.dropLast(1)
+                    }
 
-                for (item in renderers) {
-                    val titleRuns = item.optJSONObject("title")?.optJSONArray("runs")
-                    val title = titleRuns?.optJSONObject(0)?.optString("text") 
-                        ?: item.optJSONObject("title")?.optString("simpleText") ?: ""
+                    val root = JSONObject(jsonStr)
+                    val renderers = mutableListOf<JSONObject>()
+                    
+                    findRenderersRecursive(root, "playlistVideoRenderer", renderers)
+                    findRenderersRecursive(root, "musicResponsiveListItemRenderer", renderers)
 
-                    // Check both standard YT and YT Music artist paths
-                    val artistRuns = item.optJSONObject("shortBylineText")?.optJSONArray("runs")
-                        ?: item.optJSONArray("flexColumns")?.optJSONObject(1)
-                            ?.optJSONObject("musicResponsiveListItemFlexColumnRenderer")
-                            ?.optJSONObject("text")?.optJSONArray("runs")
-                            
-                    val artist = artistRuns?.optJSONObject(0)?.optString("text") ?: "Unknown Artist"
+                    for (item in renderers) {
+                        val titleRuns = item.optJSONObject("title")?.optJSONArray("runs")
+                        val title = titleRuns?.optJSONObject(0)?.optString("text") 
+                            ?: item.optJSONObject("title")?.optString("simpleText") ?: ""
 
-                    if (title.isNotBlank() && title != "Deleted video" && title != "Private video") {
-                        tracks.add(Pair(title, artist))
+                        val artistRuns = item.optJSONObject("shortBylineText")?.optJSONArray("runs")
+                            ?: item.optJSONArray("flexColumns")?.optJSONObject(1)
+                                ?.optJSONObject("musicResponsiveListItemFlexColumnRenderer")
+                                ?.optJSONObject("text")?.optJSONArray("runs")
+                                
+                        val artist = artistRuns?.optJSONObject(0)?.optString("text") ?: "Unknown Artist"
+
+                        if (title.isNotBlank() && title != "Deleted video" && title != "Private video") {
+                            tracks.add(Pair(title, artist))
+                        }
                     }
                 }
             }
@@ -1965,7 +1972,6 @@ suspend fun fetchYouTubePlaylistTracks(playlistId: String): List<Pair<String, St
 suspend fun fetchSpotifyPlaylistTracks(playlistId: String): List<Pair<String, String>> = withContext(Dispatchers.IO) {
     val tracks = mutableListOf<Pair<String, String>>()
     try {
-        // Use the standard web URL, not the embed URL
         val url = URL("https://open.spotify.com/playlist/$playlistId")
         val conn = (url.openConnection() as HttpURLConnection).apply {
             requestMethod = "GET"
@@ -1977,37 +1983,45 @@ suspend fun fetchSpotifyPlaylistTracks(playlistId: String): List<Pair<String, St
         if (conn.responseCode == HttpURLConnection.HTTP_OK) {
             val html = conn.inputStream.bufferedReader().use { it.readText() }
             
-            // Spotify now stores tracklists in a standardized schema.org SEO JSON block
-            val regex = "<script type=\"application/ld\\+json\">(\\{.*?\\})</script>".toRegex()
-            val matches = regex.findAll(html)
+            // Loop through all script tags to find the SEO JSON block safely
+            val marker = "<script type=\"application/ld+json\">"
+            var currentIndex = html.indexOf(marker)
             
-            for (match in matches) {
-                val jsonStr = match.groupValues[1]
-                if (jsonStr.contains("\"MusicPlaylist\"")) {
-                    val root = JSONObject(jsonStr)
-                    val trackArray = root.optJSONArray("track") ?: continue
+            while (currentIndex != -1) {
+                val blockStart = currentIndex + marker.length
+                val blockEnd = html.indexOf("</script>", blockStart)
+                
+                if (blockEnd != -1) {
+                    val potentialJson = html.substring(blockStart, blockEnd).trim()
                     
-                    for (i in 0 until trackArray.length()) {
-                        val trackItem = trackArray.optJSONObject(i) ?: continue
-                        val item = trackItem.optJSONObject("item") ?: trackItem
+                    if (potentialJson.contains("\"MusicPlaylist\"")) {
+                        val root = JSONObject(potentialJson)
+                        val trackArray = root.optJSONArray("track")
                         
-                        val title = item.optString("name", "")
-                        
-                        // Artist can be an object or an array of objects
-                        var artist = "Unknown Artist"
-                        val artistNode = item.opt("byArtist")
-                        if (artistNode is JSONObject) {
-                            artist = artistNode.optString("name", "Unknown Artist")
-                        } else if (artistNode is JSONArray && artistNode.length() > 0) {
-                            artist = artistNode.optJSONObject(0)?.optString("name", "Unknown Artist") ?: "Unknown Artist"
+                        if (trackArray != null) {
+                            for (i in 0 until trackArray.length()) {
+                                val trackItem = trackArray.optJSONObject(i) ?: continue
+                                val item = trackItem.optJSONObject("item") ?: trackItem
+                                
+                                val title = item.optString("name", "")
+                                
+                                var artist = "Unknown Artist"
+                                val artistNode = item.opt("byArtist")
+                                if (artistNode is JSONObject) {
+                                    artist = artistNode.optString("name", "Unknown Artist")
+                                } else if (artistNode is JSONArray && artistNode.length() > 0) {
+                                    artist = artistNode.optJSONObject(0)?.optString("name", "Unknown Artist") ?: "Unknown Artist"
+                                }
+                                
+                                if (title.isNotBlank()) {
+                                    tracks.add(Pair(title, artist))
+                                }
+                            }
                         }
-                        
-                        if (title.isNotBlank()) {
-                            tracks.add(Pair(title, artist))
-                        }
+                        break // Found the correct block, exit the while loop
                     }
-                    break // Found the playlist block, no need to check other ld+json blocks
                 }
+                currentIndex = html.indexOf(marker, if (blockEnd != -1) blockEnd else currentIndex + 1)
             }
         }
     } catch (e: Exception) { e.printStackTrace() }
@@ -4683,7 +4697,7 @@ fun AboutDeveloperSheet(
                             },
                             colors = ButtonDefaults.buttonColors(containerColor = accentPurple),
                             shape = RoundedCornerShape(14.dp),
-                            modifier = Modifier.weight(1f).height(50.dp)
+                            modifier = Modifier.weight(1f).height(56.dp)
                         ) {
                             Icon(
                                 imageVector = Icons.Rounded.Link,
@@ -4712,7 +4726,7 @@ fun AboutDeveloperSheet(
                                 contentColor = primaryText
                             ),
                             shape = RoundedCornerShape(14.dp),
-                            modifier = Modifier.weight(1f).height(50.dp)
+                            modifier = Modifier.weight(1f).height(56.dp)
                         ) {
                             Icon(
                                 imageVector = Icons.Rounded.Share,
