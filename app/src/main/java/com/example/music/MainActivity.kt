@@ -727,72 +727,113 @@ fun convertPlainLyricsToTimed(
 
 fun captureAndShareLyricCard(
     context: Context,
-    coroutineScope: CoroutineScope,
+    @Suppress("UNUSED_PARAMETER") coroutineScope: CoroutineScope,
+    artworkUrl: String? = null,
     content: @Composable () -> Unit
 ) {
-    val activity = context as? Activity ?: return
+    // LocalContext is sometimes a wrapper around the Activity, so unwrap it.
+    var host: Context = context
+    while (host is android.content.ContextWrapper && host !is Activity) {
+        host = host.baseContext
+    }
+    val activity = host as? Activity
+    if (activity == null) {
+        Toast.makeText(context, "Can't create the card right now", Toast.LENGTH_SHORT).show()
+        return
+    }
+ 
     Toast.makeText(context, "Generating card...", Toast.LENGTH_SHORT).show()
-
+ 
     val width = 1080
     val height = 1920
-
-    val composeView = ComposeView(context).apply {
-        visibility = View.INVISIBLE
-        setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed)
-        setContent {
-            // FORCE standard font scaling so system settings don't blow up the image text
-            val currentDensity = LocalDensity.current
-            CompositionLocalProvider(
-                LocalDensity provides Density(density = currentDensity.density, fontScale = 1.0f)
-            ) {
-                MaterialTheme(colorScheme = darkColorScheme()) {
-                    content()
+    val rootView = activity.window.decorView.findViewById<ViewGroup>(android.R.id.content)
+ 
+    // Own scope on purpose: the scope that is passed in is cancelled as soon as the lyrics
+    // screen closes, which would silently stop the capture half way.
+    val captureScope = CoroutineScope(Dispatchers.Main + kotlinx.coroutines.SupervisorJob())
+ 
+    captureScope.launch {
+        var composeView: ComposeView? = null
+        try {
+            // 1. Download the album art first so it is in Coil's cache when the card is drawn.
+            if (!artworkUrl.isNullOrBlank()) {
+                runCatching {
+                    coil.Coil.imageLoader(context).execute(
+                        ImageRequest.Builder(context)
+                            .data(artworkUrl)
+                            .allowHardware(false)
+                            .build()
+                    )
                 }
             }
-        }
-    }
-
-    val rootView = activity.window.decorView.findViewById<ViewGroup>(android.R.id.content)
-    rootView.addView(composeView, ViewGroup.LayoutParams(width, height))
-
-    coroutineScope.launch(Dispatchers.Main) {
-        try {
-            delay(1200L)
-            composeView.measure(
+ 
+            // 2. Attach an invisible ComposeView of exactly 1080 x 1920 px.
+            val view = ComposeView(activity).apply {
+                visibility = View.INVISIBLE
+                setContent {
+                    // 1dp = 1sp = 1px, whatever the phone's screen density or font size is.
+                    CompositionLocalProvider(
+                        LocalDensity provides Density(density = 1f, fontScale = 1f)
+                    ) {
+                        MaterialTheme(colorScheme = darkColorScheme()) {
+                            content()
+                        }
+                    }
+                }
+            }
+            composeView = view
+            rootView.addView(view, ViewGroup.LayoutParams(width, height))
+ 
+            // 3. Give Compose time to compose and Coil time to show the art.
+            delay(800L)
+ 
+            view.measure(
                 View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY),
                 View.MeasureSpec.makeMeasureSpec(height, View.MeasureSpec.EXACTLY)
             )
-            composeView.layout(0, 0, width, height)
-
+            view.layout(0, 0, width, height)
+ 
+            // 4. Draw it into a bitmap.
             val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-            val canvas = Canvas(bitmap)
-            composeView.draw(canvas)
-            rootView.removeView(composeView)
-
-            withContext(Dispatchers.IO) {
-                val cachePath = File(context.cacheDir, "images")
-                cachePath.mkdirs()
-                val file = File(cachePath, "sonora_lyric_card.png")
-                val stream = FileOutputStream(file)
-                bitmap.compress(Bitmap.CompressFormat.PNG, 100, stream)
-                stream.close()
-
-                val uri = FileProvider.getUriForFile(context, "${context.packageName}.provider", file)
-                
-                withContext(Dispatchers.Main) {
-                    val intent = Intent(Intent.ACTION_SEND).apply {
-                        type = "image/png"
-                        putExtra(Intent.EXTRA_STREAM, uri)
-                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                    }
-                    context.startActivity(Intent.createChooser(intent, "Share Lyric Card"))
+            view.draw(Canvas(bitmap))
+ 
+            rootView.removeView(view)
+            view.disposeComposition()
+            composeView = null
+ 
+            // 5. Save the PNG in the cache folder and get a shareable Uri.
+            val uri = withContext(Dispatchers.IO) {
+                val dir = File(context.cacheDir, "images").apply { mkdirs() }
+                val file = File(dir, "sonora_lyric_card.png")
+                FileOutputStream(file).use { out ->
+                    bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)
                 }
+                FileProvider.getUriForFile(context, "${context.packageName}.provider", file)
             }
+            bitmap.recycle()
+ 
+            // 6. Open the share sheet (WhatsApp, Instagram, ...).
+            val sendIntent = Intent(Intent.ACTION_SEND).apply {
+                type = "image/png"
+                putExtra(Intent.EXTRA_STREAM, uri)
+                clipData = ClipData.newRawUri("Lyric card", uri)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            activity.startActivity(Intent.createChooser(sendIntent, "Share Lyric Card"))
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
         } catch (e: Exception) {
             e.printStackTrace()
-            rootView.removeView(composeView)
-            withContext(Dispatchers.Main) {
-                Toast.makeText(context, "Failed to generate image", Toast.LENGTH_SHORT).show()
+            // Shows the real reason on screen, so you can see what failed without Logcat.
+            Toast.makeText(
+                context,
+                "Failed: ${e.message ?: e.javaClass.simpleName}",
+                Toast.LENGTH_LONG
+            ).show()
+        } finally {
+            composeView?.let {
+                rootView.removeView(it)
+                it.disposeComposition()
             }
         }
     }
@@ -806,194 +847,325 @@ fun LyricCardTemplate(
     artworkUrl: String
 ) {
     val context = LocalContext.current
-    
-    // The striking red from the reference image
-    val themeColor = Color(0xFFFF0033)
+    val neonRed = Color(0xFFFF2A2A)
 
-    Box(
-        modifier = Modifier
-            .size(1080.dp, 1920.dp)
-            .background(Color(0xFF050505))
-    ) {
-        // 1. Diagonal Red-to-Black Background Gradient
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(
-                    Brush.linearGradient(
-                        colors = listOf(Color(0xFF4A0005), Color(0xFF000000)),
-                        start = androidx.compose.ui.geometry.Offset(0f, 0f),
-                        end = androidx.compose.ui.geometry.Offset(1080f, 1920f)
-                    )
-                )
-        )
+    // Shrink the lyric text a little when the selected lines are long, so they always fit.
+    val totalChars = selectedLyrics.sumOf { it.length }
+    val lyricSize = when {
+        totalChars > 260 -> 44
+        totalChars > 180 -> 50
+        else -> 58
+    }
 
-        // 2. Giant Watermark Background Text
-        // wrapContentSize(unbounded = true) prevents it from breaking the 1080x1920 layout
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .wrapContentSize(unbounded = true),
-            contentAlignment = Alignment.Center
-        ) {
-            Text(
-                text = trackTitle.uppercase(),
-                color = themeColor.copy(alpha = 0.12f),
-                fontSize = 320.sp,
-                fontWeight = FontWeight.Black,
-                maxLines = 1,
-                softWrap = false,
-                modifier = Modifier
-                    .rotate(-8f)
-                    .offset(y = (-80).dp)
-            )
-        }
+    // Heights of the little waveform bars inside the player pill
+    val waveHeights = listOf(12, 22, 34, 44, 36, 48, 40, 30, 46, 40, 34, 48, 38, 30, 44, 36, 26, 38, 28, 18, 12)
 
-        // 3. Main Content Column
-        Column(
-            modifier = Modifier.fillMaxSize(),
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-            Spacer(modifier = Modifier.height(140.dp))
+    BoxWithConstraints {
+        // The card is designed on a 1080 x 1920 canvas where 1dp = 1sp = 1 design pixel.
+        // Scaling the density makes it fill whatever size the view is measured at, on any phone.
+        val scale = if (constraints.hasBoundedWidth) constraints.maxWidth / 1080f else 1f
 
-            // --- 🎵 --- Header Divider
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.padding(horizontal = 160.dp)
-            ) {
-                Box(modifier = Modifier.weight(1f).height(2.dp).background(Color.White.copy(alpha = 0.6f)))
-                Icon(
-                    imageVector = Icons.Default.MusicNote,
-                    contentDescription = null,
-                    tint = Color.White,
-                    modifier = Modifier.padding(horizontal = 32.dp).size(56.dp)
-                )
-                Box(modifier = Modifier.weight(1f).height(2.dp).background(Color.White.copy(alpha = 0.6f)))
-            }
-
-            // Center Lyrics Container
-            Column(
-                modifier = Modifier
-                    .weight(1f)
-                    .fillMaxWidth()
-                    .padding(horizontal = 60.dp),
-                verticalArrangement = Arrangement.Center,
-                horizontalAlignment = Alignment.CenterHorizontally
-            ) {
-                selectedLyrics.forEach { line ->
-                    Text(
-                        text = line,
-                        fontSize = 42.sp, // Reduced size ensures a single line fits gracefully
-                        fontWeight = FontWeight.ExtraBold,
-                        color = Color.White,
-                        textAlign = TextAlign.Center,
-                        lineHeight = 56.sp,
-                        modifier = Modifier.padding(vertical = 24.dp)
-                    )
-                }
-            }
-
-            // Glowing Pill Footer
+        CompositionLocalProvider(LocalDensity provides Density(density = scale, fontScale = 1f)) {
             Box(
                 modifier = Modifier
-                    .padding(horizontal = 60.dp)
-                    .fillMaxWidth()
-                    .height(240.dp)
-                    // Stacked borders simulate neon glow on software canvases
-                    .border(16.dp, themeColor.copy(alpha = 0.15f), CircleShape)
-                    .border(8.dp, themeColor.copy(alpha = 0.4f), CircleShape)
-                    .border(3.dp, themeColor, CircleShape)
-                    .background(Color(0xFF0A0A0A), CircleShape)
-                    .padding(horizontal = 32.dp)
+                    .size(1080.dp, 1920.dp)
+                    .background(Color(0xFF050000))
             ) {
-                Row(
-                    modifier = Modifier.fillMaxSize(),
-                    verticalAlignment = Alignment.CenterVertically
+                // ---------- BACKGROUND ----------
+
+                // 1. Base: near-black at the top, deep red in the middle, dark at the bottom
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(
+                            Brush.verticalGradient(
+                                colors = listOf(Color(0xFF0D0000), Color(0xFF3A0204), Color(0xFF120000))
+                            )
+                        )
+                )
+
+                // 2. Red glow on the left, above the diagonal band
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.Center)
+                        .offset(x = (-390).dp, y = (-200).dp)
+                        .requiredSize(1500.dp)
+                        .background(Brush.radialGradient(listOf(Color(0xDD9E0A0F), Color.Transparent)))
+                )
+
+                // 3. Red glow behind the player pill
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .offset(y = 300.dp)
+                        .requiredSize(1300.dp)
+                        .background(Brush.radialGradient(listOf(Color(0x66B00000), Color.Transparent)))
+                )
+
+                // 4. Black diagonal band that rises to the right
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.Center)
+                        .offset(y = (-40).dp)
+                        .requiredSize(2200.dp, 700.dp)
+                        .graphicsLayer { rotationZ = -20f }
+                        .background(Color(0xFF060000))
+                )
+
+                // 5. Giant song title on the band, cropped by the edges like in the reference
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .wrapContentSize(unbounded = true),
+                    contentAlignment = Alignment.Center
                 ) {
-                    // Album Art
-                    AsyncImage(
-                        model = ImageRequest.Builder(context).data(artworkUrl).allowHardware(false).build(),
-                        contentDescription = null,
-                        modifier = Modifier.size(150.dp).clip(CircleShape),
-                        contentScale = ContentScale.Crop
+                    Text(
+                        text = trackTitle.uppercase(),
+                        color = Color(0xFFB0121B),
+                        fontSize = 700.sp,
+                        fontWeight = FontWeight.Black,
+                        maxLines = 1,
+                        softWrap = false,
+                        modifier = Modifier
+                            .offset(y = (-48).dp)
+                            .graphicsLayer { scaleX = 0.36f }
                     )
-                    
-                    Spacer(modifier = Modifier.width(36.dp))
-                    
-                    // Vertical Divider Line
-                    Box(modifier = Modifier.height(140.dp).width(2.dp).background(Color.White.copy(alpha = 0.3f)))
-                    
-                    Spacer(modifier = Modifier.width(36.dp))
-                    
-                    // Track Info & Waveform
-                    Column(modifier = Modifier.weight(1f)) {
+                }
+
+                // ---------- CONTENT ----------
+                Column(
+                    modifier = Modifier.fillMaxSize(),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Spacer(modifier = Modifier.height(50.dp))
+
+                    // Header:  ————— ♫ —————
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 98.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(2.dp)
+                                .background(
+                                    Brush.horizontalGradient(
+                                        listOf(Color.Transparent, Color.White.copy(alpha = 0.75f))
+                                    )
+                                )
+                        )
+                        // If this ever shows as an empty box on a phone, use
+                        // Icon(Icons.Default.MusicNote, null, tint = Color.White) instead.
                         Text(
-                            text = trackTitle,
+                            text = "♫",
                             color = Color.White,
-                            fontSize = 44.sp,
-                            fontWeight = FontWeight.Bold,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
+                            fontSize = 84.sp,
+                            modifier = Modifier.padding(horizontal = 34.dp)
                         )
-                        Spacer(modifier = Modifier.height(6.dp))
-                        Text(
-                            text = trackArtist,
-                            color = Color(0xFFCCCCCC),
-                            fontSize = 32.sp,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(2.dp)
+                                .background(
+                                    Brush.horizontalGradient(
+                                        listOf(Color.White.copy(alpha = 0.75f), Color.Transparent)
+                                    )
+                                )
                         )
-                        Spacer(modifier = Modifier.height(18.dp))
-                        
-                        // Simulated Waveform ( • | | | | | • )
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            Box(modifier = Modifier.size(6.dp).clip(CircleShape).background(Color(0xFF999999)))
-                            val waveHeights = listOf(16, 28, 42, 24, 36, 48, 30, 20, 34, 18)
-                            waveHeights.forEach { h ->
-                                Box(modifier = Modifier.width(5.dp).height(h.dp).background(Color.White, CircleShape))
-                            }
-                            Box(modifier = Modifier.size(6.dp).clip(CircleShape).background(Color(0xFF999999)))
+                    }
+
+                    // Lyrics: big, bold, centered, with a gap between each selected line
+                    Column(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxWidth()
+                            .padding(horizontal = 90.dp),
+                        verticalArrangement = Arrangement.spacedBy(66.dp, Alignment.CenterVertically),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        selectedLyrics.forEach { line ->
+                            Text(
+                                text = line,
+                                color = Color.White,
+                                fontSize = lyricSize.sp,
+                                lineHeight = (lyricSize * 1.26f).sp,
+                                fontWeight = FontWeight.Bold,
+                                textAlign = TextAlign.Center
+                            )
                         }
                     }
-                    
-                    Spacer(modifier = Modifier.width(24.dp))
-                    
-                    // Pause Button
+
+                    // Neon player pill (the outer 34dp is room for the glow)
                     Box(
                         modifier = Modifier
-                            .size(110.dp)
-                            .background(Color.White, CircleShape),
-                        contentAlignment = Alignment.Center
+                            .fillMaxWidth()
+                            .height(311.dp)
+                            .padding(horizontal = 58.dp)
                     ) {
-                        Icon(
-                            imageVector = Icons.Default.Pause,
-                            contentDescription = null,
-                            tint = Color.Black,
-                            modifier = Modifier.size(60.dp)
+                        // Soft outer glow, built from stacked translucent layers (works on a software canvas)
+                        repeat(6) { i ->
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .padding((i * 6).dp)
+                                    .background(neonRed.copy(alpha = 0.05f), CircleShape)
+                            )
+                        }
+
+                        Row(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .padding(34.dp)
+                                .border(14.dp, neonRed.copy(alpha = 0.18f), CircleShape)
+                                .border(3.dp, neonRed, CircleShape)
+                                .background(Color(0xFF070000), CircleShape)
+                                .padding(start = 38.dp, end = 36.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            // Album art
+                            AsyncImage(
+                                model = ImageRequest.Builder(context)
+                                    .data(artworkUrl)
+                                    .allowHardware(false)
+                                    .crossfade(false)
+                                    .build(),
+                                contentDescription = null,
+                                modifier = Modifier
+                                    .size(196.dp)
+                                    .clip(CircleShape),
+                                contentScale = ContentScale.Crop
+                            )
+
+                            Spacer(modifier = Modifier.width(34.dp))
+
+                            // Thin vertical divider
+                            Box(
+                                modifier = Modifier
+                                    .width(2.dp)
+                                    .height(150.dp)
+                                    .background(Color.White.copy(alpha = 0.35f))
+                            )
+
+                            Spacer(modifier = Modifier.width(34.dp))
+
+                            // Title, artist and waveform
+                            Column(
+                                modifier = Modifier.weight(1f),
+                                verticalArrangement = Arrangement.Center
+                            ) {
+                                Text(
+                                    text = trackTitle,
+                                    color = Color.White,
+                                    fontSize = 54.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                Spacer(modifier = Modifier.height(2.dp))
+                                Text(
+                                    text = trackArtist,
+                                    color = Color(0xFFBDBDBD),
+                                    fontSize = 40.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                Spacer(modifier = Modifier.height(14.dp))
+
+                                // Waveform:  · · · ıllıllıllıl · · ·
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    repeat(3) {
+                                        Box(
+                                            modifier = Modifier
+                                                .size(6.dp)
+                                                .background(Color(0xFF9A9A9A), CircleShape)
+                                        )
+                                    }
+                                    waveHeights.forEach { h ->
+                                        Box(
+                                            modifier = Modifier
+                                                .width(5.dp)
+                                                .height(h.dp)
+                                                .background(Color.White.copy(alpha = 0.85f), CircleShape)
+                                        )
+                                    }
+                                    repeat(3) {
+                                        Box(
+                                            modifier = Modifier
+                                                .size(6.dp)
+                                                .background(Color(0xFF9A9A9A), CircleShape)
+                                        )
+                                    }
+                                }
+                            }
+
+                            Spacer(modifier = Modifier.width(24.dp))
+
+                            // White pause button
+                            Box(
+                                modifier = Modifier
+                                    .size(104.dp)
+                                    .background(Color.White, CircleShape),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Pause,
+                                    contentDescription = null,
+                                    tint = Color.Black,
+                                    modifier = Modifier.size(58.dp)
+                                )
+                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(26.dp))
+
+                    // Footer:  ————  C H A R L I E   P U T H  ————
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 56.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(2.dp)
+                                .background(
+                                    Brush.horizontalGradient(
+                                        listOf(Color.Transparent, Color.White.copy(alpha = 0.6f))
+                                    )
+                                )
+                        )
+                        Text(
+                            text = trackArtist.uppercase(),
+                            color = Color.White.copy(alpha = 0.78f),
+                            fontSize = 30.sp,
+                            fontWeight = FontWeight.Medium,
+                            letterSpacing = 20.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.padding(horizontal = 44.dp)
+                        )
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(2.dp)
+                                .background(
+                                    Brush.horizontalGradient(
+                                        listOf(Color.White.copy(alpha = 0.6f), Color.Transparent)
+                                    )
+                                )
                         )
                     }
+
+                    Spacer(modifier = Modifier.height(120.dp))
                 }
             }
-
-            Spacer(modifier = Modifier.height(80.dp))
-
-            // Very Bottom Spaced Artist Name: —  A R T I S T  N A M E  —
-            val spacedName = trackArtist.uppercase().map { it }.joinToString(" ")
-            Text(
-                text = "—    $spacedName    —",
-                color = Color.White.copy(alpha = 0.7f),
-                fontSize = 26.sp,
-                fontWeight = FontWeight.Medium,
-                letterSpacing = 4.sp,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.padding(horizontal = 40.dp)
-            )
-
-            Spacer(modifier = Modifier.height(120.dp))
         }
     }
 }
@@ -3885,14 +4057,15 @@ fun SyncedLyricsView(
                                 .map { it.text }
                             
                             captureAndShareLyricCard(
-                                context = context,
-                                coroutineScope = coroutineScope
+                                context,
+                                scope,
+                                artworkUrl = currentArtworkUrl
                             ) {
                                 LyricCardTemplate(
-                                    selectedLyrics = linesToShare,
-                                    trackTitle = trackTitle,
-                                    trackArtist = trackArtist,
-                                    artworkUrl = artworkUrl
+                                    selectedLyrics,
+                                    title,
+                                    artist,
+                                    currentArtworkUrl
                                 )
                             }
                             selectedLines = emptySet()
