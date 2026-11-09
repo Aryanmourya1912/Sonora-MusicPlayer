@@ -38,6 +38,7 @@ class PlaybackService : MediaSessionService() {
     private var mediaSession: MediaSession? = null
     private var loudnessEnhancer: LoudnessEnhancer? = null
     private val closeCommand = SessionCommand(ACTION_CLOSE_APP, Bundle.EMPTY)
+    private val skipSilenceCommand = SessionCommand(ACTION_SET_SKIP_SILENCE, Bundle.EMPTY)
 
     // Call state resumption engine
     private val serviceScope = CoroutineScope(Dispatchers.Main + Job())
@@ -198,6 +199,7 @@ class PlaybackService : MediaSessionService() {
                 MediaSession.ConnectionResult.DEFAULT_SESSION_COMMANDS
                     .buildUpon()
                     .add(closeCommand)
+                    .add(skipSilenceCommand)
                     .build()
 
             return MediaSession.ConnectionResult.AcceptedResultBuilder(session)
@@ -214,6 +216,12 @@ class PlaybackService : MediaSessionService() {
             if (customCommand.customAction == ACTION_CLOSE_APP) {
                 Log.d("Sonora", "Close button tapped in notification")
                 exitApp()
+                return Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
+            }
+            if (customCommand.customAction == ACTION_SET_SKIP_SILENCE) {
+                val enabled = args.getBoolean("enabled", true)
+                (session.player as? ExoPlayer)?.skipSilenceEnabled = enabled
+                Log.d("Sonora", "Skip silence set to $enabled")
                 return Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
             }
             return super.onCustomCommand(session, controller, customCommand, args)
@@ -464,5 +472,6 @@ class PlaybackService : MediaSessionService() {
         private const val ACTION_KILL_SERVICE = "com.example.music.ACTION_KILL_SERVICE"
         private const val ACTION_STOP_SERVICE = "ACTION_STOP_SERVICE"
         private const val ACTION_CLOSE_APP = "com.example.music.ACTION_CLOSE_APP"
+        private const val ACTION_SET_SKIP_SILENCE = "com.example.music.SET_SKIP_SILENCE"
     }
 }

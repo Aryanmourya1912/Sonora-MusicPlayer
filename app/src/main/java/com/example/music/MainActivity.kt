@@ -215,6 +215,7 @@ import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
 import androidx.media3.common.Timeline
 import androidx.media3.session.MediaController
+import androidx.media3.session.SessionCommand
 import androidx.media3.session.SessionToken
 import androidx.palette.graphics.Palette
 import androidx.savedstate.SavedStateRegistryOwner
@@ -4778,8 +4779,12 @@ fun AboutDeveloperSheet(
                                 onCheckedChange = { isChecked ->
                                     skipSilenceEnabled = isChecked
                                     prefs.edit().putBoolean("skip_silence", isChecked).apply()
-                                    // Update the active player instance instantly so the user doesn't have to restart
-                                    mediaController?.skipSilenceEnabled = isChecked
+                                    // MediaController is a remote Player and does not expose ExoPlayer-only APIs.
+                                    // Send the setting to PlaybackService, where the actual ExoPlayer is hosted.
+                                    mediaController?.sendCustomCommand(
+                                        SessionCommand("com.example.music.SET_SKIP_SILENCE", Bundle.EMPTY),
+                                        Bundle().apply { putBoolean("enabled", isChecked) }
+                                    )
                                 },
                                 colors = SwitchDefaults.colors(checkedThumbColor = Color(0xFF7C4DFF))
                             )
@@ -5534,55 +5539,81 @@ fun SonoraPlayerScreen(
 
     fun ensureInfiniteQueueFilled(player: Player) {
         if (!endlessRadioEnabled || isAutoQueueFilling) return
+
         val total = player.mediaItemCount
-        val curr = player.currentMediaItemIndex
-        val remaining = total - (curr + 1)
+        val currentIndex = player.currentMediaItemIndex
+        if (total <= 0 || currentIndex == C.INDEX_UNSET) return
 
-        if ((remaining <= 5 || curr >= total - 1) && total > 0) {
-            isAutoQueueFilling = true
-            coroutineScope.launch {
-                try {
-                    val lastIdx = total - 1
-                    val seedItem = if (lastIdx >= 0) player.getMediaItemAt(lastIdx) else player.currentMediaItem
-                    val seedId = seedItem?.mediaId ?: activeSongId
-                    val seedArtist = seedItem?.mediaMetadata?.artist?.toString() ?: activeArtist
+        val remaining = total - (currentIndex + 1)
+        if (remaining > 5) return
 
-                    val candidates = mutableListOf<FullTrackItem>()
-                    candidates.addAll(fetchYouTubeAutomixRadio(seedId))
-                    if (candidates.size < 25) {
-                        val (moreArtist, _) = searchYouTubeUniversal("$seedArtist latest hits")
-                        candidates.addAll(moreArtist)
-                    }
-                    if (candidates.size < 25) {
-                        val (trending, _) = searchYouTubeUniversal("Trending Hindi Bollywood Songs")
-                        candidates.addAll(trending)
-                    }
+        // Set this before launching so repeated player callbacks cannot start
+        // multiple Radio fetch jobs at the same time.
+        isAutoQueueFilling = true
 
-                    val currentQueueTracks = (0 until player.mediaItemCount).map { idx ->
-                        mediaItemToTrack(player.getMediaItemAt(idx))
-                    }
-                    val filtered = filterSimilarTracks(candidates, currentQueueTracks)
+        coroutineScope.launch {
+            try {
+                // Use the latest final queue item as the Radio seed.
+                val lastIndex = player.mediaItemCount - 1
+                if (lastIndex < 0) return@launch
 
-                    var added = 0
-                    for (song in filtered) {
-                        if (added >= 15) break
-                        val streamUrl = resolveTrackAudioStream(song)
-                        if (streamUrl.isNotBlank()) {
-                            song.audioUrl = streamUrl
-                            player.addMediaItem(buildMediaItem(song))
-                            added++
-                        }
-                    }
-                    updateQueueState(player)
-                } catch (e: Exception) {
-                    e.printStackTrace()
-                } finally {
-                    isAutoQueueFilling = false
+                val seedItem = player.getMediaItemAt(lastIndex)
+                val seedId = seedItem.mediaId.ifBlank { activeSongId }
+                val seedArtist = seedItem.mediaMetadata.artist?.toString()
+                    ?.takeIf { it.isNotBlank() && !it.equals("Unknown Artist", true) }
+                    ?: activeArtist
+
+                val candidates = mutableListOf<FullTrackItem>()
+                candidates.addAll(fetchYouTubeAutomixRadio(seedId))
+
+                if (candidates.size < 25 && seedArtist.isNotBlank()) {
+                    val (moreArtist, _) = searchYouTubeUniversal("$seedArtist latest hits")
+                    candidates.addAll(moreArtist)
                 }
+
+                if (candidates.size < 25) {
+                    val (trending, _) = searchYouTubeUniversal("Trending Hindi Bollywood Songs")
+                    candidates.addAll(trending)
+                }
+
+                // Filter duplicates within the fetched results AND against the
+                // queue as it exists after all provider requests have finished.
+                val queueSnapshot = (0 until player.mediaItemCount).map { index ->
+                    mediaItemToTrack(player.getMediaItemAt(index))
+                }
+                val filteredCandidates = filterSimilarTracks(candidates, queueSnapshot)
+
+                var added = 0
+                for (song in filteredCandidates) {
+                    if (added >= 15) break
+
+                    // Resolve first; while this suspends, the player queue may change.
+                    val streamUrl = resolveTrackAudioStream(song)
+                    if (streamUrl.isBlank()) continue
+
+                    // Re-check against the live queue immediately before insertion.
+                    // This catches songs added while the stream URL was resolving.
+                    val alreadyInLiveQueue = (0 until player.mediaItemCount).any { index ->
+                        val queuedTrack = mediaItemToTrack(player.getMediaItemAt(index))
+                        queuedTrack.id == song.id || areTracksSimilar(song, queuedTrack)
+                    }
+
+                    if (alreadyInLiveQueue) continue
+
+                    song.audioUrl = streamUrl
+                    player.addMediaItem(buildMediaItem(song))
+                    added++
+                }
+
+                updateQueueState(player)
+            } catch (e: Exception) {
+                e.printStackTrace()
+            } finally {
+                isAutoQueueFilling = false
             }
         }
     }
-    
+
     fun prebufferNextTrackIfGapless(player: Player) {
         if (!gaplessEnabled) return
         val currentIdx = player.currentMediaItemIndex
