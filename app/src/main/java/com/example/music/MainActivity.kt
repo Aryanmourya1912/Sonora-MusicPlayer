@@ -1913,50 +1913,41 @@ fun calculateTotalOfflineBytes(downloadedSongs: List<DownloadedSongEntity>): Lon
 suspend fun fetchYouTubePlaylistTracks(playlistId: String): List<Pair<String, String>> = withContext(Dispatchers.IO) {
     val tracks = mutableListOf<Pair<String, String>>()
     try {
-        val url = URL("https://www.youtube.com/youtubei/v1/browse")
+        // Fallback to GET request on the public playlist page (bypasses API blockades)
+        val url = URL("https://www.youtube.com/playlist?list=$playlistId")
         val conn = (url.openConnection() as HttpURLConnection).apply {
-            requestMethod = "POST"
-            connectTimeout = 5000
-            readTimeout = 5000
-            doOutput = true
-            setRequestProperty("Content-Type", "application/json")
-            setRequestProperty("User-Agent", "Mozilla/5.0")
+            requestMethod = "GET"
+            connectTimeout = 8000
+            readTimeout = 8000
+            setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
+            setRequestProperty("Accept-Language", "en-US,en;q=0.9")
         }
-
-        val payload = JSONObject().apply {
-            put("context", JSONObject().apply {
-                put("client", JSONObject().apply {
-                    put("clientName", "WEB")
-                    put("clientVersion", "2.20240101.00.00")
-                })
-            })
-            put("browseId", if (playlistId.startsWith("VL")) playlistId else "VL$playlistId")
-        }
-
-        conn.outputStream.use { it.write(payload.toString().toByteArray(Charsets.UTF_8)) }
 
         if (conn.responseCode == HttpURLConnection.HTTP_OK) {
-            val respText = conn.inputStream.bufferedReader().use { it.readText() }
-            val root = JSONObject(respText)
+            val html = conn.inputStream.bufferedReader().use { it.readText() }
             
-            val renderers = mutableListOf<JSONObject>()
-            findRenderersRecursive(root, "playlistVideoRenderer", renderers)
-            findRenderersRecursive(root, "musicResponsiveListItemRenderer", renderers)
+            // Extract the embedded initial state JSON
+            val regex = "var ytInitialData = (\\{.*?\\});</script>".toRegex()
+            val match = regex.find(html)
+            
+            if (match != null) {
+                val root = JSONObject(match.groupValues[1])
+                val renderers = mutableListOf<JSONObject>()
+                
+                // Reuse your existing recursive finder
+                findRenderersRecursive(root, "playlistVideoRenderer", renderers)
 
-            for (item in renderers) {
-                val titleRuns = item.optJSONObject("title")?.optJSONArray("runs")
-                val title = titleRuns?.optJSONObject(0)?.optString("text") 
-                    ?: item.optJSONObject("title")?.optString("simpleText") ?: ""
+                for (item in renderers) {
+                    val titleRuns = item.optJSONObject("title")?.optJSONArray("runs")
+                    val title = titleRuns?.optJSONObject(0)?.optString("text") 
+                        ?: item.optJSONObject("title")?.optString("simpleText") ?: ""
 
-                val artistRuns = item.optJSONObject("shortBylineText")?.optJSONArray("runs")
-                    ?: item.optJSONArray("flexColumns")?.optJSONObject(1)
-                        ?.optJSONObject("musicResponsiveListItemFlexColumnRenderer")
-                        ?.optJSONObject("text")?.optJSONArray("runs")
-                        
-                val artist = artistRuns?.optJSONObject(0)?.optString("text") ?: "Unknown Artist"
+                    val artistRuns = item.optJSONObject("shortBylineText")?.optJSONArray("runs")
+                    val artist = artistRuns?.optJSONObject(0)?.optString("text") ?: "Unknown Artist"
 
-                if (title.isNotBlank() && title != "Deleted video") {
-                    tracks.add(Pair(sanitizeText(title), sanitizeText(artist)))
+                    if (title.isNotBlank() && title != "Deleted video" && title != "Private video") {
+                        tracks.add(Pair(title, artist))
+                    }
                 }
             }
         }
@@ -1967,40 +1958,48 @@ suspend fun fetchYouTubePlaylistTracks(playlistId: String): List<Pair<String, St
 suspend fun fetchSpotifyPlaylistTracks(playlistId: String): List<Pair<String, String>> = withContext(Dispatchers.IO) {
     val tracks = mutableListOf<Pair<String, String>>()
     try {
-        // The embed endpoint provides a clean JSON blob without requiring OAuth tokens
-        val url = URL("https://open.spotify.com/embed/playlist/$playlistId")
+        // Use the standard web URL, not the embed URL
+        val url = URL("https://open.spotify.com/playlist/$playlistId")
         val conn = (url.openConnection() as HttpURLConnection).apply {
             requestMethod = "GET"
-            connectTimeout = 6000
-            readTimeout = 6000
-            setRequestProperty("User-Agent", "Mozilla/5.0")
+            connectTimeout = 8000
+            readTimeout = 8000
+            setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
         }
 
         if (conn.responseCode == HttpURLConnection.HTTP_OK) {
             val html = conn.inputStream.bufferedReader().use { it.readText() }
             
-            // Extract the Next.js hydration JSON block
-            val jsonStart = html.indexOf("<script id=\"__NEXT_DATA__\" type=\"application/json\">")
-            if (jsonStart != -1) {
-                val jsonStr = html.substring(jsonStart).substringAfter(">").substringBefore("</script>")
-                val root = JSONObject(jsonStr)
-                
-                val trackList = root.optJSONObject("props")
-                    ?.optJSONObject("pageProps")
-                    ?.optJSONObject("state")
-                    ?.optJSONObject("data")
-                    ?.optJSONObject("entity")
-                    ?.optJSONArray("trackList")
-
-                if (trackList != null) {
-                    for (i in 0 until trackList.length()) {
-                        val track = trackList.optJSONObject(i) ?: continue
-                        val title = track.optString("title", "")
-                        val artist = track.optString("subtitle", "")
+            // Spotify now stores tracklists in a standardized schema.org SEO JSON block
+            val regex = "<script type=\"application/ld\\+json\">(\\{.*?\\})</script>".toRegex()
+            val matches = regex.findAll(html)
+            
+            for (match in matches) {
+                val jsonStr = match.groupValues[1]
+                if (jsonStr.contains("\"MusicPlaylist\"")) {
+                    val root = JSONObject(jsonStr)
+                    val trackArray = root.optJSONArray("track") ?: continue
+                    
+                    for (i in 0 until trackArray.length()) {
+                        val trackItem = trackArray.optJSONObject(i) ?: continue
+                        val item = trackItem.optJSONObject("item") ?: trackItem
+                        
+                        val title = item.optString("name", "")
+                        
+                        // Artist can be an object or an array of objects
+                        var artist = "Unknown Artist"
+                        val artistNode = item.opt("byArtist")
+                        if (artistNode is JSONObject) {
+                            artist = artistNode.optString("name", "Unknown Artist")
+                        } else if (artistNode is JSONArray && artistNode.length() > 0) {
+                            artist = artistNode.optJSONObject(0)?.optString("name", "Unknown Artist") ?: "Unknown Artist"
+                        }
+                        
                         if (title.isNotBlank()) {
                             tracks.add(Pair(title, artist))
                         }
                     }
+                    break // Found the playlist block, no need to check other ld+json blocks
                 }
             }
         }
