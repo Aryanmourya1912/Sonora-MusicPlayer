@@ -5734,6 +5734,9 @@ fun SonoraPlayerScreen(
                             .apply()
 
                         ensureInfiniteQueueFilled(mediaController)
+                        
+                        // ADD THIS LINE HERE: Pre-resolve the next track's streaming URL
+                        prebufferNextTrackIfGapless(mediaController)
                     }
                 })
             } catch (e: Exception) {

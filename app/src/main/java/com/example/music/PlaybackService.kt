@@ -17,6 +17,7 @@ import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
+import androidx.media3.exoplayer.DefaultLoadControl 
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.session.CommandButton
 import androidx.media3.session.MediaSession
@@ -235,10 +236,24 @@ class PlaybackService : MediaSessionService() {
             .setUsage(C.USAGE_MEDIA)
             .build()
 
+        // 1. Define aggressive pre-buffering rules
+        val loadControl = androidx.media3.exoplayer.DefaultLoadControl.Builder()
+            .setBufferDurationsMs(
+                32000, // Min buffer 32s (ensures next track is pre-loaded)
+                64000, // Max buffer 64s
+                androidx.media3.exoplayer.DefaultLoadControl.DEFAULT_BUFFER_FOR_PLAYBACK_MS,
+                androidx.media3.exoplayer.DefaultLoadControl.DEFAULT_BUFFER_FOR_PLAYBACK_AFTER_REBUFFER_MS
+            ).build()
+
+        // 2. Build ExoPlayer with the new load control and gapless configurations
         val player = ExoPlayer.Builder(this)
             .setAudioAttributes(audioAttributes, true)
             .setHandleAudioBecomingNoisy(true)
-            .build()
+            .setLoadControl(loadControl)
+            .build().apply {
+                // Skips dead air/silence at the beginning and end of streams
+                skipSilenceEnabled = true 
+            }
             
         SonoraWidgetProvider.updateAllWidgets(
             this,
