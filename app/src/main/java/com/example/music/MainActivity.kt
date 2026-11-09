@@ -4545,7 +4545,8 @@ fun SwipeablePlaylistTrackRow(
 @Composable
 fun AboutDeveloperSheet(
     isDarkTheme: Boolean,
-    mediaController: MediaController?,
+    skipSilenceEnabled: Boolean,
+    onToggleSkipSilence: (Boolean) -> Unit,
     gaplessEnabled: Boolean,
     onToggleGapless: (Boolean) -> Unit,
     volumeNormalizationEnabled: Boolean,
@@ -4563,9 +4564,6 @@ fun AboutDeveloperSheet(
     onDismiss: () -> Unit
 ) {
     val context = LocalContext.current
-    val prefs = remember {
-        context.getSharedPreferences(PREFS_SONORA, Context.MODE_PRIVATE)
-    }
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
     val surfaceBg = if (isDarkTheme) Color(0xFF0F1722) else Color(0xFFFFFFFF)
@@ -4679,7 +4677,7 @@ fun AboutDeveloperSheet(
                             },
                             colors = ButtonDefaults.buttonColors(containerColor = accentPurple),
                             shape = RoundedCornerShape(14.dp),
-                            modifier = Modifier.weight(1f).height(44.dp)
+                            modifier = Modifier.weight(1f).height(50.dp)
                         ) {
                             Icon(
                                 imageVector = Icons.Rounded.Link,
@@ -4708,7 +4706,7 @@ fun AboutDeveloperSheet(
                                 contentColor = primaryText
                             ),
                             shape = RoundedCornerShape(14.dp),
-                            modifier = Modifier.weight(1f).height(44.dp)
+                            modifier = Modifier.weight(1f).height(50.dp)
                         ) {
                             Icon(
                                 imageVector = Icons.Rounded.Share,
@@ -4751,45 +4749,31 @@ fun AboutDeveloperSheet(
                         )
 
                         // Skip Silence in Tracks
-                        var skipSilenceEnabled by remember { 
-                            mutableStateOf(prefs.getBoolean("skip_silence", true)) 
-                        }
-
                         Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(vertical = 12.dp, horizontal = 16.dp),
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(
                                     text = "Skip Silence in Tracks",
-                                    color = Color.White,
-                                    fontSize = 16.sp,
-                                    fontWeight = FontWeight.SemiBold
+                                    fontWeight = FontWeight.SemiBold,
+                                    fontSize = 13.sp,
+                                    color = primaryText
                                 )
                                 Text(
                                     text = "Automatically fast-forwards through long quiet intros and outros.",
-                                    color = Color(0xFF94A3B8),
-                                    fontSize = 13.sp
+                                    fontSize = 11.sp,
+                                    color = secondaryText
                                 )
                             }
                             Switch(
                                 checked = skipSilenceEnabled,
-                                onCheckedChange = { isChecked ->
-                                    skipSilenceEnabled = isChecked
-                                    prefs.edit().putBoolean("skip_silence", isChecked).apply()
-                                    // MediaController is a remote Player and does not expose ExoPlayer-only APIs.
-                                    // Send the setting to PlaybackService, where the actual ExoPlayer is hosted.
-                                    mediaController?.sendCustomCommand(
-                                        SessionCommand("com.example.music.SET_SKIP_SILENCE", Bundle.EMPTY),
-                                        Bundle().apply { putBoolean("enabled", isChecked) }
-                                    )
-                                },
+                                onCheckedChange = onToggleSkipSilence,
                                 colors = SwitchDefaults.colors(checkedThumbColor = Color(0xFF7C4DFF))
                             )
                         }
-             
+
                         // Gapless Pre-buffering
                         Row(
                             modifier = Modifier.fillMaxWidth(),
@@ -5199,6 +5183,7 @@ private const val KEY_LAST_POSITION_MS = "last_position_ms"
 private const val KEY_LAST_DURATION_MS = "last_duration_ms"
 
 private const val KEY_CROSSFADE_SEC = "crossfade_seconds"
+private const val KEY_SKIP_SILENCE = "skip_silence"
 private const val KEY_GAPLESS_ENABLED = "gapless_enabled"
 private const val KEY_NORM_ENABLED = "volume_normalization"
 private const val KEY_AUTO_RESUME_ON_RECONNECT = "auto_resume_on_reconnect"
@@ -5292,6 +5277,9 @@ fun SonoraPlayerScreen(
     var showDeveloperProfileDialog by remember { mutableStateOf(false) }
     var crossfadeSeconds by remember {
         mutableIntStateOf(prefs.getInt(KEY_CROSSFADE_SEC, 3)) // Default: 3s
+    }
+    var skipSilenceEnabled by remember {
+        mutableStateOf(prefs.getBoolean(KEY_SKIP_SILENCE, true))
     }
     var gaplessEnabled by remember {
         mutableStateOf(prefs.getBoolean(KEY_GAPLESS_ENABLED, true))
@@ -8733,7 +8721,25 @@ fun SonoraPlayerScreen(
     if (showDeveloperProfileDialog) {
         AboutDeveloperSheet(
             isDarkTheme = isDarkTheme,
-            mediaController = controller,
+            skipSilenceEnabled = skipSilenceEnabled,
+            onToggleSkipSilence = { enabled ->
+                skipSilenceEnabled = enabled
+                prefs.edit()
+                    .putBoolean(KEY_SKIP_SILENCE, enabled)
+                    .apply()
+
+                // MediaController is remote; apply the ExoPlayer setting inside PlaybackService.
+                controller?.sendCustomCommand(
+                    SessionCommand("com.example.music.SET_SKIP_SILENCE", Bundle.EMPTY),
+                    Bundle().apply { putBoolean("enabled", enabled) }
+                )
+
+                Toast.makeText(
+                    context,
+                    if (enabled) "Skip Silence Enabled" else "Skip Silence Disabled",
+                    Toast.LENGTH_SHORT
+                ).show()
+            },
 
             gaplessEnabled = gaplessEnabled,
             onToggleGapless = {
