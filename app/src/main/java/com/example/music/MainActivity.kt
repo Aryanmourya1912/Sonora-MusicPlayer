@@ -848,12 +848,13 @@ fun LyricCardTemplate(
 ) {
     val context = LocalContext.current
     val neonRed = Color(0xFFFF2A2A)
+    val brandPurple = Color(0xFF7C4DFF)
 
     // Shrink the lyric text a little when the selected lines are long, so they always fit.
     val totalChars = selectedLyrics.sumOf { it.length }
     val lyricSize = when {
-        totalChars > 260 -> 44
-        totalChars > 180 -> 50
+        totalChars > 250 -> 44
+        totalChars > 175 -> 50
         else -> 58
     }
 
@@ -865,15 +866,31 @@ fun LyricCardTemplate(
         // Scaling the density makes it fill whatever size the view is measured at, on any phone.
         val scale = if (constraints.hasBoundedWidth) constraints.maxWidth / 1080f else 1f
 
+        // Glow for the "SONORA" name: a wide purple haze plus a tight light-purple halo
+        val glowWide = androidx.compose.ui.text.TextStyle(
+            shadow = androidx.compose.ui.graphics.Shadow(
+                color = brandPurple,
+                offset = androidx.compose.ui.geometry.Offset.Zero,
+                blurRadius = 44f * scale
+            )
+        )
+        val glowTight = androidx.compose.ui.text.TextStyle(
+            shadow = androidx.compose.ui.graphics.Shadow(
+                color = Color(0xFFB59CFF),
+                offset = androidx.compose.ui.geometry.Offset.Zero,
+                blurRadius = 14f * scale
+            )
+        )
+
         CompositionLocalProvider(LocalDensity provides Density(density = scale, fontScale = 1f)) {
             Box(
                 modifier = Modifier
                     .size(1080.dp, 1920.dp)
                     .background(Color(0xFF050000))
             ) {
-                // ---------- BACKGROUND ----------
+                // ---------- BACKGROUND (changes with every song) ----------
 
-                // 1. Base: near-black at the top, deep red in the middle, dark at the bottom
+                // 1. Fallback colour, only visible if the album art can't be loaded
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
@@ -884,60 +901,104 @@ fun LyricCardTemplate(
                         )
                 )
 
-                // 2. Red glow on the left, above the diagonal band
+                // 2. The album cover, zoomed in so its shapes and colours fill the whole card
+                if (artworkUrl.isNotBlank()) {
+                    AsyncImage(
+                        model = ImageRequest.Builder(context)
+                            .data(artworkUrl)
+                            .allowHardware(false)
+                            .crossfade(false)
+                            .build(),
+                        contentDescription = null,
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .graphicsLayer {
+                                scaleX = 1.5f   // extra zoom: raise for a closer crop
+                                scaleY = 1.5f
+                            }
+                    )
+                }
+
+                // 3. Dark overlay so the white lyrics stay readable on any cover
                 Box(
                     modifier = Modifier
-                        .align(Alignment.Center)
-                        .offset(x = (-390).dp, y = (-200).dp)
-                        .requiredSize(1500.dp)
-                        .background(Brush.radialGradient(listOf(Color(0xDD9E0A0F), Color.Transparent)))
+                        .fillMaxSize()
+                        .background(
+                            Brush.verticalGradient(
+                                0f to Color(0xE0000000),
+                                0.35f to Color(0x99000000),
+                                0.70f to Color(0xA6000000),
+                                1f to Color(0xF0000000)
+                            )
+                        )
                 )
 
-                // 3. Red glow behind the player pill
+                // 4. Soft red haze behind the player pill
                 Box(
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
                         .offset(y = 300.dp)
                         .requiredSize(1300.dp)
-                        .background(Brush.radialGradient(listOf(Color(0x66B00000), Color.Transparent)))
+                        .background(Brush.radialGradient(listOf(Color(0x55B00000), Color.Transparent)))
                 )
-
-                // 4. Black diagonal band that rises to the right
-                Box(
-                    modifier = Modifier
-                        .align(Alignment.Center)
-                        .offset(y = (-40).dp)
-                        .requiredSize(2200.dp, 700.dp)
-                        .graphicsLayer { rotationZ = -20f }
-                        .background(Color(0xFF060000))
-                )
-
-                // 5. Giant song title on the band, cropped by the edges like in the reference
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .wrapContentSize(unbounded = true),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        text = trackTitle.uppercase(),
-                        color = Color(0xFFB0121B),
-                        fontSize = 700.sp,
-                        fontWeight = FontWeight.Black,
-                        maxLines = 1,
-                        softWrap = false,
-                        modifier = Modifier
-                            .offset(y = (-48).dp)
-                            .graphicsLayer { scaleX = 0.36f }
-                    )
-                }
 
                 // ---------- CONTENT ----------
                 Column(
                     modifier = Modifier.fillMaxSize(),
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
-                    Spacer(modifier = Modifier.height(50.dp))
+                    Spacer(modifier = Modifier.height(48.dp))
+
+                    // Brand:  (logo) SONORA
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(
+                            modifier = Modifier.size(100.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            // Purple glow behind the logo
+                            Box(
+                                modifier = Modifier
+                                    .requiredSize(190.dp)
+                                    .background(
+                                        Brush.radialGradient(listOf(Color(0x777C4DFF), Color.Transparent))
+                                    )
+                            )
+                            // Your app logo (ic_launcher_foreground). The drawable has empty margins,
+                            // so it is drawn larger than its 100dp slot.
+                            Icon(
+                                painter = painterResource(R.drawable.ic_launcher_foreground),
+                                contentDescription = null,
+                                tint = Color.Unspecified,
+                                modifier = Modifier.requiredSize(160.dp)
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.width(14.dp))
+
+                        Box {
+                            // Wide purple glow layer
+                            Text(
+                                text = "SONORA",
+                                color = brandPurple,
+                                fontSize = 66.sp,
+                                fontWeight = FontWeight.Black,
+                                letterSpacing = 6.sp,
+                                style = glowWide
+                            )
+                            // Bold white text with a tight halo on top
+                            Text(
+                                text = "SONORA",
+                                color = Color.White,
+                                fontSize = 66.sp,
+                                fontWeight = FontWeight.Black,
+                                letterSpacing = 6.sp,
+                                style = glowTight
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(14.dp))
 
                     // Header:  ————— ♫ —————
                     Row(
