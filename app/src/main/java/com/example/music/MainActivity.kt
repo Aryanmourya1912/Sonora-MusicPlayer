@@ -340,6 +340,51 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+fun saveQueueToPrefs(context: Context, queue: List<com.example.music.data.SongEntity>) {
+    val prefs = context.getSharedPreferences("sonora_playback_state", Context.MODE_PRIVATE)
+    val jsonArray = JSONArray()
+    
+    queue.forEach { track ->
+        val obj = JSONObject().apply {
+            put("songId", track.songId) // Replace with track.id if your entity uses id
+            put("title", track.title)
+            put("artist", track.artist)
+            put("audioUrl", track.audioUrl)
+            put("artworkUrl", track.artworkUrl)
+            put("duration", track.duration ?: "")
+        }
+        jsonArray.put(obj)
+    }
+    prefs.edit().putString("saved_queue_list", jsonArray.toString()).apply()
+}
+
+fun restoreQueueFromPrefs(context: Context): List<com.example.music.data.SongEntity> {
+    val prefs = context.getSharedPreferences("sonora_playback_state", Context.MODE_PRIVATE)
+    val jsonString = prefs.getString("saved_queue_list", "[]") ?: "[]"
+    val queue = mutableListOf<com.example.music.data.SongEntity>()
+    
+    try {
+        val jsonArray = JSONArray(jsonString)
+        for (i in 0 until jsonArray.length()) {
+            val obj = jsonArray.getJSONObject(i)
+            queue.add(
+                com.example.music.data.SongEntity(
+                    songId = obj.optString("songId"),
+                    title = obj.optString("title"),
+                    artist = obj.optString("artist"),
+                    audioUrl = obj.optString("audioUrl"),
+                    artworkUrl = obj.optString("artworkUrl"),
+                    duration = obj.optString("duration")
+                )
+            )
+        }
+    } catch (e: Exception) { 
+        e.printStackTrace() 
+    }
+    
+    return queue
+}
+
 // ---------------------------------------------------------------------------
 // Artwork palette
 // ---------------------------------------------------------------------------
@@ -4698,6 +4743,42 @@ fun AboutDeveloperSheet(
                             color = accentPurple
                         )
 
+                        // Skip Silence in Tracks
+                        var skipSilenceEnabled by remember { 
+                            mutableStateOf(prefs.getBoolean("skip_silence", true)) 
+                        }
+
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 12.dp, horizontal = 16.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "Skip Silence in Tracks",
+                                    color = Color.White,
+                                    fontSize = 16.sp,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                Text(
+                                    text = "Automatically fast-forwards through long quiet intros and outros.",
+                                    color = Color(0xFF94A3B8),
+                                    fontSize = 13.sp
+                                )
+                            }
+                            Switch(
+                                checked = skipSilenceEnabled,
+                                onCheckedChange = { isChecked ->
+                                    skipSilenceEnabled = isChecked
+                                    prefs.edit().putBoolean("skip_silence", isChecked).apply()
+                                    // Update the active player instance instantly so the user doesn't have to restart
+                                    mediaController?.skipSilenceEnabled = isChecked
+                                },
+                                colors = SwitchDefaults.colors(checkedThumbColor = Color(0xFF7C4DFF))
+                            )
+                        }
+             
                         // Gapless Pre-buffering
                         Row(
                             modifier = Modifier.fillMaxWidth(),
@@ -5256,6 +5337,12 @@ fun SonoraPlayerScreen(
 
     LaunchedEffect(Unit) {
         refreshListeningStats()
+        
+        val savedQueue = restoreQueueFromPrefs(context)
+        if (savedQueue.isNotEmpty()) {
+            queueList.clear()
+            queueList.addAll(savedQueue)
+        }
     }
 
     var activeSongId by remember { mutableStateOf("") }
@@ -5873,9 +5960,18 @@ fun SonoraPlayerScreen(
                 .apply()
 
             controller?.let { player ->
-                player.setMediaItem(buildMediaItem(targetTrack))
+                // 1. Build and load the entire queue to enable gapless pre-buffering
+                val mediaItems = tracks.map { buildMediaItem(it) }
+                player.setMediaItems(mediaItems, safeIndex, C.TIME_UNSET)
+                
                 player.prepare()
                 player.play()
+                
+                // 2. Save the active queue to SharedPreferences
+                queueList.clear()
+                queueList.addAll(tracks)
+                saveQueueToPrefs(context, queueList)
+                
                 updateQueueState(player)
             }
 

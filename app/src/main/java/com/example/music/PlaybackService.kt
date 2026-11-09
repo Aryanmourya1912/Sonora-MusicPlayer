@@ -245,14 +245,16 @@ class PlaybackService : MediaSessionService() {
                 androidx.media3.exoplayer.DefaultLoadControl.DEFAULT_BUFFER_FOR_PLAYBACK_AFTER_REBUFFER_MS
             ).build()
 
-        // 2. Build ExoPlayer with the new load control and gapless configurations
+        // 1. Read the user preference before building the player
+        val shouldSkipSilence = playbackPrefs.getBoolean("skip_silence", true)
+
         val player = ExoPlayer.Builder(this)
             .setAudioAttributes(audioAttributes, true)
             .setHandleAudioBecomingNoisy(true)
             .setLoadControl(loadControl)
             .build().apply {
-                // Skips dead air/silence at the beginning and end of streams
-                skipSilenceEnabled = true 
+                // 2. Set dynamically based on preferences
+                skipSilenceEnabled = shouldSkipSilence 
             }
             
         SonoraWidgetProvider.updateAllWidgets(
