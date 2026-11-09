@@ -1913,7 +1913,6 @@ fun calculateTotalOfflineBytes(downloadedSongs: List<DownloadedSongEntity>): Lon
 suspend fun fetchYouTubePlaylistTracks(playlistId: String): List<Pair<String, String>> = withContext(Dispatchers.IO) {
     val tracks = mutableListOf<Pair<String, String>>()
     try {
-        // Fallback to GET request on the public playlist page (bypasses API blockades)
         val url = URL("https://www.youtube.com/playlist?list=$playlistId")
         val conn = (url.openConnection() as HttpURLConnection).apply {
             requestMethod = "GET"
@@ -1921,28 +1920,36 @@ suspend fun fetchYouTubePlaylistTracks(playlistId: String): List<Pair<String, St
             readTimeout = 8000
             setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
             setRequestProperty("Accept-Language", "en-US,en;q=0.9")
+            // Crucial: Bypasses the YouTube cookie consent intercept page
+            setRequestProperty("Cookie", "CONSENT=YES+cb.20210328-17-p0.en+FX+478") 
         }
 
         if (conn.responseCode == HttpURLConnection.HTTP_OK) {
             val html = conn.inputStream.bufferedReader().use { it.readText() }
             
-            // Extract the embedded initial state JSON
-            val regex = "var ytInitialData = (\\{.*?\\});</script>".toRegex()
+            // Handles both 'var ytInitialData =' and 'window["ytInitialData"] ='
+            val regex = "(?:var ytInitialData|window\\[\"ytInitialData\"\\])\\s*=\\s*(\\{.*?\\});\\s*</script>".toRegex()
             val match = regex.find(html)
             
             if (match != null) {
                 val root = JSONObject(match.groupValues[1])
                 val renderers = mutableListOf<JSONObject>()
                 
-                // Reuse your existing recursive finder
+                // Extracts from BOTH standard YouTube and YouTube Music
                 findRenderersRecursive(root, "playlistVideoRenderer", renderers)
+                findRenderersRecursive(root, "musicResponsiveListItemRenderer", renderers)
 
                 for (item in renderers) {
                     val titleRuns = item.optJSONObject("title")?.optJSONArray("runs")
                     val title = titleRuns?.optJSONObject(0)?.optString("text") 
                         ?: item.optJSONObject("title")?.optString("simpleText") ?: ""
 
+                    // Check both standard YT and YT Music artist paths
                     val artistRuns = item.optJSONObject("shortBylineText")?.optJSONArray("runs")
+                        ?: item.optJSONArray("flexColumns")?.optJSONObject(1)
+                            ?.optJSONObject("musicResponsiveListItemFlexColumnRenderer")
+                            ?.optJSONObject("text")?.optJSONArray("runs")
+                            
                     val artist = artistRuns?.optJSONObject(0)?.optString("text") ?: "Unknown Artist"
 
                     if (title.isNotBlank() && title != "Deleted video" && title != "Private video") {
@@ -4768,9 +4775,8 @@ fun AboutDeveloperSheet(
                             }
                             Switch(
                                 checked = skipSilenceEnabled,
-                                onCheckedChange = onToggleSkipSilence,
-                                colors = SwitchDefaults.colors(checkedThumbColor = Color(0xFF7C4DFF))
-                            )
+                                onCheckedChange = onToggleSkipSilence
+)
                         }
 
                         // Gapless Pre-buffering
