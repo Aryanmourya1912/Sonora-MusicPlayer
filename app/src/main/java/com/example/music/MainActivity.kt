@@ -340,52 +340,54 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-fun saveQueueToPrefs(context: Context, queue: List<com.example.music.data.SongEntity>) {
+fun saveQueueToPrefs(context: Context, queue: List<FullTrackItem>) {
     val prefs = context.getSharedPreferences("sonora_playback_state", Context.MODE_PRIVATE)
     val jsonArray = JSONArray()
-    
+
     queue.forEach { track ->
         val obj = JSONObject().apply {
-            put("songId", track.songId) // Replace with track.id if your entity uses id
+            put("id", track.id)
             put("title", track.title)
             put("artist", track.artist)
             put("audioUrl", track.audioUrl)
             put("artworkUrl", track.artworkUrl)
-            put("duration", track.duration ?: "")
+            put("durationFormatted", track.durationFormatted)
         }
         jsonArray.put(obj)
     }
+
     prefs.edit().putString("saved_queue_list", jsonArray.toString()).apply()
 }
 
-fun restoreQueueFromPrefs(context: Context): List<com.example.music.data.SongEntity> {
+fun restoreQueueFromPrefs(context: Context): List<FullTrackItem> {
     val prefs = context.getSharedPreferences("sonora_playback_state", Context.MODE_PRIVATE)
     val jsonString = prefs.getString("saved_queue_list", "[]") ?: "[]"
-    val queue = mutableListOf<com.example.music.data.SongEntity>()
-    
+    val queue = mutableListOf<FullTrackItem>()
+
     try {
         val jsonArray = JSONArray(jsonString)
         for (i in 0 until jsonArray.length()) {
             val obj = jsonArray.getJSONObject(i)
             queue.add(
-                com.example.music.data.SongEntity(
-                    songId = obj.optString("songId"),
+                FullTrackItem(
+                    id = obj.optString("id"),
                     title = obj.optString("title"),
                     artist = obj.optString("artist"),
                     audioUrl = obj.optString("audioUrl"),
                     artworkUrl = obj.optString("artworkUrl"),
-                    duration = obj.optString("duration")
+                    durationFormatted = obj.optString("durationFormatted", "0:00")
                 )
             )
         }
-    } catch (e: Exception) { 
-        e.printStackTrace() 
+    } catch (e: Exception) {
+        e.printStackTrace()
     }
-    
+
     return queue
 }
 
 // ---------------------------------------------------------------------------
+
 // Artwork palette
 // ---------------------------------------------------------------------------
 
@@ -4542,6 +4544,7 @@ fun SwipeablePlaylistTrackRow(
 @Composable
 fun AboutDeveloperSheet(
     isDarkTheme: Boolean,
+    mediaController: MediaController?,
     gaplessEnabled: Boolean,
     onToggleGapless: (Boolean) -> Unit,
     volumeNormalizationEnabled: Boolean,
@@ -4559,6 +4562,9 @@ fun AboutDeveloperSheet(
     onDismiss: () -> Unit
 ) {
     val context = LocalContext.current
+    val prefs = remember {
+        context.getSharedPreferences(PREFS_SONORA, Context.MODE_PRIVATE)
+    }
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
     val surfaceBg = if (isDarkTheme) Color(0xFF0F1722) else Color(0xFFFFFFFF)
@@ -5340,8 +5346,7 @@ fun SonoraPlayerScreen(
         
         val savedQueue = restoreQueueFromPrefs(context)
         if (savedQueue.isNotEmpty()) {
-            queueList.clear()
-            queueList.addAll(savedQueue)
+            queueList = savedQueue
         }
     }
 
@@ -5968,8 +5973,7 @@ fun SonoraPlayerScreen(
                 player.play()
                 
                 // 2. Save the active queue to SharedPreferences
-                queueList.clear()
-                queueList.addAll(tracks)
+                queueList = tracks.toList()
                 saveQueueToPrefs(context, queueList)
                 
                 updateQueueState(player)
@@ -8698,6 +8702,7 @@ fun SonoraPlayerScreen(
     if (showDeveloperProfileDialog) {
         AboutDeveloperSheet(
             isDarkTheme = isDarkTheme,
+            mediaController = controller,
 
             gaplessEnabled = gaplessEnabled,
             onToggleGapless = {
