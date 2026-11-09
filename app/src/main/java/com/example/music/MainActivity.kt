@@ -5055,7 +5055,7 @@ fun SonoraPlayerScreen(
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
-    val  = rememberCoroutineScope()
+    val coroutineScope = rememberCoroutineScope()
     val view = LocalView.current
     
     var isPlayerExpanded by remember { mutableStateOf(false) }
