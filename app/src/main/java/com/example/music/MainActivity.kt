@@ -1570,6 +1570,8 @@ private fun extractFromSingleJsonObject(
 // ---------------------------------------------------------------------------
 
 suspend fun fetchLyricsFromPriorityProviders(
+    context: android.content.Context, // 1. Added Context
+    songId: String,                   // 2. Added songId to find the file
     songTitle: String,
     artistName: String,
     durationSeconds: Int = 0
@@ -1596,9 +1598,47 @@ suspend fun fetchLyricsFromPriorityProviders(
         }
     }
 
+    // --- 3. OFFLINE CACHE CHECK START ---
+    try {
+        val offlineFile = java.io.File(context.filesDir, "lyrics_$songId.lrc")
+        if (offlineFile.exists()) {
+            val lrcText = offlineFile.readText()
+            
+            // Parse the raw .lrc text back into your SyncedLyricLine objects
+            val offlineLines = mutableListOf<SyncedLyricLine>()
+            val regex = "\\[(\\d{2,}):(\\d{2})\\.(\\d{2,3})\\](.*)".toRegex()
+            
+            lrcText.lines().forEach { line ->
+                val match = regex.find(line)
+                if (match != null) {
+                    val min = match.groupValues[1].toLong()
+                    val sec = match.groupValues[2].toLong()
+                    val msStr = match.groupValues[3]
+                    val ms = if (msStr.length == 2) msStr.toLong() * 10 else msStr.toLong()
+                    val time = (min * 60 * 1000) + (sec * 1000) + ms
+                    val text = match.groupValues[4].trim()
+                    
+                    // Note: Ensure timeMs and text match your SyncedLyricLine data class properties
+                    offlineLines.add(SyncedLyricLine(timeMs = time, text = text))
+                }
+            }
+
+            if (offlineLines.isNotEmpty()) {
+                val offlineResult = Pair("Offline Storage", offlineLines)
+                synchronized(lyricsMemoryCache) {
+                    lyricsMemoryCache[cacheKey] = offlineResult
+                }
+                return@withContext offlineResult
+            }
+        }
+    } catch (e: Exception) {
+        e.printStackTrace()
+    }
+    // --- OFFLINE CACHE CHECK END ---
+
     val providers: List<Pair<String, suspend () -> List<SyncedLyricLine>>> = listOf(
-        "LrcLib" to { fetchFromLrcLib(cleanTitle, artistClean, durationSeconds) },
         "Better Lyrics" to { fetchFromBetterLyrics(cleanTitle, artistClean, durationSeconds) },
+        "LrcLib" to { fetchFromLrcLib(cleanTitle, artistClean, durationSeconds) },
         "KuGou" to { fetchFromKuGou(cleanTitle, artistClean, durationSeconds) },
         "Paxsenix" to { fetchFromPaxsenix(cleanTitle, artistClean, durationSeconds) },
         "LyricsPlus" to { fetchFromLyricsPlus(cleanTitle, artistClean, durationSeconds) },
@@ -1611,7 +1651,6 @@ suspend fun fetchLyricsFromPriorityProviders(
         try {
             val result = fetcher()
             if (result.isNotEmpty()) {
-                // Check if the result is genuinely timestamp-synced vs evenly-divided plain lyrics
                 val isRealSynced = isGenuineSyncedLyrics(result)
                 if (isRealSynced) {
                     val finalPair = Pair(name, result)
@@ -1620,7 +1659,6 @@ suspend fun fetchLyricsFromPriorityProviders(
                     }
                     return@withContext finalPair
                 } else if (fallbackPlainResult == null) {
-                    // Hold onto plain lyrics in case a lower-priority provider has real synced LRC
                     fallbackPlainResult = Pair(name, result)
                 }
             }
@@ -3940,7 +3978,28 @@ suspend fun downloadTrackToStorage(context: Context, track: FullTrackItem): Stri
             }
             if (tmp.length() > 50_000L) {
                 if (targetFile.exists()) targetFile.delete()
+                
                 if (tmp.renameTo(targetFile)) {
+                    
+                    // --- PASTE THE LYRICS DOWNLOAD LOGIC HERE ---
+                    try {
+                        // Replace 'fetchLyricsFromPriorityProviders' with whatever your actual lyrics fetching function is named
+                        val fetchedLyrics = fetchLyricsFromPriorityProviders(
+                            context: android.content.Context,
+                            songId: String,                   
+                            songTitle: String,
+                            artistName: String,
+                            durationSeconds: Int = 0
+                        )
+                        
+                        if (!fetchedLyrics.isNullOrBlank()) {
+                            saveLyricsOffline(context, track.id, fetchedLyrics)
+                        }
+                    } catch (e: Exception) {
+                        android.util.Log.e("SonoraOffline", "Failed to cache offline lyrics for ${track.title}", e)
+                    }
+                    // ---------------------------------------------
+                    
                     return@withContext targetFile.absolutePath
                 }
             }
@@ -3969,7 +4028,25 @@ fun sanitizeText(input: String): String {
         .replace("&gt;", ">")
         .replace("&amp;", "&")
 }
-        
+     
+suspend fun saveLyricsOffline(context: android.content.Context, songId: String, lyricsText: String) = withContext(Dispatchers.IO) {
+    if (lyricsText.isBlank()) return@withContext
+    try {
+        val file = File(context.filesDir, "lyrics_$songId.lrc")
+        file.writeText(lyricsText)
+    } catch (e: Exception) {
+        e.printStackTrace()
+    }
+}
+
+suspend fun getOfflineLyrics(context: android.content.Context, songId: String): String? = withContext(Dispatchers.IO) {
+    try {
+        val file = File(context.filesDir, "lyrics_$songId.lrc")
+        if (file.exists()) file.readText() else null
+    } catch (e: Exception) {
+        null
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Small composables
@@ -5502,9 +5579,11 @@ fun SonoraPlayerScreen(
             val effectiveDurationSec = if (parsedDurationSec > 0) parsedDurationSec else playerDurationSec
 
             val (provider, parsedLines) = fetchLyricsFromPriorityProviders(
-                songTitle = activeTitle,
-                artistName = activeArtist,
-                durationSeconds = effectiveDurationSec
+                context: android.content.Context,
+                songId: String,                   
+                songTitle: String,
+                artistName: String,
+                durationSeconds: Int = 0
             )
 
             // Guard against race condition if user skipped tracks while fetching
@@ -8520,7 +8599,7 @@ fun SonoraPlayerScreen(
                         Spacer(modifier = Modifier.height(10.dp))
 
                         HardwareFftVisualizer(
-                            audioSessionId = mediaController?.audioSessionId ?: 0,
+                            audioSessionId = controller?.audioSessionId ?: 0,
                             barColor = animatedDominantColor,
                             modifier = Modifier
                                 .fillMaxWidth(0.88f)
