@@ -3983,17 +3983,16 @@ suspend fun downloadTrackToStorage(context: Context, track: FullTrackItem): Stri
                     
                     // --- PASTE THE LYRICS DOWNLOAD LOGIC HERE ---
                     try {
-                        // Replace 'fetchLyricsFromPriorityProviders' with whatever your actual lyrics fetching function is named
-                        val fetchedLyrics = fetchLyricsFromPriorityProviders(
-                            context: android.content.Context,
-                            songId: String,                   
-                            songTitle: String,
-                            artistName: String,
-                            durationSeconds: Int = 0
+                        val (_, lyricLines) = fetchLyricsFromPriorityProviders(
+                            context = context,
+                            songId = track.id,
+                            songTitle = track.title,
+                            artistName = track.artist,
+                            durationSeconds = parseDurationSeconds(track.durationFormatted)
                         )
-                        
-                        if (!fetchedLyrics.isNullOrBlank()) {
-                            saveLyricsOffline(context, track.id, fetchedLyrics)
+
+                        if (lyricLines.isNotEmpty()) {
+                            saveLyricsOffline(context, track.id, syncedLinesToLrc(lyricLines))
                         }
                     } catch (e: Exception) {
                         android.util.Log.e("SonoraOffline", "Failed to cache offline lyrics for ${track.title}", e)
@@ -4028,7 +4027,16 @@ fun sanitizeText(input: String): String {
         .replace("&gt;", ">")
         .replace("&amp;", "&")
 }
-     
+
+fun syncedLinesToLrc(lines: List<SyncedLyricLine>): String =
+    lines.joinToString("\n") { line ->
+        val totalMs = line.timeMs
+        val min = totalMs / 60000
+        val sec = (totalMs % 60000) / 1000
+        val hundredths = (totalMs % 1000) / 10
+        String.format(Locale.ROOT, "[%02d:%02d.%02d]%s", min, sec, hundredths, line.text)
+    }
+            
 suspend fun saveLyricsOffline(context: android.content.Context, songId: String, lyricsText: String) = withContext(Dispatchers.IO) {
     if (lyricsText.isBlank()) return@withContext
     try {
@@ -5579,11 +5587,11 @@ fun SonoraPlayerScreen(
             val effectiveDurationSec = if (parsedDurationSec > 0) parsedDurationSec else playerDurationSec
 
             val (provider, parsedLines) = fetchLyricsFromPriorityProviders(
-                context: android.content.Context,
-                songId: String,                   
-                songTitle: String,
-                artistName: String,
-                durationSeconds: Int = 0
+                context = context,
+                songId = requestedSongId,
+                songTitle = activeTitle,
+                artistName = activeArtist,
+                durationSeconds = effectiveDurationSec
             )
 
             // Guard against race condition if user skipped tracks while fetching
