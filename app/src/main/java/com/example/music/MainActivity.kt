@@ -11,6 +11,7 @@ import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.drawable.BitmapDrawable
 import android.media.AudioManager
+import android.media.audiofx.Visualizer
 import android.net.Uri
 import android.os.Bundle
 import android.speech.RecognizerIntent
@@ -39,6 +40,7 @@ import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -170,11 +172,15 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
@@ -238,6 +244,7 @@ import java.net.URLEncoder
 import java.util.Locale
 import javax.crypto.Cipher
 import javax.crypto.spec.SecretKeySpec
+import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.roundToInt
 import kotlinx.coroutines.CoroutineScope
@@ -885,6 +892,88 @@ fun captureAndShareLyricCard(
             composeView?.let {
                 rootView.removeView(it)
                 it.disposeComposition()
+            }
+        }
+    }
+}
+
+@Composable
+fun rememberFftVisualizer(audioSessionId: Int): State<ByteArray> {
+    val fftData = remember { mutableStateOf(ByteArray(0)) }
+
+    DisposableEffect(audioSessionId) {
+        if (audioSessionId == 0) return@DisposableEffect onDispose {}
+
+        var visualizer: Visualizer? = null
+        try {
+            visualizer = Visualizer(audioSessionId).apply {
+                captureSize = Visualizer.getCaptureSizeRange()[1] // Highest resolution
+                setDataCaptureListener(object : Visualizer.OnDataCaptureListener {
+                    override fun onWaveFormDataCapture(v: Visualizer?, waveform: ByteArray?, samplingRate: Int) {
+                        // Unused: We only want FFT
+                    }
+
+                    override fun onFftDataCapture(v: Visualizer?, fft: ByteArray?, samplingRate: Int) {
+                        // Trigger Compose state update with the fresh frequency array
+                        fft?.let { fftData.value = it }
+                    }
+                }, Visualizer.getMaxCaptureRate() / 2, false, true)
+                
+                enabled = true
+            }
+        } catch (e: Exception) {
+            e.printStackTrace() // Fails here if RECORD_AUDIO permission is not granted
+        }
+
+        onDispose {
+            visualizer?.enabled = false
+            visualizer?.release()
+        }
+    }
+    return fftData
+}
+
+@Composable
+fun HardwareFftVisualizer(
+    audioSessionId: Int, 
+    barColor: Color, // 1. Add the color parameter here
+    modifier: Modifier = Modifier
+) {
+    val fft by rememberFftVisualizer(audioSessionId)
+
+    Canvas(
+        modifier = modifier
+            .fillMaxWidth()
+            .height(120.dp) 
+    ) {
+        if (fft.isEmpty()) return@Canvas
+
+        val barCount = 48 
+        val barSpacing = 4f
+        val totalSpacing = barSpacing * (barCount - 1)
+        val barWidth = (size.width - totalSpacing) / barCount
+
+        for (i in 0 until barCount) {
+            val byteIndex = (i * 2) + 2
+            
+            if (byteIndex < fft.size - 1) {
+                val real = fft[byteIndex].toFloat()
+                val imaginary = fft[byteIndex + 1].toFloat()
+                
+                val magnitude = hypot(real, imaginary)
+                
+                val rawHeight = magnitude * 3f
+                val barHeight = rawHeight.coerceIn(4f, size.height) 
+                
+                val x = i * (barWidth + barSpacing)
+                val y = size.height - barHeight
+
+                drawRoundRect(
+                    color = barColor, // 2. Apply the dynamic color to the bars
+                    topLeft = Offset(x, y),
+                    size = Size(barWidth, barHeight),
+                    cornerRadius = CornerRadius(10f, 10f)
+                )
             }
         }
     }
@@ -1913,12 +2002,14 @@ fun calculateTotalOfflineBytes(downloadedSongs: List<DownloadedSongEntity>): Lon
 suspend fun fetchYouTubePlaylistTracks(playlistId: String): List<Pair<String, String>> = withContext(Dispatchers.IO) {
     val tracks = mutableListOf<Pair<String, String>>()
     try {
-        val url = URL("https://www.youtube.com/playlist?list=$playlistId")
+        // Switch to m.youtube.com - Mobile layouts are much more consistent for scraping
+        val url = URL("https://m.youtube.com/playlist?list=$playlistId")
         val conn = (url.openConnection() as HttpURLConnection).apply {
             requestMethod = "GET"
             connectTimeout = 8000
             readTimeout = 8000
-            setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
+            // Spoof a standard Android mobile browser
+            setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Mobile Safari/537.36")
             setRequestProperty("Accept-Language", "en-US,en;q=0.9")
             setRequestProperty("Cookie", "CONSENT=YES+cb.20210328-17-p0.en+FX+478") 
         }
@@ -1926,46 +2017,46 @@ suspend fun fetchYouTubePlaylistTracks(playlistId: String): List<Pair<String, St
         if (conn.responseCode == HttpURLConnection.HTTP_OK) {
             val html = conn.inputStream.bufferedReader().use { it.readText() }
             
-            // Bulletproof string extraction instead of fragile Regex
-            val marker = "ytInitialData = "
-            val startIndex = html.indexOf(marker)
+            // DOT_MATCHES_ALL is mandatory for parsing HTML across multiple line breaks in Kotlin
+            val regex = "(?:var ytInitialData|window\\[\"ytInitialData\"\\])\\s*=\\s*(\\{.*?\\});\\s*</?(?:script|div)".toRegex(RegexOption.DOT_MATCHES_ALL)
+            val match = regex.find(html)
             
-            if (startIndex != -1) {
-                val blockStart = html.indexOf("{", startIndex)
-                val blockEnd = html.indexOf("</script>", blockStart)
+            if (match != null) {
+                val root = JSONObject(match.groupValues[1])
+                val renderers = mutableListOf<JSONObject>()
                 
-                if (blockStart != -1 && blockEnd != -1) {
-                    var jsonStr = html.substring(blockStart, blockEnd).trim()
-                    if (jsonStr.endsWith(";")) {
-                        jsonStr = jsonStr.dropLast(1)
-                    }
+                // Extract from standard YT, YT Music, and Mobile YT layouts
+                findRenderersRecursive(root, "playlistVideoRenderer", renderers)
+                findRenderersRecursive(root, "musicResponsiveListItemRenderer", renderers)
+                findRenderersRecursive(root, "compactVideoRenderer", renderers) 
 
-                    val root = JSONObject(jsonStr)
-                    val renderers = mutableListOf<JSONObject>()
-                    
-                    findRenderersRecursive(root, "playlistVideoRenderer", renderers)
-                    findRenderersRecursive(root, "musicResponsiveListItemRenderer", renderers)
+                for (item in renderers) {
+                    val titleRuns = item.optJSONObject("title")?.optJSONArray("runs")
+                    val title = titleRuns?.optJSONObject(0)?.optString("text") 
+                        ?: item.optJSONObject("title")?.optString("simpleText") ?: ""
 
-                    for (item in renderers) {
-                        val titleRuns = item.optJSONObject("title")?.optJSONArray("runs")
-                        val title = titleRuns?.optJSONObject(0)?.optString("text") 
-                            ?: item.optJSONObject("title")?.optString("simpleText") ?: ""
+                    val artistRuns = item.optJSONObject("shortBylineText")?.optJSONArray("runs")
+                        ?: item.optJSONArray("flexColumns")?.optJSONObject(1)
+                            ?.optJSONObject("musicResponsiveListItemFlexColumnRenderer")
+                            ?.optJSONObject("text")?.optJSONArray("runs")
+                            
+                    val artist = artistRuns?.optJSONObject(0)?.optString("text")
+                        ?: item.optJSONObject("longBylineText")?.optJSONArray("runs")?.optJSONObject(0)?.optString("text")
+                        ?: "Unknown Artist"
 
-                        val artistRuns = item.optJSONObject("shortBylineText")?.optJSONArray("runs")
-                            ?: item.optJSONArray("flexColumns")?.optJSONObject(1)
-                                ?.optJSONObject("musicResponsiveListItemFlexColumnRenderer")
-                                ?.optJSONObject("text")?.optJSONArray("runs")
-                                
-                        val artist = artistRuns?.optJSONObject(0)?.optString("text") ?: "Unknown Artist"
-
-                        if (title.isNotBlank() && title != "Deleted video" && title != "Private video") {
-                            tracks.add(Pair(title, artist))
-                        }
+                    if (title.isNotBlank() && title != "Deleted video" && title != "Private video" && title != "[Private video]") {
+                        tracks.add(Pair(title.trim(), artist.trim()))
                     }
                 }
+            } else {
+                android.util.Log.e("SonoraImport", "Regex failed to find ytInitialData in HTML.")
             }
+        } else {
+            android.util.Log.e("SonoraImport", "HTTP Connection failed with code: ${conn.responseCode}")
         }
-    } catch (e: Exception) { e.printStackTrace() }
+    } catch (e: Exception) { 
+        android.util.Log.e("SonoraImport", "YT Import crashed", e) 
+    }
     tracks
 }
 
@@ -2054,10 +2145,22 @@ suspend fun importPlaylistFromUrl(
     var importedCount = 0
 
     for ((title, artist) in rawTracks) {
-        val query = "$title $artist".trim()
+        val query = "$title $artist official audio".trim()
         val (results, _) = searchYouTubeUniversal(query)
         
-        val bestMatch = results.firstOrNull()
+        // Find the first search result that is under 10 minutes
+        val bestMatch = results.firstOrNull { track ->
+            val parts = track.durationFormatted.split(":")
+            when (parts.size) {
+                3 -> false // Has hours (HH:MM:SS), definitely over 10 minutes
+                2 -> {
+                    val minutes = parts[0].toIntOrNull() ?: 0
+                    minutes < 10 // Only accept if minutes are less than 10
+                }
+                else -> true // Fallback for single numbers (seconds only)
+            }
+        }
+
         if (bestMatch != null) {
             dao.insertPlaylistSong(
                 com.example.music.data.PlaylistSongEntity(
@@ -8416,15 +8519,12 @@ fun SonoraPlayerScreen(
 
                         Spacer(modifier = Modifier.height(10.dp))
 
-                        DynamicAudioVisualizer(
-                            isPlaying = isPlaying,
-                            primaryColor = animatedDominantColor,
-                            secondaryColor = animatedSecondaryColor,
+                        HardwareFftVisualizer(
+                            audioSessionId = mediaController?.audioSessionId ?: 0,
+                            barColor = animatedDominantColor,
                             modifier = Modifier
                                 .fillMaxWidth(0.88f)
-                                .padding(horizontal = 8.dp),
-                            barCount = 30,
-                            visualizerHeight = 36.dp
+                                .padding(horizontal = 8.dp)
                         )
 
                         Spacer(modifier = Modifier.height(10.dp))
