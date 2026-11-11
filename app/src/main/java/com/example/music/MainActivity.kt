@@ -251,6 +251,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.guava.await
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -5439,7 +5440,20 @@ fun SonoraPlayerScreen(
     val downloadedSongs by remember { dao.getAllDownloadedSongs() }.collectAsState(initial = emptyList())
 
     var controller by remember { mutableStateOf<MediaController?>(null) }
+    var audioSessionId by remember { mutableIntStateOf(0) }
              
+    LaunchedEffect(controller, activeSongId) {
+        val c = controller ?: return@LaunchedEffect
+        try {
+            val result = c.sendCustomCommand(
+                SessionCommand("com.example.music.GET_AUDIO_SESSION_ID", Bundle.EMPTY),
+                Bundle.EMPTY
+            ).await()
+            audioSessionId = result.extras.getInt("audioSessionId", 0)
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
             
     var showPlaybackSpeedSheet by remember { mutableStateOf(false) }
     var playbackSpeed by remember { mutableFloatStateOf(prefs.getFloat("playback_speed", 1.0f)) }
@@ -8607,7 +8621,7 @@ fun SonoraPlayerScreen(
                         Spacer(modifier = Modifier.height(10.dp))
 
                         HardwareFftVisualizer(
-                            audioSessionId = controller?.audioSessionId ?: 0,
+                            audioSessionId = audioSessionId,
                             barColor = animatedDominantColor,
                             modifier = Modifier
                                 .fillMaxWidth(0.88f)

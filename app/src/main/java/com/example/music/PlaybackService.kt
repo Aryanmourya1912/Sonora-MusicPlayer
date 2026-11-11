@@ -39,6 +39,7 @@ class PlaybackService : MediaSessionService() {
     private var loudnessEnhancer: LoudnessEnhancer? = null
     private val closeCommand = SessionCommand(ACTION_CLOSE_APP, Bundle.EMPTY)
     private val skipSilenceCommand = SessionCommand(ACTION_SET_SKIP_SILENCE, Bundle.EMPTY)
+    private val audioSessionIdCommand = SessionCommand(ACTION_GET_AUDIO_SESSION_ID, Bundle.EMPTY)
 
     // Call state resumption engine
     private val serviceScope = CoroutineScope(Dispatchers.Main + Job())
@@ -200,6 +201,7 @@ class PlaybackService : MediaSessionService() {
                     .buildUpon()
                     .add(closeCommand)
                     .add(skipSilenceCommand)
+                    .add(audioSessionIdCommand)
                     .build()
 
             return MediaSession.ConnectionResult.AcceptedResultBuilder(session)
@@ -223,6 +225,13 @@ class PlaybackService : MediaSessionService() {
                 (session.player as? ExoPlayer)?.skipSilenceEnabled = enabled
                 Log.d("Sonora", "Skip silence set to $enabled")
                 return Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
+            }
+            if (customCommand.customAction == ACTION_GET_AUDIO_SESSION_ID) {
+                val sessionId = (session.player as? ExoPlayer)?.audioSessionId ?: 0
+                val result = Bundle().apply { putInt("audioSessionId", sessionId) }
+                return Futures.immediateFuture(
+                    SessionResult(SessionResult.RESULT_SUCCESS, result)
+                )
             }
             return super.onCustomCommand(session, controller, customCommand, args)
         }
@@ -473,5 +482,6 @@ class PlaybackService : MediaSessionService() {
         private const val ACTION_STOP_SERVICE = "ACTION_STOP_SERVICE"
         private const val ACTION_CLOSE_APP = "com.example.music.ACTION_CLOSE_APP"
         private const val ACTION_SET_SKIP_SILENCE = "com.example.music.SET_SKIP_SILENCE"
+        private const val ACTION_GET_AUDIO_SESSION_ID = "com.example.music.GET_AUDIO_SESSION_ID"
     }
 }
