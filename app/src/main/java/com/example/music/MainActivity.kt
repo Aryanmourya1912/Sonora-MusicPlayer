@@ -8641,7 +8641,7 @@ fun SonoraPlayerScreen(
                             }
                         }
 
-                        val sessionId = controller?.audioSessionId ?: 0
+                        val sessionId = audioSessionId
 
                         if (hasRecordAudioPermission && sessionId != 0) {
                             HardwareFftVisualizer(
