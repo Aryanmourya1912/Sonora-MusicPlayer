@@ -943,9 +943,7 @@ fun HardwareFftVisualizer(
     val fft by rememberFftVisualizer(audioSessionId)
 
     Canvas(
-        modifier = modifier
-            .fillMaxWidth()
-            .height(120.dp) 
+        modifier = modifier 
     ) {
         if (fft.isEmpty()) return@Canvas
 
@@ -8625,13 +8623,43 @@ fun SonoraPlayerScreen(
 
                         Spacer(modifier = Modifier.height(10.dp))
 
-                        HardwareFftVisualizer(
-                            audioSessionId = audioSessionId,
-                            barColor = animatedDominantColor,
-                            modifier = Modifier
-                                .fillMaxWidth(0.88f)
-                                .padding(horizontal = 8.dp)
+                        val context = androidx.compose.ui.platform.LocalContext.current
+                        var hasRecordAudioPermission by androidx.compose.runtime.remember {
+                            androidx.compose.runtime.mutableStateOf(
+                                androidx.core.content.ContextCompat.checkSelfPermission(context, android.Manifest.permission.RECORD_AUDIO) == android.content.pm.PackageManager.PERMISSION_GRANTED
+                            )
+                        }
+
+                        val permissionLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
+                            contract = androidx.activity.result.contract.ActivityResultContracts.RequestPermission(),
+                            onResult = { isGranted -> hasRecordAudioPermission = isGranted }
                         )
+
+                        androidx.compose.runtime.LaunchedEffect(Unit) {
+                            if (!hasRecordAudioPermission) {
+                                permissionLauncher.launch(android.Manifest.permission.RECORD_AUDIO)
+                            }
+                        }
+
+                        val sessionId = mediaController?.audioSessionId ?: 0
+
+                        if (hasRecordAudioPermission && sessionId != 0) {
+                            HardwareFftVisualizer(
+                                audioSessionId = sessionId,
+                                barColor = animatedDominantColor,
+                                modifier = Modifier
+                                    .fillMaxWidth(0.88f)
+                                    .padding(horizontal = 8.dp)
+                                    .height(36.dp) // Adjusted to match your original UI
+                            )
+                        } else {
+                            androidx.compose.foundation.layout.Spacer(
+                                modifier = Modifier
+                                    .fillMaxWidth(0.88f)
+                                    .padding(horizontal = 8.dp)
+                                    .height(36.dp) // Adjusted to match your original UI
+                            )
+                        }
 
                         Spacer(modifier = Modifier.height(10.dp))
 
