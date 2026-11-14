@@ -5440,18 +5440,31 @@ fun SonoraPlayerScreen(
     val downloadedSongs by remember { dao.getAllDownloadedSongs() }.collectAsState(initial = emptyList())
 
     var controller by remember { mutableStateOf<MediaController?>(null) }
+<<<<<<< HEAD
     var audioSessionId by remember { mutableIntStateOf(0) }
              
     LaunchedEffect(controller) {
+=======
+    var audioSessionId by remember {mutableIntStateOf(0)}
+
+    LaunchedEffect(controller, activeSongId) {
+>>>>>>> 49ce039b6275cffa55a64af852ce1bc1af05dc30
         val c = controller ?: return@LaunchedEffect
+
         try {
             val result = c.sendCustomCommand(
-                SessionCommand("com.example.music.GET_AUDIO_SESSION_ID", Bundle.EMPTY),
+                SessionCommand(
+                    "com.example.music.GET_AUDIO_SESSION_ID",
+                    Bundle.EMPTY
+                ),
                 Bundle.EMPTY
             ).await()
-            audioSessionId = result.extras.getInt("audioSessionId", 0)
+
+            audioSessionId = result.extras
+                .getInt("audioSessionId", 0)
+
         } catch (e: Exception) {
-            e.printStackTrace()
+            Log.e("SonoraAudio", "Failed to get audio session ID", e)
         }
     }
             
