@@ -184,6 +184,8 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.lerp
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
@@ -245,6 +247,7 @@ import java.util.Locale
 import javax.crypto.Cipher
 import javax.crypto.spec.SecretKeySpec
 import kotlin.math.hypot
+import kotlin.math.log10
 import kotlin.math.max
 import kotlin.math.roundToInt
 import kotlinx.coroutines.CoroutineScope
@@ -936,44 +939,95 @@ fun rememberFftVisualizer(audioSessionId: Int): State<ByteArray> {
 
 @Composable
 fun HardwareFftVisualizer(
-    audioSessionId: Int, 
-    barColor: Color, // 1. Add the color parameter here
+    audioSessionId: Int,
+    barColor: Color,
     modifier: Modifier = Modifier
 ) {
     val fft by rememberFftVisualizer(audioSessionId)
+    val barCount = 40
 
-    Canvas(
-        modifier = modifier 
-    ) {
-        if (fft.isEmpty()) return@Canvas
+    // Stores smoothed heights between frames for liquid attack/decay
+    val smoothedMagnitudes = remember { FloatArray(barCount) { 0f } }
 
-        val barCount = 48 
-        val barSpacing = 4f
+    // Determine whether the album art is dark or light so all 3 shades stay high-contrast
+    val isDarkCover = barColor.luminance() < 0.4f
+
+    // Build 3 distinct adaptive shades for Bass, Mids, and Treble
+    val (bassColor, midColor, trebleColor) = remember(barColor, isDarkCover) {
+        if (isDarkCover) {
+            // Dark album cover -> 3 luminous light shades (Rich Tint -> Crisp Pastel -> Bright White-Tint)
+            Triple(
+                lerp(barColor, Color.White, 0.45f), // Bass: deepest visible shade
+                lerp(barColor, Color.White, 0.68f), // Mid: balanced bright shade
+                lerp(barColor, Color.White, 0.88f)  // Treble: brightest highlight shade
+            )
+        } else {
+            // Light album cover -> 3 deep dark shades (Deep Charcoal -> Rich Dark Tint -> Medium-Dark Shade)
+            val deepInk = Color(0xFF090D16)
+            Triple(
+                lerp(barColor, deepInk, 0.85f),     // Bass: darkest, heaviest anchor shade
+                lerp(barColor, deepInk, 0.65f),     // Mid: rich dark shade
+                lerp(barColor, deepInk, 0.45f)      // Treble: lighter dark shade
+            )
+        }
+    }
+
+    Canvas(modifier = modifier) {
+        val barSpacing = 5f
         val totalSpacing = barSpacing * (barCount - 1)
-        val barWidth = (size.width - totalSpacing) / barCount
+        val barWidth = ((size.width - totalSpacing) / barCount).coerceAtLeast(2f)
 
         for (i in 0 until barCount) {
-            val byteIndex = (i * 2) + 2
-            
-            if (byteIndex < fft.size - 1) {
-                val real = fft[byteIndex].toFloat()
-                val imaginary = fft[byteIndex + 1].toFloat()
-                
-                val magnitude = hypot(real, imaginary)
-                
-                val rawHeight = magnitude * 3f
-                val barHeight = rawHeight.coerceIn(4f, size.height) 
-                
-                val x = i * (barWidth + barSpacing)
-                val y = size.height - barHeight
+            var targetNormalized = 0f
 
-                drawRoundRect(
-                    color = barColor, // 2. Apply the dynamic color to the bars
-                    topLeft = Offset(x, y),
-                    size = Size(barWidth, barHeight),
-                    cornerRadius = CornerRadius(10f, 10f)
-                )
+            if (fft.isNotEmpty()) {
+                val byteIndex = (i * 2) + 2
+                if (byteIndex < fft.size - 1) {
+                    val real = fft[byteIndex].toFloat()
+                    val imaginary = fft[byteIndex + 1].toFloat()
+                    val magnitude = hypot(real, imaginary)
+
+                    val db = if (magnitude > 1f) 20f * log10(magnitude) else 0f
+                    targetNormalized = (db / 42f).coerceIn(0f, 1f)
+                }
             }
+
+            // Asymmetric smoothing: snappy rise (0.45f), smooth fall (0.16f)
+            val current = smoothedMagnitudes[i]
+            val smoothingFactor = if (targetNormalized > current) 0.45f else 0.16f
+            val nextHeightRatio = current + (targetNormalized - current) * smoothingFactor
+            smoothedMagnitudes[i] = nextHeightRatio
+
+            val minHeight = 5f
+            val barHeight = (nextHeightRatio * size.height).coerceIn(minHeight, size.height)
+
+            // Smoothly transition color shade across Bass (0..30%), Mid (30..70%), and Treble (70..100%)
+            val positionRatio = i.toFloat() / (barCount - 1).coerceAtLeast(1)
+            val regionColor = when {
+                positionRatio < 0.35f -> {
+                    val t = positionRatio / 0.35f
+                    lerp(bassColor, midColor, t)
+                }
+                positionRatio < 0.70f -> {
+                    val t = (positionRatio - 0.35f) / 0.35f
+                    lerp(midColor, trebleColor, t)
+                }
+                else -> trebleColor
+            }
+
+            val barBrush = Brush.verticalGradient(
+                colors = listOf(regionColor, regionColor.copy(alpha = 0.65f))
+            )
+
+            val x = i * (barWidth + barSpacing)
+            val y = (size.height - barHeight) / 2f
+
+            drawRoundRect(
+                brush = barBrush,
+                topLeft = Offset(x, y),
+                size = Size(barWidth, barHeight),
+                cornerRadius = CornerRadius(barWidth / 2f, barWidth / 2f)
+            )
         }
     }
 }
@@ -8650,14 +8704,14 @@ fun SonoraPlayerScreen(
                                 modifier = Modifier
                                     .fillMaxWidth(0.88f)
                                     .padding(horizontal = 8.dp)
-                                    .height(36.dp) // Adjusted to match your original UI
+                                    .height(42.dp) // Adjusted to match your original UI
                             )
                         } else {
                             androidx.compose.foundation.layout.Spacer(
                                 modifier = Modifier
                                     .fillMaxWidth(0.88f)
                                     .padding(horizontal = 8.dp)
-                                    .height(36.dp) // Adjusted to match your original UI
+                                    .height(42.dp) // Adjusted to match your original UI
                             )
                         }
 
