@@ -5447,7 +5447,7 @@ fun SonoraPlayerScreen(
 =======
     var audioSessionId by remember {mutableIntStateOf(0)}
 
-    LaunchedEffect(controller, activeSongId) {
+    LaunchedEffect(controller) {
 >>>>>>> 49ce039b6275cffa55a64af852ce1bc1af05dc30
         val c = controller ?: return@LaunchedEffect
 
