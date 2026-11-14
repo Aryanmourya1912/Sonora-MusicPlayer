@@ -5442,7 +5442,7 @@ fun SonoraPlayerScreen(
     var controller by remember { mutableStateOf<MediaController?>(null) }
     var audioSessionId by remember { mutableIntStateOf(0) }
              
-    LaunchedEffect(controller, activeSongId) {
+    LaunchedEffect(controller) {
         val c = controller ?: return@LaunchedEffect
         try {
             val result = c.sendCustomCommand(
